@@ -994,9 +994,14 @@ private:
 
     // handle torch mode status change and invoke callbacks. mTorchStatusMutex
     // should be locked.
+#ifndef CAMERA_SKIP_KIND_CHECK
     void onTorchStatusChangedLocked(const String8& cameraId,
             hardware::camera::common::V1_0::TorchModeStatus newStatus,
             SystemCameraKind systemCameraKind);
+#else
+    void onTorchStatusChangedLocked(const String8& cameraId,
+            hardware::camera::common::V1_0::TorchModeStatus newStatus);
+#endif
 
     // get a camera's torch status. mTorchStatusMutex should be locked.
     status_t getTorchStatusLocked(const String8 &cameraId,
@@ -1084,9 +1089,14 @@ private:
     static sp<hardware::ICameraServiceProxy> getCameraServiceProxy();
     static void pingCameraServiceProxy();
 
+#ifdef CAMERA_SKIP_KIND_CHECK
+    void broadcastTorchModeStatus(const String8& cameraId,
+            hardware::camera::common::V1_0::TorchModeStatus status);
+#else
     void broadcastTorchModeStatus(const String8& cameraId,
             hardware::camera::common::V1_0::TorchModeStatus status,
             SystemCameraKind systemCameraKind);
+#endif
 
     void disconnectClient(const String8& id, sp<BasicClient> clientToDisconnect);
 

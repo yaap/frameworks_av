@@ -259,6 +259,15 @@ void CameraService::pingCameraServiceProxy() {
     proxyBinder->pingForUserUpdate();
 }
 
+#ifdef CAMERA_SKIP_KIND_CHECK
+void CameraService::broadcastTorchModeStatus(const String8& cameraId, TorchModeStatus status) {
+    Mutex::Autolock lock(mStatusListenerLock);
+
+    for (auto& i : mListenerList) {
+        i->getListener()->onTorchStatusChanged(mapToInterface(status), String16{cameraId});
+    }
+}
+#else
 void CameraService::broadcastTorchModeStatus(const String8& cameraId, TorchModeStatus status,
         SystemCameraKind systemCameraKind) {
     Mutex::Autolock lock(mStatusListenerLock);
@@ -272,6 +281,7 @@ void CameraService::broadcastTorchModeStatus(const String8& cameraId, TorchModeS
         i->getListener()->onTorchStatusChanged(mapToInterface(status), String16{cameraId});
     }
 }
+#endif
 
 CameraService::~CameraService() {
     VendorTagDescriptor::clearGlobalVendorTagDescriptor();
@@ -523,9 +533,66 @@ void CameraService::onTorchStatusChanged(const String8& cameraId,
         return;
     }
     Mutex::Autolock al(mTorchStatusMutex);
+#ifdef CAMERA_SKIP_KIND_CHECK
+    onTorchStatusChangedLocked(cameraId, newStatus);
+#else
     onTorchStatusChangedLocked(cameraId, newStatus, systemCameraKind);
+#endif
 }
+#ifdef CAMERA_SKIP_KIND_CHECK
+void CameraService::onTorchStatusChangedLocked(const String8& cameraId,
+        TorchModeStatus newStatus) {
+    ALOGI("%s: Torch status changed for cameraId=%s, newStatus=%d",
+            __FUNCTION__, cameraId.string(), newStatus);
 
+    TorchModeStatus status;
+    status_t res = getTorchStatusLocked(cameraId, &status);
+    if (res) {
+        ALOGE("%s: cannot get torch status of camera %s: %s (%d)",
+                __FUNCTION__, cameraId.string(), strerror(-res), res);
+        return;
+    }
+    if (status == newStatus) {
+        return;
+    }
+
+    res = setTorchStatusLocked(cameraId, newStatus);
+    if (res) {
+        ALOGE("%s: Failed to set the torch status to %d: %s (%d)", __FUNCTION__,
+                (uint32_t)newStatus, strerror(-res), res);
+        return;
+    }
+
+    {
+        // Update battery life logging for flashlight
+        Mutex::Autolock al(mTorchUidMapMutex);
+        auto iter = mTorchUidMap.find(cameraId);
+        if (iter != mTorchUidMap.end()) {
+            int oldUid = iter->second.second;
+            int newUid = iter->second.first;
+            BatteryNotifier& notifier(BatteryNotifier::getInstance());
+            if (oldUid != newUid) {
+                // If the UID has changed, log the status and update current UID in mTorchUidMap
+                if (status == TorchModeStatus::AVAILABLE_ON) {
+                    notifier.noteFlashlightOff(cameraId, oldUid);
+                }
+                if (newStatus == TorchModeStatus::AVAILABLE_ON) {
+                    notifier.noteFlashlightOn(cameraId, newUid);
+                }
+                iter->second.second = newUid;
+            } else {
+                // If the UID has not changed, log the status
+                if (newStatus == TorchModeStatus::AVAILABLE_ON) {
+                    notifier.noteFlashlightOn(cameraId, oldUid);
+                } else {
+                    notifier.noteFlashlightOff(cameraId, oldUid);
+                }
+            }
+        }
+    }
+    broadcastTorchModeStatus(cameraId, newStatus);
+}
+#else
 void CameraService::onTorchStatusChangedLocked(const String8& cameraId,
         TorchModeStatus newStatus, SystemCameraKind systemCameraKind) {
     ALOGI("%s: Torch status changed for cameraId=%s, newStatus=%d",
@@ -578,7 +645,7 @@ void CameraService::onTorchStatusChangedLocked(const String8& cameraId,
     }
     broadcastTorchModeStatus(cameraId, newStatus, systemCameraKind);
 }
-
+#endif
 static bool hasPermissionsForSystemCamera(int callingPid, int callingUid) {
     return checkPermission(sSystemCameraPermission, callingPid, callingUid) &&
             checkPermission(sCameraPermission, callingPid, callingUid);
@@ -1888,10 +1955,12 @@ Status CameraService::setTorchMode(const String16& cameraId, bool enabled,
     String8 id = String8(cameraId.string());
     int uid = CameraThreadState::getCallingUid();
 
+#ifndef CAMERA_SKIP_KIND_CHECK
     if (shouldRejectSystemCameraConnection(id)) {
         return STATUS_ERROR_FMT(ERROR_ILLEGAL_ARGUMENT, "Unable to set torch mode"
                 " for system only device %s: ", id.string());
     }
+#endif
     // verify id is valid.
     auto state = getCameraState(id);
     if (state == nullptr) {
@@ -2248,11 +2317,13 @@ Status CameraService::addListenerHelper(const sp<ICameraServiceListener>& listen
                     return shouldSkipStatusUpdates(deviceKind, isVendorListener, clientPid,
                             clientUid);}), cameraStatuses->end());
 
+#ifndef CAMERA_SKIP_KIND_CHECK
     //cameraStatuses will have non-eligible camera ids removed.
     std::set<String16> idsChosenForCallback;
     for (const auto &s : *cameraStatuses) {
         idsChosenForCallback.insert(String16(s.cameraId));
     }
+#endif
 
     /*
      * Immediately signal current torch status to this listener only
@@ -2262,11 +2333,15 @@ Status CameraService::addListenerHelper(const sp<ICameraServiceListener>& listen
         Mutex::Autolock al(mTorchStatusMutex);
         for (size_t i = 0; i < mTorchStatusMap.size(); i++ ) {
             String16 id = String16(mTorchStatusMap.keyAt(i).string());
+#ifdef CAMERA_SKIP_KIND_CHECK
             // The camera id is visible to the client. Fine to send torch
             // callback.
             if (idsChosenForCallback.find(id) != idsChosenForCallback.end()) {
                 listener->onTorchStatusChanged(mapToInterface(mTorchStatusMap.valueAt(i)), id);
             }
+#else
+            listener->onTorchStatusChanged(mapToInterface(mTorchStatusMap.valueAt(i)), id);
+#endif
         }
     }
 
@@ -3820,7 +3895,11 @@ void CameraService::updateStatus(StatusInternal status, const String8& cameraId,
                             TorchModeStatus::AVAILABLE_OFF :
                             TorchModeStatus::NOT_AVAILABLE;
                     if (torchStatus != newTorchStatus) {
+#ifdef CAMERA_SKIP_KIND_CHECK
+                        onTorchStatusChangedLocked(cameraId, newTorchStatus);
+#else
                         onTorchStatusChangedLocked(cameraId, newTorchStatus, deviceKind);
+#endif
                     }
                 }
             }
