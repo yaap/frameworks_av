@@ -5404,7 +5404,8 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                                                  presentation.nHeavyCompression);
                                 notify->setInt32("aac-target-ref-level",
                                                  presentation.nTargetReferenceLevel);
-                                notify->setInt32("aac-drc-effect-type", presentation.nDrcEffectType);
+                                notify->setInt32("aac-drc-effect-type",
+                                                 presentation.nDrcEffectType);
                                 notify->setInt32("aac-drc-album-mode", presentation.nDrcAlbumMode);
                                 notify->setInt32("aac-drc-output-loudness",
                                                  presentation.nDrcOutputLoudness);

@@ -386,6 +386,12 @@ binder::Status CameraDeviceClient::submitRequestList(
             }
 
             String8 physicalId(it.id.c_str());
+            bool hasTestPatternModePhysicalKey = std::find(mSupportedPhysicalRequestKeys.begin(),
+                    mSupportedPhysicalRequestKeys.end(), ANDROID_SENSOR_TEST_PATTERN_MODE) !=
+                    mSupportedPhysicalRequestKeys.end();
+            bool hasTestPatternDataPhysicalKey = std::find(mSupportedPhysicalRequestKeys.begin(),
+                    mSupportedPhysicalRequestKeys.end(), ANDROID_SENSOR_TEST_PATTERN_DATA) !=
+                    mSupportedPhysicalRequestKeys.end();
             if (physicalId != mDevice->getId()) {
                 auto found = std::find(requestedPhysicalIds.begin(), requestedPhysicalIds.end(),
                         it.id);
@@ -411,7 +417,8 @@ binder::Status CameraDeviceClient::submitRequestList(
                         }
                     }
 
-                    physicalSettingsList.push_back({it.id, filteredParams});
+                    physicalSettingsList.push_back({it.id, filteredParams,
+                            hasTestPatternModePhysicalKey, hasTestPatternDataPhysicalKey});
                 }
             } else {
                 physicalSettingsList.push_back({it.id, it.settings});
