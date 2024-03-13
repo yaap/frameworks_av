@@ -276,8 +276,6 @@ private:
                                     // sending disable command.
     uint32_t mDisableWaitCnt;       // current process() calls count during disable period.
     bool     mOffloaded;            // effect is currently offloaded to the audio DSP
-    // effect has been added to this HAL input stream
-    audio_io_handle_t mCurrentHalStream = AUDIO_IO_HANDLE_NONE;
     bool     mIsOutput;             // direction of the AF thread
 
     bool    mSupportsFloat;         // effect supports float processing
@@ -572,6 +570,7 @@ public:
         status_t allocateHalBuffer(size_t size, sp<EffectBufferHalInterface>* buffer) override;
         bool updateOrphanEffectChains(const sp<IAfEffectBase>& effect) override;
 
+        bool dispatchAddRemoveToHal(bool isAdded) const override;
         audio_io_handle_t io() const override;
         bool isOutput() const override;
         bool isOffload() const override;
@@ -622,6 +621,8 @@ public:
         mediautils::atomic_wp<IAfThreadBase> mThread;
         sp<IAfThreadCallback> mAfThreadCallback;
         IAfThreadBase::type_t mThreadType;
+        // effect has been added to this HAL input stream
+        audio_io_handle_t mCurrentHalStream = AUDIO_IO_HANDLE_NONE;
     };
 
     DISALLOW_COPY_AND_ASSIGN(EffectChain);
@@ -754,6 +755,7 @@ private:
         }
 
         audio_io_handle_t io() const override { return AUDIO_IO_HANDLE_NONE; }
+        bool dispatchAddRemoveToHal(bool isAdded) const override { return isAdded != mAddedToHal; }
         bool isOutput() const override;
         bool isOffload() const override { return false; }
         bool isOffloadOrDirect() const override { return false; }
@@ -794,6 +796,7 @@ private:
     private:
         const wp<DeviceEffectProxy> mProxy;
         const sp<DeviceEffectManagerCallback> mManagerCallback;
+        bool mAddedToHal = false;
     };
 
     status_t checkPort(const IAfPatchPanel::Patch& patch,

@@ -46,6 +46,7 @@ class EffectCallbackInterface : public RefBase {
 public:
     // Trivial methods usually implemented with help from ThreadBase
     virtual audio_io_handle_t io() const = 0;
+    virtual bool dispatchAddRemoveToHal(bool isAdded) const = 0;
     virtual bool isOutput() const = 0;
     virtual bool isOffload() const = 0;
     virtual bool isOffloadOrDirect() const = 0;

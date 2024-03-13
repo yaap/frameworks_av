@@ -108,6 +108,7 @@ public:
     }
 
     audio_io_handle_t io() const final { return AUDIO_IO_HANDLE_NONE; }
+    bool dispatchAddRemoveToHal(bool isAdded __unused) const final { return true; }
     bool isOutput() const final { return false; }
     bool isOffload() const final { return false; }
     bool isOffloadOrDirect() const final { return false; }
