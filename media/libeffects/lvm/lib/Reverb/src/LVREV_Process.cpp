@@ -195,7 +195,7 @@ void ReverbBlock(LVM_FLOAT* pInput, LVM_FLOAT* pOutput, LVREV_Instance_st* pPriv
          *  Stereo to mono conversion
          */
 
-        From2iToMono_Float(pInput, pTemp, (LVM_INT16)NumSamples);
+        From2iToMono_Float(pInput, pTemp, NumSamples);
         pIn = pTemp;
     }
 
