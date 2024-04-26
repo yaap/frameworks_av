@@ -1707,7 +1707,7 @@ status_t AudioTrack::setOutputDevice(audio_port_handle_t deviceId) {
         mSelectedDeviceId = deviceId;
         if (mStatus == NO_ERROR) {
             if (isOffloadedOrDirect_l()) {
-                if (mState == STATE_STOPPED || mState == STATE_FLUSHED) {
+                if (!isPlaying_l()) {
                     ALOGD("%s(%d): creating a new AudioTrack", __func__, mPortId);
                     result = restoreTrack_l("setOutputDevice", true /* forceRestore */);
                 } else {
