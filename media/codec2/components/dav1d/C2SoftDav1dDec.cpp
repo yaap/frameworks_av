@@ -549,7 +549,7 @@ bool C2SoftDav1dDec::initDecoder() {
             android::base::GetIntProperty(NUM_THREADS_DAV1D_PROPERTY, NUM_THREADS_DAV1D_DEFAULT);
     if (numThreads > 0) lib_settings.n_threads = numThreads;
 
-    lib_settings.max_frame_delay = mActualOutputDelayInfo->value;
+    lib_settings.max_frame_delay = kOutputDelay;
 
     int res = 0;
     if ((res = dav1d_open(&mDav1dCtx, &lib_settings))) {
