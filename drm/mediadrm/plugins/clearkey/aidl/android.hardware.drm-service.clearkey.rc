@@ -3,5 +3,5 @@ service vendor.drm-clearkey-service /vendor/bin/hw/android.hardware.drm-service.
     user media
     group mediadrm drmrpc
     ioprio rt 4
-    task_profiles ProcessCapacityHigh
+    task_profiles AudioAppCapacity
     interface aidl android.hardware.drm.IDrmFactory/clearkey

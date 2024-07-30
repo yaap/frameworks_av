@@ -3,4 +3,4 @@ service media /system/bin/mediaserver32
     user media
     group audio camera inet net_bt net_bt_admin net_bw_acct drmrpc mediadrm
     ioprio rt 4
-    task_profiles ProcessCapacityHigh HighPerformance
+    task_profiles AudioAppCapacity

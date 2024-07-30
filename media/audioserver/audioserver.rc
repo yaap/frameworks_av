@@ -7,7 +7,7 @@ service audioserver /system/bin/audioserver
     # match rtprio cur / max with sensor service as we handle AR/VR HID sensor data.
     rlimit rtprio 10 10
     ioprio rt 4
-    task_profiles ProcessCapacityHigh HighPerformance
+    task_profiles AudioAppCapacity
     onrestart restart vendor.audio-hal
     onrestart restart vendor.audio-hal-aidl
     onrestart restart vendor.audio-effect-hal-aidl

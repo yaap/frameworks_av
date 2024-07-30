@@ -3,4 +3,4 @@ service drm /system/bin/drmserver64
     class main
     user drm
     group drm system inet drmrpc readproc
-    task_profiles ProcessCapacityHigh
+    task_profiles AudioAppCapacity
