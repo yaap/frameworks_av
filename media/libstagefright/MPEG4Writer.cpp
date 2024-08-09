@@ -3776,6 +3776,12 @@ status_t MPEG4Writer::Track::threadEntry() {
             if (mStszTableEntries->count() == 0) {
                 mFirstSampleTimeRealUs = systemTime() / 1000;
                 if (timestampUs < 0 && mFirstSampleStartOffsetUs == 0) {
+                    if (WARN_UNLESS(timestampUs != INT64_MIN, "for %s track", trackName)) {
+                        copy->release();
+                        mSource->stop();
+                        mIsMalformed = true;
+                        break;
+                    }
                     mFirstSampleStartOffsetUs = -timestampUs;
                     timestampUs = 0;
                 }
