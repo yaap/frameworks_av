@@ -7006,28 +7006,35 @@ void AudioPolicyManager::checkOutputForAttributes(const audio_attributes_t &attr
     std::vector<sp<SwAudioOutputDescriptor>> invalidatedOutputs;
     // take into account dynamic audio policies related changes: if a client is now associated
     // to a different policy mix than at creation time, invalidate corresponding stream
+    // invalidate clients on outputs that do not support all the newly selected devices for the
+    // strategy
     for (size_t i = 0; i < mPreviousOutputs.size(); i++) {
         const sp<SwAudioOutputDescriptor>& desc = mPreviousOutputs.valueAt(i);
-        if (desc->isDuplicated()) {
+        if (desc->isDuplicated() || desc->getClientCount() == 0) {
             continue;
         }
+
         for (const sp<TrackClientDescriptor>& client : desc->getClientIterable()) {
             if (mEngine->getProductStrategyForAttributes(client->attributes()) != psId) {
                 continue;
+            }
+            if (!desc->supportsAllDevices(newDevices)) {
+                invalidatedOutputs.push_back(desc);
+                break;
             }
             sp<AudioPolicyMix> primaryMix;
             status_t status = mPolicyMixes.getOutputForAttr(client->attributes(), client->config(),
                     client->uid(), client->session(), client->flags(), mAvailableOutputDevices,
                     nullptr /* requestedDevice */, primaryMix, nullptr /* secondaryMixes */,
                     unneededUsePrimaryOutputFromPolicyMixes);
-            if (status != OK) {
-                continue;
-            }
-            if (client->getPrimaryMix() != primaryMix || client->hasLostPrimaryMix()) {
-                if (desc->isStrategyActive(psId) && maxLatency < desc->latency()) {
-                    maxLatency = desc->latency();
+            if (status == OK) {
+                if (client->getPrimaryMix() != primaryMix || client->hasLostPrimaryMix()) {
+                    if (desc->isStrategyActive(psId) && maxLatency < desc->latency()) {
+                        maxLatency = desc->latency();
+                    }
+                    invalidatedOutputs.push_back(desc);
+                    break;
                 }
-                invalidatedOutputs.push_back(desc);
             }
         }
     }
