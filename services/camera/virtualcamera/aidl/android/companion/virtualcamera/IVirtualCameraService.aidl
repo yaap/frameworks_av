@@ -28,7 +28,8 @@ interface IVirtualCameraService {
      * Registers a new camera with the virtual camera hal.
      * @return true if the camera was successfully registered
      */
-    boolean registerCamera(in IBinder token, in VirtualCameraConfiguration configuration);
+    boolean registerCamera(in IBinder token, in VirtualCameraConfiguration configuration,
+            int deviceId);
 
     /**
      * Unregisters the camera from the virtual camera hal. After this call the virtual camera won't
@@ -40,5 +41,5 @@ interface IVirtualCameraService {
      * Returns the camera id for a given binder token. Note that this id corresponds to the id of
      * the camera device in the camera framework.
      */
-    int getCameraId(in IBinder token);
+    @utf8InCpp String getCameraId(in IBinder token);
 }

@@ -25,6 +25,8 @@
 #include <private/media/AudioEffectShared.h>
 
 #include <map>  // avoid transitive dependency
+#include <optional>
+#include <vector>
 
 namespace android {
 
@@ -215,7 +217,8 @@ public:
     }
     status_t setDevices(const AudioDeviceTypeAddrVector& devices) final EXCLUDES_EffectBase_Mutex;
     status_t setInputDevice(const AudioDeviceTypeAddr& device) final EXCLUDES_EffectBase_Mutex;
-    status_t setVolume(uint32_t *left, uint32_t *right, bool controller) final;
+    status_t setVolume_l(uint32_t* left, uint32_t* right, bool controller, bool force) final
+            REQUIRES(audio_utils::EffectChain_Mutex);
     status_t setMode(audio_mode_t mode) final EXCLUDES_EffectBase_Mutex;
     status_t setAudioSource(audio_source_t source) final EXCLUDES_EffectBase_Mutex;
     status_t start_l() final REQUIRES(audio_utils::EffectChain_Mutex) EXCLUDES_EffectBase_Mutex;
@@ -226,7 +229,7 @@ public:
     bool isOffloaded_l() const final
             REQUIRES(audio_utils::EffectChain_Mutex) EXCLUDES_EffectBase_Mutex;
     void addEffectToHal_l() final REQUIRES(audio_utils::EffectChain_Mutex);
-    void release_l() final REQUIRES(audio_utils::EffectChain_Mutex);
+    void release_l(const std::string& from = "") final REQUIRES(audio_utils::EffectChain_Mutex);
 
     sp<IAfEffectModule> asEffectModule() final { return this; }
 
@@ -234,9 +237,9 @@ public:
     bool isSpatializer() const final;
 
     status_t setHapticScale_l(int id, os::HapticScale hapticScale) final
-            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectBase_Mutex;
+            REQUIRES(audio_utils::EffectChain_Mutex) EXCLUDES_EffectBase_Mutex;
     status_t setVibratorInfo_l(const media::AudioVibratorInfo& vibratorInfo) final
-            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectBase_Mutex;
+            REQUIRES(audio_utils::EffectChain_Mutex) EXCLUDES_EffectBase_Mutex;
     status_t sendMetadata_ll(const std::vector<playback_track_metadata_v7_t>& metadata) final
             REQUIRES(audio_utils::ThreadBase_Mutex,
                      audio_utils::EffectChain_Mutex) EXCLUDES_EffectBase_Mutex;
@@ -263,8 +266,8 @@ private:
                 ? EFFECT_BUFFER_ACCESS_WRITE : EFFECT_BUFFER_ACCESS_ACCUMULATE;
     }
 
-    status_t setVolumeInternal(uint32_t *left, uint32_t *right, bool controller);
-
+    status_t setVolumeInternal(uint32_t* left, uint32_t* right,
+                               bool controller /* the volume controller effect of the chain */);
 
     effect_config_t     mConfig;    // input and output audio configuration
     sp<EffectHalInterface> mEffectInterface; // Effect module HAL
@@ -304,6 +307,14 @@ private:
     static constexpr pid_t INVALID_PID = (pid_t)-1;
     // this tid is allowed to call setVolume() without acquiring the mutex.
     pid_t mSetVolumeReentrantTid = INVALID_PID;
+
+    // Cache the volume that has been set successfully.
+    std::optional<std::vector<uint32_t>> mVolume;
+    // Cache the volume that returned from the effect when setting volume successfully. The value
+    // here is used to indicate the volume to apply before this effect.
+    std::optional<std::vector<uint32_t>> mReturnedVolume;
+    // TODO: b/315995877, remove this debugging string after root cause
+    std::string mEffectInterfaceDebug;
 };
 
 // The EffectHandle class implements the IEffect interface. It provides resources
@@ -412,7 +423,9 @@ private:
 // it also provide it's own input buffer used by the track as accumulation buffer.
 class EffectChain : public IAfEffectChain {
 public:
-    EffectChain(const sp<IAfThreadBase>& thread, audio_session_t sessionId);
+    EffectChain(const sp<IAfThreadBase>& thread,
+                audio_session_t sessionId,
+                const sp<IAfThreadCallback>& afThreadCallback);
 
     void process_l() final REQUIRES(audio_utils::EffectChain_Mutex);
 
@@ -420,25 +433,25 @@ public:
         return mMutex;
     }
 
-    status_t createEffect_l(sp<IAfEffectModule>& effect, effect_descriptor_t* desc, int id,
+    status_t createEffect(sp<IAfEffectModule>& effect, effect_descriptor_t* desc, int id,
                             audio_session_t sessionId, bool pinned) final
-            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
+            EXCLUDES_EffectChain_Mutex;
+    status_t addEffect(const sp<IAfEffectModule>& handle) final
+            EXCLUDES_EffectChain_Mutex;
     status_t addEffect_l(const sp<IAfEffectModule>& handle) final
-            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
-    status_t addEffect_ll(const sp<IAfEffectModule>& handle) final
-            REQUIRES(audio_utils::ThreadBase_Mutex, audio_utils::EffectChain_Mutex);
-    size_t removeEffect_l(const sp<IAfEffectModule>& handle, bool release = false) final
-            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
+            REQUIRES(audio_utils::EffectChain_Mutex);
+    size_t removeEffect(const sp<IAfEffectModule>& handle, bool release = false) final
+            EXCLUDES_EffectChain_Mutex;
 
     audio_session_t sessionId() const final { return mSessionId; }
     void setSessionId(audio_session_t sessionId) final { mSessionId = sessionId; }
 
-    sp<IAfEffectModule> getEffectFromDesc_l(effect_descriptor_t* descriptor) const final
-            REQUIRES(audio_utils::ThreadBase_Mutex);
+    sp<IAfEffectModule> getEffectFromDesc(effect_descriptor_t* descriptor) const final
+            EXCLUDES_EffectChain_Mutex;
     sp<IAfEffectModule> getEffectFromId_l(int id) const final
-            REQUIRES(audio_utils::ThreadBase_Mutex);
+            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
     sp<IAfEffectModule> getEffectFromType_l(const effect_uuid_t* type) const final
-            REQUIRES(audio_utils::ThreadBase_Mutex);
+            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
     std::vector<int> getEffectIds_l() const final REQUIRES(audio_utils::ThreadBase_Mutex);
     // FIXME use float to improve the dynamic range
 
@@ -446,11 +459,13 @@ public:
                    bool force = false) final EXCLUDES_EffectChain_Mutex;
     void resetVolume_l() final REQUIRES(audio_utils::EffectChain_Mutex);
     void setDevices_l(const AudioDeviceTypeAddrVector& devices) final
-            REQUIRES(audio_utils::ThreadBase_Mutex);
+            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
     void setInputDevice_l(const AudioDeviceTypeAddr& device) final
-            REQUIRES(audio_utils::ThreadBase_Mutex);
-    void setMode_l(audio_mode_t mode) final REQUIRES(audio_utils::ThreadBase_Mutex);
-    void setAudioSource_l(audio_source_t source) final REQUIRES(audio_utils::ThreadBase_Mutex);
+            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
+    void setMode_l(audio_mode_t mode) final
+            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
+    void setAudioSource_l(audio_source_t source) final
+            REQUIRES(audio_utils::ThreadBase_Mutex)  EXCLUDES_EffectChain_Mutex;
 
     void setInBuffer(const sp<EffectBufferHalInterface>& buffer) final {
         mInBuffer = buffer;
@@ -517,8 +532,11 @@ public:
     bool isCompatibleWithThread_l(const sp<IAfThreadBase>& thread) const final
             REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
 
-    // Requires either IAfThreadBase::mutex() or EffectChain::mutex() held
-    bool containsHapticGeneratingEffect_l() final;
+    bool containsHapticGeneratingEffect() final
+            EXCLUDES_EffectChain_Mutex;
+
+    bool containsHapticGeneratingEffect_l() final
+            REQUIRES(audio_utils::EffectChain_Mutex);
 
     void setHapticScale_l(int id, os::HapticScale hapticScale) final
             REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
@@ -527,15 +545,19 @@ public:
 
     wp<IAfThreadBase> thread() const final { return mEffectCallback->thread(); }
 
-    bool isFirstEffect(int id) const final {
+    bool isFirstEffect_l(int id) const final REQUIRES(audio_utils::EffectChain_Mutex) {
         return !mEffects.isEmpty() && id == mEffects[0]->id();
     }
 
     void dump(int fd, const Vector<String16>& args) const final;
 
-    size_t numberOfEffects() const final { return mEffects.size(); }
+    size_t numberOfEffects() const final {
+      audio_utils::lock_guard _l(mutex());
+      return mEffects.size();
+    }
 
     sp<IAfEffectModule> getEffectModule(size_t index) const final {
+        audio_utils::lock_guard _l(mutex());
         return mEffects[index];
     }
 
@@ -560,11 +582,13 @@ public:
         // Note: ctors taking a weak pointer to their owner must not promote it
         // during construction (but may keep a reference for later promotion).
         EffectCallback(const wp<EffectChain>& owner,
-                const sp<IAfThreadBase>& thread)  // we take a sp<> but store a wp<>.
+                const sp<IAfThreadBase>& thread,
+                const sp<IAfThreadCallback>& afThreadCallback)  // we take a sp<> but store a wp<>.
             : mChain(owner)
-            , mThread(thread) {
-            mThreadType = thread->type();
-            mAfThreadCallback = thread->afThreadCallback();
+            , mThread(thread), mAfThreadCallback(afThreadCallback) {
+            if (thread != nullptr) {
+                mThreadType = thread->type();
+            }
         }
 
         status_t createEffectHal(const effect_uuid_t *pEffectUuid,
@@ -606,6 +630,9 @@ public:
         wp<IAfEffectChain> chain() const final { return mChain; }
 
         bool isAudioPolicyReady() const final {
+            if (mAfThreadCallback == nullptr) {
+                return false;
+            }
             return mAfThreadCallback->isAudioPolicyReady();
         }
 
@@ -613,15 +640,19 @@ public:
 
         void setThread(const sp<IAfThreadBase>& thread) {
             mThread = thread;
-            mThreadType = thread->type();
-            mAfThreadCallback = thread->afThreadCallback();
+            if (thread != nullptr) {
+                mThreadType = thread->type();
+                mAfThreadCallback = thread->afThreadCallback();
+            }
         }
-
+        bool hasThreadAttached() const {
+            return thread().promote() != nullptr;
+        }
     private:
         const wp<IAfEffectChain> mChain;
         mediautils::atomic_wp<IAfThreadBase> mThread;
         sp<IAfThreadCallback> mAfThreadCallback;
-        IAfThreadBase::type_t mThreadType;
+        IAfThreadBase::type_t mThreadType = IAfThreadBase::MIXER;
     };
 
     DISALLOW_COPY_AND_ASSIGN(EffectChain);
@@ -637,8 +668,8 @@ public:
 
     // get a list of effect modules to suspend when an effect of the type
     // passed is enabled.
-    void getSuspendEligibleEffects_l(Vector<sp<IAfEffectModule>>& effects)
-            REQUIRES(audio_utils::ThreadBase_Mutex);
+    void getSuspendEligibleEffects(Vector<sp<IAfEffectModule>>& effects)
+            EXCLUDES_EffectChain_Mutex;
 
     // get an effect module if it is currently enable
     sp<IAfEffectModule> getEffectIfEnabled_l(const effect_uuid_t* type)
@@ -646,8 +677,7 @@ public:
     // true if the effect whose descriptor is passed can be suspended
     // OEMs can modify the rules implemented in this method to exclude specific effect
     // types or implementations from the suspend/restore mechanism.
-    bool isEffectEligibleForSuspend_l(const effect_descriptor_t& desc)
-            REQUIRES(audio_utils::ThreadBase_Mutex);
+    bool isEffectEligibleForSuspend(const effect_descriptor_t& desc);
 
     static bool isEffectEligibleForBtNrecSuspend_l(const effect_uuid_t* type)
             REQUIRES(audio_utils::ThreadBase_Mutex);
@@ -660,15 +690,15 @@ public:
     void setVolumeForOutput_l(uint32_t left, uint32_t right)
             REQUIRES(audio_utils::EffectChain_Mutex);
 
-    ssize_t getInsertIndex_ll(const effect_descriptor_t& desc)
-            REQUIRES(audio_utils::ThreadBase_Mutex, audio_utils::EffectChain_Mutex);
+    ssize_t getInsertIndex_l(const effect_descriptor_t& desc)
+            REQUIRES(audio_utils::EffectChain_Mutex);
 
     std::optional<size_t> findVolumeControl_l(size_t from, size_t to) const
             REQUIRES(audio_utils::EffectChain_Mutex);
 
     // mutex protecting effect list
     mutable audio_utils::mutex mMutex{audio_utils::MutexOrder::kEffectChain_Mutex};
-             Vector<sp<IAfEffectModule>> mEffects; // list of effect modules
+             Vector<sp<IAfEffectModule>> mEffects  GUARDED_BY(mutex()); // list of effect modules
              audio_session_t mSessionId; // audio session ID
              sp<EffectBufferHalInterface> mInBuffer;  // chain input buffer
              sp<EffectBufferHalInterface> mOutBuffer; // chain output buffer

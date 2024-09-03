@@ -1,13 +1,4 @@
 {
-  "postsubmit": [
-    // writerTest fails about 5 out of 66
-    // { "name": "writerTest" },
-
-    { "name": "HEVCUtilsUnitTest" },
-    { "name": "ExtractorFactoryTest" }
-
-  ],
-
   "presubmit-large": [
     {
       "name": "CtsMediaMiscTestCases",
@@ -29,7 +20,6 @@
         {
           "exclude-annotation": "android.platform.test.annotations.RequiresDevice"
         },
-        // TODO: b/149314419
         {
           "exclude-filter": "android.media.audio.cts.AudioPlaybackCaptureTest"
         },
@@ -92,8 +82,16 @@
     }
   ],
   "postsubmit": [
+    // writerTest fails about 5 out of 66
+    // { "name": "writerTest" },
     {
        "name": "BatteryChecker_test"
+    },
+    {
+        "name": "ExtractorFactoryTest"
+    },
+    {
+        "name": "HEVCUtilsUnitTest"
     }
   ]
 }

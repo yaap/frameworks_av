@@ -17,6 +17,7 @@
 #ifndef ANDROID_SERVERS_CAMERA_SERVICE_PROXY_WRAPPER_H_
 #define ANDROID_SERVERS_CAMERA_SERVICE_PROXY_WRAPPER_H_
 
+#include <android/hardware/CameraFeatureCombinationStats.h>
 #include <android/hardware/ICameraServiceProxy.h>
 
 #include <utils/Mutex.h>
@@ -26,7 +27,7 @@
 #include <string>
 
 #include <camera/CameraSessionStats.h>
-
+#include <camera/camera2/SessionConfiguration.h>
 namespace android {
 
 class CameraServiceProxyWrapper {
@@ -62,7 +63,8 @@ private:
         void onIdle(sp<hardware::ICameraServiceProxy>& proxyBinder,
                 int64_t requestCount, int64_t resultErrorCount, bool deviceError,
                 const std::string& userTag, int32_t videoStabilizationMode, bool usedUltraWide,
-                bool usedZoomOverride, const std::vector<hardware::CameraStreamStats>& streamStats);
+                bool usedZoomOverride, std::pair<int32_t, int32_t> mostRequestedFpsRange,
+                const std::vector<hardware::CameraStreamStats>& streamStats);
 
         std::string updateExtensionSessionStats(
                 const hardware::CameraExtensionSessionStats& extStats);
@@ -85,6 +87,11 @@ private:
     // ID generated for the open event associated with them.
     static int64_t generateLogId(std::random_device& randomDevice);
 
+    static int64_t encodeSessionConfiguration(const SessionConfiguration& sessionConfig);
+
+    void logFeatureCombinationInternal(const std::string &cameraId, int clientUid,
+            const hardware::camera2::params::SessionConfiguration& sessionConfiguration,
+            binder::Status ret, int type);
 public:
     CameraServiceProxyWrapper(sp<hardware::ICameraServiceProxy> serviceProxy = nullptr) :
             mCameraServiceProxy(serviceProxy)
@@ -111,7 +118,22 @@ public:
     void logIdle(const std::string& id,
             int64_t requestCount, int64_t resultErrorCount, bool deviceError,
             const std::string& userTag, int32_t videoStabilizationMode, bool usedUltraWide,
-            bool usedZoomOverride, const std::vector<hardware::CameraStreamStats>& streamStats);
+            bool usedZoomOverride, std::pair<int32_t, int32_t> mostRequestedFpsRange,
+            const std::vector<hardware::CameraStreamStats>& streamStats);
+
+    // Feature combination query
+    void logFeatureCombinationQuery(const std::string &id, int clientUid,
+            const hardware::camera2::params::SessionConfiguration& sessionConfiguration,
+            binder::Status ret) {
+        logFeatureCombinationInternal(id, clientUid, sessionConfiguration, ret,
+                (int)hardware::CameraFeatureCombinationStats::QueryType::QUERY_FEATURE_COMBINATION);
+    }
+    void logSessionCharacteristicsQuery(const std::string &id, int clientUid,
+            const hardware::camera2::params::SessionConfiguration& sessionConfiguration,
+            binder::Status ret) {
+        logFeatureCombinationInternal(id, clientUid, sessionConfiguration, ret, (int)
+                hardware::CameraFeatureCombinationStats::QueryType::QUERY_SESSION_CHARACTERISTICS);
+    }
 
     // Ping camera service proxy for user update
     void pingCameraServiceProxy();

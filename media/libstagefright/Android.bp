@@ -318,13 +318,15 @@ cc_library {
         "libaudioclient_aidl_conversion",
         "packagemanager_aidl-cpp",
         "server_configurable_flags",
+        "libaconfig_storage_read_api_cc",
         "aconfig_mediacodec_flags_c_lib",
     ],
 
     static_libs: [
+        "android.media.codec-aconfig-cc",
         "libstagefright_esds",
         "libstagefright_color_conversion",
-        "libyuv_static",
+        "libyuv",
         "libstagefright_webm",
         "libstagefright_timedtext",
         "libogg",

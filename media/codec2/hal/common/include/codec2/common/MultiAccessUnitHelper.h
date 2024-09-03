@@ -44,8 +44,9 @@ struct MultiAccessUnitInterface : public C2InterfaceHelper {
     bool isValidField(const C2ParamField &field) const;
 
 protected:
-    void getDecoderSampleRateAndChannelCount(
-            uint32_t &sampleRate_, uint32_t &channelCount_) const;
+    bool getDecoderSampleRateAndChannelCount(
+            uint32_t * const sampleRate_, uint32_t * const channelCount_) const;
+    bool getMaxInputSize(C2StreamMaxBufferSizeInfo::input* const maxInputSize) const;
     const std::shared_ptr<C2ComponentInterface> mC2ComponentIntf;
     std::shared_ptr<C2LargeFrame::output> mLargeFrameParams;
     C2ComponentKindSetting mKind;
@@ -58,7 +59,8 @@ protected:
 struct MultiAccessUnitHelper {
 public:
     MultiAccessUnitHelper(
-            const std::shared_ptr<MultiAccessUnitInterface>& intf);
+            const std::shared_ptr<MultiAccessUnitInterface>& intf,
+            std::shared_ptr<C2BlockPool> &linearPool);
 
     virtual ~MultiAccessUnitHelper();
 
@@ -139,6 +141,11 @@ protected:
         std::vector<std::shared_ptr<const C2Info>> mInfos;
 
         /*
+         * Vector for holding config updates from the wrapper
+         */
+        std::vector<std::unique_ptr<C2Param>> mConfigUpdate;
+
+        /*
          * C2AccessUnitInfos for the current buffer
          */
         std::vector<C2AccessUnitInfosStruct> mAccessUnitInfos;
@@ -153,6 +160,11 @@ protected:
          */
         std::unique_ptr<C2Work> mLargeWork;
 
+        /*
+         * For holding a reference to the incoming buffer
+         */
+        std::vector<std::shared_ptr<C2Buffer>> mInputC2Ref;
+
         MultiAccessUnitInfo(C2WorkOrdinalStruct ordinal):inOrdinal(ordinal) {
 
         }
@@ -162,6 +174,11 @@ protected:
          */
         void reset();
     };
+
+    /*
+     * Reconfigure helper
+     */
+    bool tryReconfigure(const std::unique_ptr<C2Param> &p);
 
     /*
      * Creates a linear block to be used with work
@@ -189,6 +206,14 @@ protected:
             uint32_t size,
             int64_t timestamp);
 
+    // Flag to allow dynamic on/off settings on this helper.
+    // Once enabled and buffers in transit, it is not possible
+    // to turn this module off by setting the max output value
+    // to 0. This is because the skip cut buffer expects the
+    // metadata to be always present along with a valid buffer.
+    // This flag is used to monitor that state of this module.
+    bool mMultiAccessOnOffAllowed;
+
     bool mInit;
 
     // Interface of this module
@@ -197,8 +222,6 @@ protected:
     C2BlockPool::local_id_t mBlockPoolId;
     // C2Blockpool for output buffer allocation
     std::shared_ptr<C2BlockPool> mLinearPool;
-    // Allocator for output buffer allocation
-    std::shared_ptr<C2Allocator> mLinearAllocator;
     // FrameIndex for the current outgoing work
     std::atomic_uint64_t mFrameIndex;
     // Mutex to protect mFrameHolder

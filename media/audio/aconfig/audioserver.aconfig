@@ -15,10 +15,35 @@ flag {
 }
 
 flag {
+    name: "effect_chain_callback_improve"
+    namespace: "media_audio"
+    description: "Improve effect chain callback mutex logic."
+    bug: "342413767"
+}
+
+flag {
     name: "fdtostring_timeout_fix"
     namespace: "media_audio"
     description: "Improve fdtostring implementation to properly handle timing out."
     bug: "306283018"
+}
+
+flag {
+    name: "fix_concurrent_playback_behavior_with_bit_perfect_client"
+    namespace: "media_audio"
+    description:
+        "Treat playback use cases differently when bit-perfect client is active to improve the "
+        "user experience with bit-perfect playback."
+    bug: "339515899"
+}
+
+flag {
+    name: "fix_input_sharing_logic"
+    namespace: "media_audio"
+    description:
+        "Fix the audio policy logic that decides to reuse or close "
+        "input streams when resources are exhausted"
+    bug: "338446410"
 }
 
 flag {
@@ -29,4 +54,12 @@ flag {
         "priority from the blocked thread to the blocking thread). "
         "This feature helps reduce audio glitching caused by low priority blocking threads."
     bug: "209491695"
+}
+
+flag {
+    name: "use_bt_sco_for_media"
+    namespace: "media_audio"
+    description:
+        "Play media strategy over Bluetooth SCO when active"
+    bug: "292037886"
 }

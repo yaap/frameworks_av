@@ -37,7 +37,6 @@ extern "C" binder_exception_t createEffect(const AudioUuid* in_impl_uuid,
     }
     if (instanceSpp) {
         *instanceSpp = ndk::SharedRefBase::make<VisualizerImpl>();
-        LOG(DEBUG) << __func__ << " instance " << instanceSpp->get() << " created";
         return EX_NONE;
     } else {
         LOG(ERROR) << __func__ << " invalid input parameter!";
@@ -73,7 +72,7 @@ const Descriptor VisualizerImpl::kDescriptor = {
                           .uuid = getEffectImplUuidVisualizer(),
                           .proxy = std::nullopt},
                    .flags = {.type = Flags::Type::INSERT,
-                             .insert = Flags::Insert::LAST,
+                             .insert = Flags::Insert::FIRST,
                              .volume = Flags::Volume::NONE},
                    .name = VisualizerImpl::kEffectName,
                    .implementor = "The Android Open Source Project"},

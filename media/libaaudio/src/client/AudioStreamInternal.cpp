@@ -575,9 +575,19 @@ aaudio_result_t AudioStreamInternal::requestStop_l() {
         return AAUDIO_ERROR_INVALID_STATE;
     }
 
+    // For playback, sleep until all the audio data has played.
+    // Then clear the buffer to prevent noise.
+    prepareBuffersForStop();
+
     mClockModel.stop(AudioClock::getNanoseconds());
     setState(AAUDIO_STREAM_STATE_STOPPING);
     mAtomicInternalTimestamp.clear();
+
+#if 0
+    // Simulate very slow CPU, force race condition where the
+    // DSP keeps playing after we stop writing.
+    AudioClock::sleepForNanos(800 * AAUDIO_NANOS_PER_MILLISECOND);
+#endif
 
     result = mServiceInterface.stopStream(mServiceStreamHandleInfo);
     if (result == AAUDIO_ERROR_INVALID_HANDLE) {
@@ -610,17 +620,19 @@ aaudio_result_t AudioStreamInternal::startClient(const android::AudioClient& cli
                                                  audio_port_handle_t *portHandle) {
     ALOGV("%s() called", __func__);
     if (getServiceHandle() == AAUDIO_HANDLE_INVALID) {
+        ALOGE("%s() getServiceHandle() is invalid", __func__);
         return AAUDIO_ERROR_INVALID_STATE;
     }
     aaudio_result_t result =  mServiceInterface.startClient(mServiceStreamHandleInfo,
                                                             client, attr, portHandle);
-    ALOGV("%s(%d) returning %d", __func__, *portHandle, result);
+    ALOGV("%s(), got %d, returning %d", __func__, *portHandle, result);
     return result;
 }
 
 aaudio_result_t AudioStreamInternal::stopClient(audio_port_handle_t portHandle) {
     ALOGV("%s(%d) called", __func__, portHandle);
     if (getServiceHandle() == AAUDIO_HANDLE_INVALID) {
+        ALOGE("%s(%d) getServiceHandle() is invalid", __func__, portHandle);
         return AAUDIO_ERROR_INVALID_STATE;
     }
     aaudio_result_t result = mServiceInterface.stopClient(mServiceStreamHandleInfo, portHandle);

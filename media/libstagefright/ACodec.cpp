@@ -21,6 +21,8 @@
 #define OMX_ANDROID_COMPILE_AS_32BIT_ON_64BIT_PLATFORMS
 #endif
 
+#include <android_media_codec.h>
+
 #include <inttypes.h>
 #include <utils/Trace.h>
 
@@ -7573,6 +7575,22 @@ bool ACodec::LoadedToIdleState::onOMXEvent(
             return true;
         }
 
+        // When Acodec receive an error event at LoadedToIdleState, it will not release
+        // allocated buffers, which will cause gralloc buffer leak issue. We need to first release
+        // these buffers and then process the error event
+        case OMX_EventError:
+        {
+            if (mCodec->allYourBuffersAreBelongToUs(kPortIndexInput)) {
+                mCodec->freeBuffersOnPort(kPortIndexInput);
+            }
+
+            if (mCodec->allYourBuffersAreBelongToUs(kPortIndexOutput)) {
+                mCodec->freeBuffersOnPort(kPortIndexOutput);
+            }
+
+            return BaseState::onOMXEvent(event, data1, data2);
+        }
+
         default:
             return BaseState::onOMXEvent(event, data1, data2);
     }
@@ -9313,6 +9331,12 @@ status_t ACodec::queryCapabilities(
                         1280 /* width */, 720 /* height */) != OK) {
                 // adaptive playback is not supported
                 caps->removeDetail(MediaCodecInfo::Capabilities::FEATURE_ADAPTIVE_PLAYBACK);
+            }
+
+            // all non-tunneled video decoders support detached surface mode
+            if (android::media::codec::provider_->null_output_surface_support() &&
+                    android::media::codec::provider_->null_output_surface()) {
+                caps->addDetail(MediaCodecInfo::Capabilities::FEATURE_DETACHED_SURFACE, 0);
             }
         }
     }

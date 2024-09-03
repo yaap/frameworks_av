@@ -87,11 +87,16 @@ static inline bool isAudioServerOrMediaServerUid(uid_t uid) {
 
 bool recordingAllowed(const AttributionSourceState& attributionSource,
         audio_source_t source = AUDIO_SOURCE_DEFAULT);
-bool startRecording(const AttributionSourceState& attributionSource,
-    const String16& msg, audio_source_t source);
-void finishRecording(const AttributionSourceState& attributionSource, audio_source_t source);
+
+bool recordingAllowed(const AttributionSourceState &attributionSource,
+                      uint32_t virtualDeviceId,
+                      audio_source_t source);
+bool startRecording(const AttributionSourceState& attributionSource, uint32_t virtualDeviceId,
+                    const String16& msg, audio_source_t source);
+void finishRecording(const AttributionSourceState& attributionSource, uint32_t virtualDeviceId,
+                     audio_source_t source);
 std::optional<AttributionSourceState> resolveAttributionSource(
-    const AttributionSourceState& callerAttributionSource);
+    const AttributionSourceState& callerAttributionSource, uint32_t virtualDeviceId);
 bool captureAudioOutputAllowed(const AttributionSourceState& attributionSource);
 bool captureMediaOutputAllowed(const AttributionSourceState& attributionSource);
 bool captureTunerAudioInputAllowed(const AttributionSourceState& attributionSource);
@@ -108,10 +113,6 @@ bool modifyPhoneStateAllowed(const AttributionSourceState& attributionSource);
 bool bypassInterruptionPolicyAllowed(const AttributionSourceState& attributionSource);
 bool callAudioInterceptionAllowed(const AttributionSourceState& attributionSource);
 void purgePermissionCache();
-bool mustAnonymizeBluetoothAddress(
-        const AttributionSourceState& attributionSource, const String16& caller);
-void anonymizeBluetoothAddress(char *address);
-
 int32_t getOpForSource(audio_source_t source);
 
 AttributionSourceState getCallingAttributionSource();

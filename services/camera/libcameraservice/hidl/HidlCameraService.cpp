@@ -25,6 +25,7 @@
 
 #include <hidl/HidlTransportSupport.h>
 
+#include <camera/CameraUtils.h>
 #include <utils/Utils.h>
 
 namespace android {
@@ -36,6 +37,7 @@ namespace implementation {
 
 using frameworks::cameraservice::service::V2_0::implementation::HidlCameraService;
 using hardware::hidl_vec;
+using hardware::BnCameraService::ROTATION_OVERRIDE_NONE;
 using hardware::cameraservice::utils::conversion::convertToHidl;
 using hardware::cameraservice::utils::conversion::B2HStatus;
 using hardware::Void;
@@ -68,8 +70,8 @@ HidlCameraService::getCameraCharacteristics(const hidl_string& cameraId,
     HStatus status = HStatus::NO_ERROR;
     binder::Status serviceRet =
         mAidlICameraService->getCameraCharacteristics(cameraId,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false,
-                &cameraMetadata);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__, ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, 0, &cameraMetadata);
     HCameraMetadata hidlMetadata;
     if (!serviceRet.isOk()) {
         switch(serviceRet.serviceSpecificErrorCode()) {
@@ -120,8 +122,8 @@ Return<void> HidlCameraService::connectDevice(const sp<HCameraDeviceCallback>& h
     binder::Status serviceRet = mAidlICameraService->connectDevice(
             callbacks, cameraId, std::string(), {},
             hardware::ICameraService::USE_CALLING_UID, 0/*oomScoreOffset*/,
-            /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false,
-            /*out*/&deviceRemote);
+            /*targetSdkVersion*/__ANDROID_API_FUTURE__, ROTATION_OVERRIDE_NONE,
+            kDefaultDeviceId, /*devicePolicy*/0, /*out*/&deviceRemote);
     HStatus status = HStatus::NO_ERROR;
     if (!serviceRet.isOk()) {
         ALOGE("%s: Unable to connect to camera device", __FUNCTION__);

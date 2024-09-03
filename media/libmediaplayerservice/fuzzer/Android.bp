@@ -44,7 +44,7 @@ cc_defaults {
     ],
     fuzz_config: {
         cc: [
-            "android-media-fuzzing-reports@google.com",
+            "android-media-playback+bugs@google.com",
         ],
         componentid: 155276,
         hotlists: [
@@ -141,7 +141,6 @@ cc_fuzz {
         "libplayerservice_datasource",
     ],
     shared_libs: [
-        "libmediaplayerservice",
         "libdatasource",
         "libdrmframework",
         "libstagefright_httplive",
@@ -159,10 +158,13 @@ cc_fuzz {
         "libmediaplayerserviceFuzzer_defaults",
     ],
     static_libs: [
+        "libgmock",
+        "libgtest_ndk_c++",
         "libplayerservice_datasource",
         "libstagefright_nuplayer",
         "libstagefright_rtsp",
         "libstagefright_timedtext",
+        "libbinder_random_parcel",
     ],
     shared_libs: [
         "android.hardware.media.c2@1.0",
@@ -191,7 +193,10 @@ cc_fuzz {
         "libpowermanager",
         "libstagefright_httplive",
         "libaudiohal@7.0",
+        "libmediaextractorservice",
     ],
+    corpus: ["corpus/*"],
+    include_dirs: ["frameworks/av/services/mediaextractor"],
 }
 
 cc_fuzz {

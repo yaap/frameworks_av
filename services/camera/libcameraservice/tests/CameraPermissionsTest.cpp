@@ -21,6 +21,8 @@
 
 #include <private/android_filesystem_config.h>
 
+#include <camera/CameraUtils.h>
+
 #include "../CameraService.h"
 #include "../utils/CameraServiceProxyWrapper.h"
 
@@ -35,22 +37,23 @@ using namespace android::hardware::camera;
 // Empty service listener.
 class TestCameraServiceListener : public hardware::BnCameraServiceListener {
 public:
-    virtual ~TestCameraServiceListener() {};
+    virtual ~TestCameraServiceListener() {}
 
-    virtual binder::Status onStatusChanged(int32_t , const std::string&) {
+    virtual binder::Status onStatusChanged(int32_t , const std::string&, int32_t) {
         return binder::Status::ok();
-    };
+    }
 
     virtual binder::Status onPhysicalCameraStatusChanged(int32_t /*status*/,
-            const std::string& /*cameraId*/, const std::string& /*physicalCameraId*/) {
+            const std::string& /*cameraId*/, const std::string& /*physicalCameraId*/,
+            int32_t /*deviceId*/) {
         // No op
         return binder::Status::ok();
-    };
+    }
 
     virtual binder::Status onTorchStatusChanged(int32_t /*status*/,
-            const std::string& /*cameraId*/) {
+            const std::string& /*cameraId*/, int32_t /*deviceId*/) {
         return binder::Status::ok();
-    };
+    }
 
     virtual binder::Status onCameraAccessPrioritiesChanged() {
         // No op
@@ -58,18 +61,18 @@ public:
     }
 
     virtual binder::Status onCameraOpened(const std::string& /*cameraId*/,
-            const std::string& /*clientPackageName*/) {
+            const std::string& /*clientPackageName*/, int32_t /*deviceId*/) {
         // No op
         return binder::Status::ok();
     }
 
-    virtual binder::Status onCameraClosed(const std::string& /*cameraId*/) {
+    virtual binder::Status onCameraClosed(const std::string& /*cameraId*/, int32_t /*deviceId*/) {
         // No op
         return binder::Status::ok();
     }
 
     virtual binder::Status onTorchStrengthLevelChanged(const std::string& /*cameraId*/,
-            int32_t /*torchStrength*/) {
+            int32_t /*torchStrength*/, int32_t /*deviceId*/) {
         // No op
         return binder::Status::ok();
     }
@@ -141,6 +144,11 @@ public:
     virtual binder::Status notifyCameraState(
             const hardware::CameraSessionStats& cameraSessionStats) override {
         return mCameraServiceProxy->notifyCameraState(cameraSessionStats);
+    }
+
+    virtual binder::Status notifyFeatureCombinationStats(
+            const hardware::CameraFeatureCombinationStats& featureCombStats) override {
+        return mCameraServiceProxy->notifyFeatureCombinationStats(featureCombStats);
     }
 
     virtual binder::Status isCameraDisabled(int userId, bool *ret) override {
@@ -227,7 +235,9 @@ TEST_F(CameraPermissionsTest, TestCameraDisabled) {
         binder::Status status =
                 sCameraService->connectDevice(callbacks, s.cameraId, std::string(), {},
                 android::CameraService::USE_CALLING_UID, 0/*oomScoreDiff*/,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false, &device);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__,
+                hardware::ICameraService::ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, /*devicePolicy*/0, &device);
         AutoDisconnectDevice autoDisconnect(device);
         ASSERT_TRUE(!status.isOk()) << "connectDevice returned OK status";
         ASSERT_EQ(status.serviceSpecificErrorCode(), hardware::ICameraService::ERROR_DISABLED)
@@ -241,7 +251,9 @@ TEST_F(CameraPermissionsTest, TestCameraDisabled) {
         binder::Status status =
                 sCameraService->connectDevice(callbacks, s.cameraId, std::string(), {},
                 android::CameraService::USE_CALLING_UID, 0/*oomScoreDiff*/,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false, &device);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__,
+                hardware::ICameraService::ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, /*devicePolicy*/0, &device);
         AutoDisconnectDevice autoDisconnect(device);
         ASSERT_TRUE(status.isOk());
     }
@@ -260,14 +272,18 @@ TEST_F(CameraPermissionsTest, TestConsecutiveConnections) {
         binder::Status status =
                 sCameraService->connectDevice(callbacks, s.cameraId, std::string(), {},
                 android::CameraService::USE_CALLING_UID, 0/*oomScoreDiff*/,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false, &deviceA);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__,
+                hardware::ICameraService::ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, /*devicePolicy*/0, &deviceA);
         AutoDisconnectDevice autoDisconnectA(deviceA);
         ASSERT_TRUE(status.isOk()) << "Exception code " << status.exceptionCode() <<
                 " service specific error code " << status.serviceSpecificErrorCode();
         status =
                 sCameraService->connectDevice(callbacks, s.cameraId, std::string(), {},
                 android::CameraService::USE_CALLING_UID, 0/*oomScoreDiff*/,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false, &deviceB);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__,
+                hardware::ICameraService::ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, /*devicePolicy*/0, &deviceB);
         AutoDisconnectDevice autoDisconnectB(deviceB);
         ASSERT_TRUE(status.isOk()) << "Exception code " << status.exceptionCode() <<
                 " service specific error code " << status.serviceSpecificErrorCode();
@@ -288,14 +304,18 @@ TEST_F(CameraPermissionsTest, TestConflictingOomScoreOffset) {
         binder::Status status =
                 sCameraService->connectDevice(callbacks, s.cameraId, std::string(), {},
                 android::CameraService::USE_CALLING_UID, 0/*oomScoreDiff*/,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false, &deviceA);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__,
+                hardware::ICameraService::ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, /*devicePolicy*/0, &deviceA);
         AutoDisconnectDevice autoDisconnectA(deviceA);
         ASSERT_TRUE(status.isOk()) << "Exception code " << status.exceptionCode() <<
                 " service specific error code " << status.serviceSpecificErrorCode();
         status =
                 sCameraService->connectDevice(callbacks, s.cameraId, std::string(), {},
                 android::CameraService::USE_CALLING_UID, 1/*oomScoreDiff*/,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/false, &deviceB);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__,
+                hardware::ICameraService::ROTATION_OVERRIDE_NONE,
+                kDefaultDeviceId, /*devicePolicy*/0, &deviceB);
         AutoDisconnectDevice autoDisconnectB(deviceB);
         ASSERT_TRUE(status.isOk()) << "Exception code " << status.exceptionCode() <<
                 " service specific error code " << status.serviceSpecificErrorCode();

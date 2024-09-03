@@ -17,11 +17,13 @@
 #ifndef ANDROID_COMPANION_VIRTUALCAMERA_VIRTUALCAMERARENDERTHREAD_H
 #define ANDROID_COMPANION_VIRTUALCAMERA_VIRTUALCAMERARENDERTHREAD_H
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <future>
 #include <memory>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "VirtualCameraDevice.h"
@@ -56,8 +58,15 @@ class CaptureRequestBuffer {
 
 struct RequestSettings {
   int jpegQuality = VirtualCameraDevice::kDefaultJpegQuality;
+  int jpegOrientation = VirtualCameraDevice::kDefaultJpegOrientation;
   Resolution thumbnailResolution = Resolution(0, 0);
   int thumbnailJpegQuality = VirtualCameraDevice::kDefaultJpegQuality;
+  std::optional<FpsRange> fpsRange;
+  camera_metadata_enum_android_control_capture_intent_t captureIntent =
+      VirtualCameraDevice::kDefaultCaptureIntent;
+  std::optional<GpsCoordinates> gpsCoordinates;
+  std::optional<camera_metadata_enum_android_control_ae_precapture_trigger>
+      aePrecaptureTrigger;
 };
 
 // Represents single capture request to fill set of buffers.
@@ -85,6 +94,24 @@ class ProcessCaptureRequestTask {
   const RequestSettings mRequestSettings;
 };
 
+struct UpdateTextureTask {};
+
+struct RenderThreadTask
+    : public std::variant<std::unique_ptr<ProcessCaptureRequestTask>,
+                          UpdateTextureTask> {
+  // Allow implicit conversion to bool.
+  //
+  // Returns false, if the RenderThreadTask consist of null
+  // ProcessCaptureRequestTask, which signals that the thread should terminate.
+  operator bool() const {
+    const bool isExitSignal =
+        std::holds_alternative<std::unique_ptr<ProcessCaptureRequestTask>>(
+            *this) &&
+        std::get<std::unique_ptr<ProcessCaptureRequestTask>>(*this) == nullptr;
+    return !isExitSignal;
+  }
+};
+
 // Wraps dedicated rendering thread and rendering business with corresponding
 // input surface.
 class VirtualCameraRenderThread {
@@ -102,8 +129,7 @@ class VirtualCameraRenderThread {
       Resolution reportedSensorSize,
       std::shared_ptr<
           ::aidl::android::hardware::camera::device::ICameraDeviceCallback>
-          cameraDeviceCallback,
-      bool testMode = false);
+          cameraDeviceCallback);
 
   ~VirtualCameraRenderThread();
 
@@ -111,6 +137,12 @@ class VirtualCameraRenderThread {
   void start();
   // Stop rendering thread.
   void stop();
+
+  // Send request to render thread to update the texture.
+  // Currently queued buffers in the input surface will be consumed and the most
+  // recent buffer in the input surface will be attached to the texture), all
+  // other buffers will be returned to the buffer queue.
+  void requestTextureUpdate() EXCLUDES(mLock);
 
   // Equeue capture task for processing on render thread.
   void enqueueTask(std::unique_ptr<ProcessCaptureRequestTask> task)
@@ -123,13 +155,13 @@ class VirtualCameraRenderThread {
   sp<Surface> getInputSurface();
 
  private:
-  std::unique_ptr<ProcessCaptureRequestTask> dequeueTask() EXCLUDES(mLock);
+  RenderThreadTask dequeueTask() EXCLUDES(mLock);
 
   // Rendering thread entry point.
   void threadLoop();
 
   // Process single capture request task (always called on render thread).
-  void processCaptureRequest(const ProcessCaptureRequestTask& captureRequestTask);
+  void processTask(const ProcessCaptureRequestTask& captureRequestTask);
 
   // Flush single capture request task returning the error status immediately.
   void flushCaptureRequest(const ProcessCaptureRequestTask& captureRequestTask);
@@ -149,6 +181,8 @@ class VirtualCameraRenderThread {
   // Always called on render thread.
   ndk::ScopedAStatus renderIntoBlobStreamBuffer(
       const int streamId, const int bufferId,
+      const ::aidl::android::hardware::camera::device::CameraMetadata&
+          resultMetadata,
       const RequestSettings& requestSettings, sp<Fence> fence = nullptr);
 
   // Render current image to the YCbCr buffer.
@@ -162,8 +196,9 @@ class VirtualCameraRenderThread {
   // If fence is specified, this function will block until the fence is cleared
   // before writing to the buffer.
   // Always called on the render thread.
-  ndk::ScopedAStatus renderIntoEglFramebuffer(EglFrameBuffer& framebuffer,
-                                              sp<Fence> fence = nullptr);
+  ndk::ScopedAStatus renderIntoEglFramebuffer(
+      EglFrameBuffer& framebuffer, sp<Fence> fence = nullptr,
+      std::optional<Rect> viewport = std::nullopt);
 
   // Camera callback
   const std::shared_ptr<
@@ -172,7 +207,6 @@ class VirtualCameraRenderThread {
 
   const Resolution mInputSurfaceSize;
   const Resolution mReportedSensorSize;
-  const int mTestMode;
 
   VirtualCameraSessionContext& mSessionContext;
 
@@ -182,7 +216,11 @@ class VirtualCameraRenderThread {
   std::mutex mLock;
   std::deque<std::unique_ptr<ProcessCaptureRequestTask>> mQueue GUARDED_BY(mLock);
   std::condition_variable mCondVar;
+  volatile bool mTextureUpdateRequested GUARDED_BY(mLock);
   volatile bool mPendingExit GUARDED_BY(mLock);
+
+  // Acquisition timestamp of last frame.
+  std::atomic<uint64_t> mLastAcquisitionTimestampNanoseconds;
 
   // EGL helpers - constructed and accessed only from rendering thread.
   std::unique_ptr<EglDisplayContext> mEglDisplayContext;
@@ -191,6 +229,7 @@ class VirtualCameraRenderThread {
   std::unique_ptr<EglSurfaceTexture> mEglSurfaceTexture;
 
   std::promise<sp<Surface>> mInputSurfacePromise;
+  std::shared_future<sp<Surface>> mInputSurfaceFuture;
 };
 
 }  // namespace virtualcamera

@@ -43,15 +43,24 @@ class VirtualCameraService
       const ::ndk::SpAIBinder& token,
       const ::aidl::android::companion::virtualcamera::VirtualCameraConfiguration&
           configuration,
-      bool* _aidl_return) override EXCLUDES(mLock);
+      int32_t deviceId, bool* _aidl_return) override EXCLUDES(mLock);
+
+  // Register camera corresponding to the binder token.
+  ndk::ScopedAStatus registerCamera(
+      const ::ndk::SpAIBinder& token,
+      const ::aidl::android::companion::virtualcamera::VirtualCameraConfiguration&
+          configuration,
+      const std::string& cameraId, int32_t deviceId, bool* _aidl_return)
+      EXCLUDES(mLock);
 
   // Unregisters camera corresponding to the binder token.
   ndk::ScopedAStatus unregisterCamera(const ::ndk::SpAIBinder& token) override
       EXCLUDES(mLock);
 
   // Returns the camera id corresponding to the binder token.
-  ndk::ScopedAStatus getCameraId(
-      const ::ndk::SpAIBinder& token, int32_t* _aidl_return) override EXCLUDES(mLock);
+  ndk::ScopedAStatus getCameraId(const ::ndk::SpAIBinder& token,
+                                 std::string* _aidl_return) override
+      EXCLUDES(mLock);
 
   // Returns VirtualCameraDevice corresponding to binder token or nullptr if
   // there's no camera asociated with the token.
@@ -62,14 +71,24 @@ class VirtualCameraService
   binder_status_t handleShellCommand(int in, int out, int err, const char** args,
                                      uint32_t numArgs) override;
 
+  // Do not verify presence on required EGL extensions when registering virtual
+  // camera. Only to be used by unit tests.
+  void disableEglVerificationForTest() {
+    mVerifyEglExtensions = false;
+  }
+
+  // Default virtual device id (the host device id)
+  static constexpr int kDefaultDeviceId = 0;
+
  private:
   // Create and enable test camera instance if there's none.
-  void enableTestCameraCmd(int out, int err);
+  binder_status_t enableTestCameraCmd(
+      int out, int err, const std::map<std::string, std::string>& options);
   // Disable and destroy test camera instance if there's one.
   void disableTestCameraCmd(int out);
 
   std::shared_ptr<VirtualCameraProvider> mVirtualCameraProvider;
-
+  bool mVerifyEglExtensions = true;
   const PermissionsProxy& mPermissionProxy;
 
   std::mutex mLock;

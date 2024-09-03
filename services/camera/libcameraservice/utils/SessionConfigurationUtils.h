@@ -112,7 +112,7 @@ binder::Status createSurfaceFromGbp(
         const std::string &logicalCameraId, const CameraMetadata &physicalCameraMetadata,
         const std::vector<int32_t> &sensorPixelModesUsed,  int64_t dynamicRangeProfile,
         int64_t streamUseCase, int timestampBase, int mirrorMode,
-        int32_t colorSpace, bool isPriviledgedClient=false);
+        int32_t colorSpace, bool respectSurfaceSize, bool isPriviledgedClient=false);
 
 //check if format is 10-bit output compatible
 bool is10bitCompatibleFormat(int32_t format, android_dataspace_t dataSpace);
@@ -143,10 +143,10 @@ const std::vector<std::string> &physicalCameraIds, const std::string &physicalCa
 const std::string &logicalCameraId);
 
 binder::Status checkSurfaceType(size_t numBufferProducers,
-bool deferredConsumer, int surfaceType);
+        bool deferredConsumer, int surfaceType, bool isConfigurationComplete);
 
 binder::Status checkOperatingMode(int operatingMode,
-const CameraMetadata &staticInfo, const std::string &cameraId);
+        const CameraMetadata &staticInfo, const std::string &cameraId);
 
 binder::Status
 convertToHALStreamCombination(
@@ -156,7 +156,8 @@ convertToHALStreamCombination(
     const std::vector<std::string> &physicalCameraIds,
     aidl::android::hardware::camera::device::StreamConfiguration &streamConfiguration,
     bool overrideForPerfClass, metadata_vendor_id_t vendorTagId,
-    bool checkSessionParams, bool *earlyExit, bool isPriviledgedClient = false);
+    bool checkSessionParams, const std::vector<int32_t>& additionalKeys,
+    bool *earlyExit, bool isPriviledgedClient = false);
 
 StreamConfigurationPair getStreamConfigurationPair(const CameraMetadata &metadata);
 
@@ -177,7 +178,10 @@ status_t mapRequestTemplateToAidl(camera_request_template_t templateId,
         aidl::android::hardware::camera::device::RequestTemplate* tempId /*out*/);
 
 void filterParameters(const CameraMetadata& src, const CameraMetadata& deviceInfo,
-        metadata_vendor_id_t vendorTagId, CameraMetadata& dst);
+        const std::vector<int32_t>& additionalKeys, metadata_vendor_id_t vendorTagId,
+        CameraMetadata& dst);
+
+status_t overrideDefaultRequestKeys(CameraMetadata *request);
 
 template <typename T> bool contains(std::set<T> container, T value) {
     return container.find(value) != container.end();

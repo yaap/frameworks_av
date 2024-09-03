@@ -33,6 +33,7 @@
 #include <afutils/Vibrator.h>
 #include <audio_utils/MelProcessor.h>
 #include <audio_utils/Metadata.h>
+#include <com_android_media_audioserver.h>
 #ifdef DEBUG_CPU_USAGE
 #include <audio_utils/Statistics.h>
 #include <cpustats/ThreadCpuUsage.h>
@@ -694,6 +695,10 @@ void ThreadBase::exit()
     }
     // When Thread::requestExitAndWait is made virtual and this method is renamed to
     // "virtual status_t requestExitAndWait()", replace by "return Thread::requestExitAndWait();"
+
+    // For TimeCheck: track waiting on the thread join of getTid().
+    audio_utils::mutex::scoped_join_wait_check sjw(getTid());
+
     requestExitAndWait();
 }
 
@@ -1482,8 +1487,8 @@ status_t PlaybackThread::checkEffectCompatibility_l(
     }
 
     if (IAfEffectModule::isHapticGenerator(&desc->type) && mHapticChannelCount == 0) {
-        ALOGW("%s: thread doesn't support haptic playback while the effect is HapticGenerator",
-                __func__);
+        ALOGW("%s: thread (%s) doesn't support haptic playback while the effect is HapticGenerator",
+              __func__, threadTypeToString(mType));
         return BAD_VALUE;
     }
 
@@ -1662,12 +1667,12 @@ sp<IAfEffectHandle> ThreadBase::createEffect_l(
         if (chain == 0) {
             // create a new chain for this session
             ALOGV("createEffect_l() new effect chain for session %d", sessionId);
-            chain = IAfEffectChain::create(this, sessionId);
+            chain = IAfEffectChain::create(this, sessionId, mAfThreadCallback);
             addEffectChain_l(chain);
             chain->setStrategy(getStrategyForSession_l(sessionId));
             chainCreated = true;
         } else {
-            effect = chain->getEffectFromDesc_l(desc);
+            effect = chain->getEffectFromDesc(desc);
         }
 
         ALOGV("createEffect_l() got effect %p on chain %p", effect.get(), chain.get());
@@ -1675,7 +1680,7 @@ sp<IAfEffectHandle> ThreadBase::createEffect_l(
         if (effect == 0) {
             effectId = mAfThreadCallback->nextUniqueId(AUDIO_UNIQUE_ID_USE_EFFECT);
             // create a new effect module if none present in the chain
-            lStatus = chain->createEffect_l(effect, desc, effectId, sessionId, pinned);
+            lStatus = chain->createEffect(effect, desc, effectId, sessionId, pinned);
             if (lStatus != NO_ERROR) {
                 goto Exit;
             }
@@ -1693,6 +1698,7 @@ sp<IAfEffectHandle> ThreadBase::createEffect_l(
             const std::optional<media::AudioVibratorInfo> defaultVibratorInfo =
                     std::move(mAfThreadCallback->getDefaultVibratorInfo_l());
             if (defaultVibratorInfo) {
+                audio_utils::lock_guard _cl(chain->mutex());
                 // Only set the vibrator info when it is a valid one.
                 effect->setVibratorInfo_l(*defaultVibratorInfo);
             }
@@ -1714,7 +1720,7 @@ Exit:
     if (!probe && lStatus != NO_ERROR && lStatus != ALREADY_EXISTS) {
         audio_utils::lock_guard _l(mutex());
         if (effectCreated) {
-            chain->removeEffect_l(effect);
+            chain->removeEffect(effect);
         }
         if (chainCreated) {
             removeEffectChain_l(chain);
@@ -1815,7 +1821,7 @@ status_t ThreadBase::addEffect_ll(const sp<IAfEffectModule>& effect)
     if (chain == 0) {
         // create a new chain for this session
         ALOGV("%s: new effect chain for session %d", __func__, sessionId);
-        chain = IAfEffectChain::create(this, sessionId);
+        chain = IAfEffectChain::create(this, sessionId, mAfThreadCallback);
         addEffectChain_l(chain);
         chain->setStrategy(getStrategyForSession_l(sessionId));
         chainCreated = true;
@@ -1830,7 +1836,7 @@ status_t ThreadBase::addEffect_ll(const sp<IAfEffectModule>& effect)
 
     effect->setOffloaded_l(mType == OFFLOAD, mId);
 
-    status_t status = chain->addEffect_l(effect);
+    status_t status = chain->addEffect(effect);
     if (status != NO_ERROR) {
         if (chainCreated) {
             removeEffectChain_l(chain);
@@ -1857,7 +1863,7 @@ void ThreadBase::removeEffect_l(const sp<IAfEffectModule>& effect, bool release)
     sp<IAfEffectChain> chain = effect->getCallback()->chain().promote();
     if (chain != 0) {
         // remove effect chain if removing last effect
-        if (chain->removeEffect_l(effect, release) == 0) {
+        if (chain->removeEffect(effect, release) == 0) {
             removeEffectChain_l(chain);
         }
     } else {
@@ -2691,14 +2697,17 @@ sp<IAfTrack> PlaybackThread::createTrack_l(
             }
         }
 
-        // Set DIRECT flag if current thread is DirectOutputThread. This can
-        // happen when the playback is rerouted to direct output thread by
+        // Set DIRECT/OFFLOAD flag if current thread is DirectOutputThread/OffloadThread.
+        // This can happen when the playback is rerouted to direct output/offload thread by
         // dynamic audio policy.
         // Do NOT report the flag changes back to client, since the client
-        // doesn't explicitly request a direct flag.
+        // doesn't explicitly request a direct/offload flag.
         audio_output_flags_t trackFlags = *flags;
         if (mType == DIRECT) {
             trackFlags = static_cast<audio_output_flags_t>(trackFlags | AUDIO_OUTPUT_FLAG_DIRECT);
+        } else if (mType == OFFLOAD) {
+            trackFlags = static_cast<audio_output_flags_t>(trackFlags |
+                                   AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD | AUDIO_OUTPUT_FLAG_DIRECT);
         }
         *afTrackFlags = trackFlags;
 
@@ -2897,7 +2906,7 @@ status_t PlaybackThread::addTrack_l(const sp<IAfTrack>& track)
         sp<IAfEffectChain> chain = getEffectChain_l(track->sessionId());
         if (mHapticChannelMask != AUDIO_CHANNEL_NONE
                 && ((track->channelMask() & AUDIO_CHANNEL_HAPTIC_ALL) != AUDIO_CHANNEL_NONE
-                        || (chain != nullptr && chain->containsHapticGeneratingEffect_l()))) {
+                        || (chain != nullptr && chain->containsHapticGeneratingEffect()))) {
             // Unlock due to VibratorService will lock for this call and will
             // call Tracks.mute/unmute which also require thread's lock.
             mutex().unlock();
@@ -2927,7 +2936,6 @@ status_t PlaybackThread::addTrack_l(const sp<IAfTrack>& track)
 
             // Set haptic intensity for effect
             if (chain != nullptr) {
-                // TODO(b/324559333): Add adaptive haptics scaling support for the HapticGenerator.
                 chain->setHapticScale_l(track->id(), hapticScale);
             }
         }
@@ -2999,6 +3007,23 @@ void PlaybackThread::removeTrack_l(const sp<IAfTrack>& track)
     }
 }
 
+std::set<audio_port_handle_t> PlaybackThread::getTrackPortIds_l()
+{
+    std::set<int32_t> result;
+    for (const auto& t : mTracks) {
+        if (t->isExternalTrack()) {
+            result.insert(t->portId());
+        }
+    }
+    return result;
+}
+
+std::set<audio_port_handle_t> PlaybackThread::getTrackPortIds()
+{
+    audio_utils::lock_guard _l(mutex());
+    return getTrackPortIds_l();
+}
+
 String8 PlaybackThread::getParameters(const String8& keys)
 {
     audio_utils::lock_guard _l(mutex());
@@ -3052,9 +3077,9 @@ void PlaybackThread::onDrainReady()
     mCallbackThread->resetDraining();
 }
 
-void PlaybackThread::onError()
+void PlaybackThread::onError(bool isHardError)
 {
-    mCallbackThread->setAsyncError();
+    mCallbackThread->setAsyncError(isHardError);
 }
 
 void PlaybackThread::onCodecFormatChanged(
@@ -3397,9 +3422,9 @@ status_t PlaybackThread::getRenderPosition(
         return NO_ERROR;
     } else {
         status_t status;
-        uint32_t frames;
+        uint64_t frames = 0;
         status = mOutput->getRenderPosition(&frames);
-        *dspFrames = (size_t)frames;
+        *dspFrames = (uint32_t)frames;
         return status;
     }
 }
@@ -3509,7 +3534,7 @@ void PlaybackThread::checkSilentMode_l()
             char *endptr;
             unsigned long ul = strtoul(value, &endptr, 0);
             if (*endptr == '\0' && ul != 0) {
-                ALOGD("Silence is golden");
+                ALOGW("%s: mute from ro.audio.silent. Silence is golden", __func__);
                 // The setprop command will not allow a property to be changed after
                 // the first time it is set, so we don't have to worry about un-muting.
                 setMasterMute_l(true);
@@ -4801,7 +4826,7 @@ NO_THREAD_SAFETY_ANALYSIS  // release and re-acquire mutex()
         }
         if (mHapticChannelCount > 0 &&
                 ((track->channelMask() & AUDIO_CHANNEL_HAPTIC_ALL) != AUDIO_CHANNEL_NONE
-                        || (chain != nullptr && chain->containsHapticGeneratingEffect_l()))) {
+                        || (chain != nullptr && chain->containsHapticGeneratingEffect()))) {
             mutex().unlock();
             // Unlock due to VibratorService will lock for this call and will
             // call Tracks.mute/unmute which also require thread's lock.
@@ -5420,10 +5445,14 @@ void PlaybackThread::onAddNewTrack_l()
     broadcast_l();
 }
 
-void PlaybackThread::onAsyncError()
+void PlaybackThread::onAsyncError(bool isHardError)
 {
+    auto allTrackPortIds = getTrackPortIds();
     for (int i = AUDIO_STREAM_SYSTEM; i < (int)AUDIO_STREAM_CNT; i++) {
         invalidateTracks((audio_stream_type_t)i);
+    }
+    if (isHardError) {
+        mAfThreadCallback->onHardError(allTrackPortIds);
     }
 }
 
@@ -5767,6 +5796,11 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                 vlf *= volume;
                 vrf *= volume;
 
+                if (track->getInternalMute()) {
+                    vlf = 0.f;
+                    vrf = 0.f;
+                }
+
                 track->setFinalVolume(vlf, vrf);
                 ++fastTracks;
             } else {
@@ -5966,7 +6000,12 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                 vaf = v * sendLevel * (1. / MAX_GAIN_INT);
             }
 
-            track->setFinalVolume(vrf, vlf);
+            if (track->getInternalMute()) {
+                vrf = 0.f;
+                vlf = 0.f;
+            }
+
+            track->setFinalVolume(vlf, vrf);
 
             // Delegate volume control to effect in track effect chain if needed
             if (chain != 0 && chain->setVolume(&vl, &vr)) {
@@ -6155,8 +6194,8 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                 // No buffers for this track. Give it a few chances to
                 // fill a buffer, then remove it from active list.
                 if (--(track->retryCount()) <= 0) {
-                    ALOGI("BUFFER TIMEOUT: remove(%d) from active list on thread %p",
-                            trackId, this);
+                    ALOGI("%s BUFFER TIMEOUT: remove track(%d) from active list due to underrun"
+                          " on thread %d", __func__, trackId, mId);
                     tracksToRemove->add(track);
                     // indicate to client process that the track was disabled because of underrun;
                     // it will then automatically call start() when data is available
@@ -6913,7 +6952,8 @@ PlaybackThread::mixer_state DirectOutputThread::prepareTracks_l(
                     if (isTimestampAdvancing) { // HAL is still playing audio, give us more time.
                         track->retryCount() = kMaxTrackRetriesOffload;
                     } else {
-                        ALOGV("BUFFER TIMEOUT: remove track(%d) from active list", trackId);
+                        ALOGI("%s BUFFER TIMEOUT: remove track(%d) from active list due to"
+                              " underrun on thread %d", __func__, trackId, mId);
                         tracksToRemove->add(track);
                         // indicate to client process that the track was disabled because of
                         // underrun; it will then automatically call start() when data is available
@@ -7033,16 +7073,20 @@ bool DirectOutputThread::shouldStandby_l()
 {
     bool trackPaused = false;
     bool trackStopped = false;
+    bool trackDisabled = false;
 
-    // do not put the HAL in standby when paused. AwesomePlayer clear the offloaded AudioTrack
+    // do not put the HAL in standby when paused. NuPlayer clear the offloaded AudioTrack
     // after a timeout and we will enter standby then.
+    // On offload threads, do not enter standby if the main track is still underrunning.
     if (mTracks.size() > 0) {
-        trackPaused = mTracks[mTracks.size() - 1]->isPaused();
-        trackStopped = mTracks[mTracks.size() - 1]->isStopped() ||
-                           mTracks[mTracks.size() - 1]->state() == IAfTrackBase::IDLE;
+        const auto& mainTrack = mTracks[mTracks.size() - 1];
+
+        trackPaused = mainTrack->isPaused();
+        trackStopped = mainTrack->isStopped() || mainTrack->state() == IAfTrackBase::IDLE;
+        trackDisabled = (mType == OFFLOAD) && mainTrack->isDisabled();
     }
 
-    return !mStandby && !(trackPaused || (mHwPaused && !trackStopped));
+    return !mStandby && !(trackPaused || (mHwPaused && !trackStopped) || trackDisabled);
 }
 
 // checkForNewParameter_l() must be called with ThreadBase::mutex() held
@@ -7141,11 +7185,14 @@ void DirectOutputThread::flushHw_l()
 {
     PlaybackThread::flushHw_l();
     mOutput->flush();
-    mHwPaused = false;
     mFlushPending = false;
     mTimestampVerifier.discontinuity(discontinuityForStandbyOrFlush());
     mTimestamp.clear();
     mMonotonicFrameCounter.onFlush();
+    // We do not reset mHwPaused which is hidden from the Track client.
+    // Note: the client track in Tracks.cpp and AudioTrack.cpp
+    // has a FLUSHED state but the DirectOutputThread does not;
+    // those tracks will continue to show isStopped().
 }
 
 int64_t DirectOutputThread::computeWaitTimeNs_l() const {
@@ -7163,7 +7210,7 @@ AsyncCallbackThread::AsyncCallbackThread(
         mPlaybackThread(playbackThread),
         mWriteAckSequence(0),
         mDrainSequence(0),
-        mAsyncError(false)
+        mAsyncError(ASYNC_ERROR_NONE)
 {
 }
 
@@ -7177,7 +7224,7 @@ bool AsyncCallbackThread::threadLoop()
     while (!exitPending()) {
         uint32_t writeAckSequence;
         uint32_t drainSequence;
-        bool asyncError;
+        AsyncError asyncError;
 
         {
             audio_utils::unique_lock _l(mutex());
@@ -7198,7 +7245,7 @@ bool AsyncCallbackThread::threadLoop()
             drainSequence = mDrainSequence;
             mDrainSequence &= ~1;
             asyncError = mAsyncError;
-            mAsyncError = false;
+            mAsyncError = ASYNC_ERROR_NONE;
         }
         {
             const sp<PlaybackThread> playbackThread = mPlaybackThread.promote();
@@ -7209,8 +7256,8 @@ bool AsyncCallbackThread::threadLoop()
                 if (drainSequence & 1) {
                     playbackThread->resetDraining(drainSequence >> 1);
                 }
-                if (asyncError) {
-                    playbackThread->onAsyncError();
+                if (asyncError != ASYNC_ERROR_NONE) {
+                    playbackThread->onAsyncError(asyncError == ASYNC_ERROR_HARD);
                 }
             }
         }
@@ -7260,10 +7307,10 @@ void AsyncCallbackThread::resetDraining()
     }
 }
 
-void AsyncCallbackThread::setAsyncError()
+void AsyncCallbackThread::setAsyncError(bool isHardError)
 {
     audio_utils::lock_guard _l(mutex());
-    mAsyncError = true;
+    mAsyncError = isHardError ? ASYNC_ERROR_HARD : ASYNC_ERROR_SOFT;
     mWaitWorkCV.notify_one();
 }
 
@@ -7507,8 +7554,8 @@ PlaybackThread::mixer_state OffloadThread::prepareTracks_l(
                     if (isTimestampAdvancing) { // HAL is still playing audio, give us more time.
                         track->retryCount() = kMaxTrackRetriesOffload;
                     } else {
-                        ALOGV("OffloadThread: BUFFER TIMEOUT: remove track(%d) from active list",
-                                track->id());
+                        ALOGI("%s BUFFER TIMEOUT: remove track(%d) from active list due to"
+                              " underrun on thread %d", __func__, track->id(), mId);
                         tracksToRemove->add(track);
                         // tell client process that the track was disabled because of underrun;
                         // it will then automatically call start() when data is available
@@ -7895,6 +7942,11 @@ void SpatializerThread::setHalLatencyMode_l() {
     if (mSupportedLatencyModes.empty()) {
         return;
     }
+    // Do not update the HAL latency mode if no track is active
+    if (mActiveTracks.isEmpty()) {
+        return;
+    }
+
     audio_latency_mode_t latencyMode = AUDIO_LATENCY_MODE_FREE;
     if (mSupportedLatencyModes.size() == 1) {
         // If the HAL only support one latency mode currently, confirm the choice
@@ -8213,7 +8265,6 @@ bool RecordThread::threadLoop()
     inputStandBy();
 
 reacquire_wakelock:
-    sp<IAfRecordTrack> activeTrack;
     {
         audio_utils::lock_guard _l(mutex());
         acquireWakeLock_l();
@@ -8229,6 +8280,9 @@ reacquire_wakelock:
 
     // loop while there is work to do
     for (int64_t loopCount = 0;; ++loopCount) {  // loopCount used for statistics tracking
+        // Note: these sp<> are released at the end of the for loop outside of the mutex() lock.
+        sp<IAfRecordTrack> activeTrack;
+        std::vector<sp<IAfRecordTrack>> oldActiveTracks;
         Vector<sp<IAfEffectChain>> effectChains;
 
         // activeTracks accumulates a copy of a subset of mActiveTracks
@@ -8278,7 +8332,9 @@ reacquire_wakelock:
             bool doBroadcast = false;
             bool allStopped = true;
             for (size_t i = 0; i < size; ) {
-
+                if (activeTrack) {  // ensure track release is outside lock.
+                    oldActiveTracks.emplace_back(std::move(activeTrack));
+                }
                 activeTrack = mActiveTracks[i];
                 if (activeTrack->isTerminated()) {
                     if (activeTrack->isFastTrack()) {
@@ -9154,7 +9210,7 @@ bool RecordThread::stop(IAfRecordTrack* recordTrack) {
     // This is needed for proper patchRecord peer release.
     while (recordTrack->state() == IAfTrackBase::PAUSING && !recordTrack->isInvalid()) {
         mWaitWorkCV.notify_all(); // signal thread to stop
-        mStartStopCV.wait(_l);
+        mStartStopCV.wait(_l, getTid());
     }
 
     if (recordTrack->state() == IAfTrackBase::PAUSED) { // successful stop
@@ -11332,14 +11388,15 @@ PlaybackThread::mixer_state BitPerfectThread::prepareTracks_l(
     // If there is only one active track and it is bit-perfect, enable tee buffer.
     float volumeLeft = 1.0f;
     float volumeRight = 1.0f;
-    if (mActiveTracks.size() == 1 && mActiveTracks[0]->isBitPerfect()) {
-        const int trackId = mActiveTracks[0]->id();
+    if (sp<IAfTrack> bitPerfectTrack = getTrackToStreamBitPerfectly_l();
+        bitPerfectTrack != nullptr) {
+        const int trackId = bitPerfectTrack->id();
         mAudioMixer->setParameter(
                     trackId, AudioMixer::TRACK, AudioMixer::TEE_BUFFER, (void *)mSinkBuffer);
         mAudioMixer->setParameter(
                     trackId, AudioMixer::TRACK, AudioMixer::TEE_BUFFER_FRAME_COUNT,
                     (void *)(uintptr_t)mNormalFrameCount);
-        mActiveTracks[0]->getFinalVolume(&volumeLeft, &volumeRight);
+        bitPerfectTrack->getFinalVolume(&volumeLeft, &volumeRight);
         mIsBitPerfect = true;
     } else {
         mIsBitPerfect = false;
@@ -11362,6 +11419,41 @@ PlaybackThread::mixer_state BitPerfectThread::prepareTracks_l(
 void BitPerfectThread::threadLoop_mix() {
     MixerThread::threadLoop_mix();
     mHasDataCopiedToSinkBuffer = mIsBitPerfect;
+}
+
+void BitPerfectThread::setTracksInternalMute(
+        std::map<audio_port_handle_t, bool>* tracksInternalMute) {
+    for (auto& track : mTracks) {
+        if (auto it = tracksInternalMute->find(track->portId()); it != tracksInternalMute->end()) {
+            track->setInternalMute(it->second);
+            tracksInternalMute->erase(it);
+        }
+    }
+}
+
+sp<IAfTrack> BitPerfectThread::getTrackToStreamBitPerfectly_l() {
+    if (com::android::media::audioserver::
+                fix_concurrent_playback_behavior_with_bit_perfect_client()) {
+        sp<IAfTrack> bitPerfectTrack = nullptr;
+        bool allOtherTracksMuted = true;
+        // Return the bit perfect track if all other tracks are muted
+        for (const auto& track : mActiveTracks) {
+            if (track->isBitPerfect()) {
+                bitPerfectTrack = track;
+            } else if (track->getFinalVolume() != 0.f) {
+                allOtherTracksMuted = false;
+                if (bitPerfectTrack != nullptr) {
+                    break;
+                }
+            }
+        }
+        return allOtherTracksMuted ? bitPerfectTrack : nullptr;
+    } else {
+        if (mActiveTracks.size() == 1 && mActiveTracks[0]->isBitPerfect()) {
+            return mActiveTracks[0];
+        }
+    }
+    return nullptr;
 }
 
 } // namespace android

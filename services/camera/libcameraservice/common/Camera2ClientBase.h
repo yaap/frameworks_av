@@ -21,6 +21,7 @@
 #include "camera/CameraMetadata.h"
 #include "camera/CaptureResult.h"
 #include "utils/CameraServiceProxyWrapper.h"
+#include "utils/AttributionAndPermissionUtils.h"
 #include "CameraServiceWatchdog.h"
 
 namespace android {
@@ -51,6 +52,7 @@ public:
     Camera2ClientBase(const sp<CameraService>& cameraService,
                       const sp<TCamCallbacks>& remoteCallback,
                       std::shared_ptr<CameraServiceProxyWrapper> cameraServiceProxyWrapper,
+                      std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
                       const std::string& clientPackageName,
                       bool systemNativeClient,
                       const std::optional<std::string>& clientFeatureId,
@@ -62,7 +64,7 @@ public:
                       uid_t clientUid,
                       int servicePid,
                       bool overrideForPerfClass,
-                      bool overrideToPortrait,
+                      int rotationOverride,
                       bool legacyClient = false);
     virtual ~Camera2ClientBase();
 
@@ -84,6 +86,7 @@ public:
     virtual status_t      notifyActive(float maxPreviewFps);
     virtual void          notifyIdle(int64_t /*requestCount*/, int64_t /*resultErrorCount*/,
                                      bool /*deviceError*/,
+                                     std::pair<int32_t, int32_t> /*mostRequestedFpsRange*/,
                                      const std::vector<hardware::CameraStreamStats>&) {}
     virtual void          notifyShutter(const CaptureResultExtras& resultExtras,
                                         nsecs_t timestamp);
@@ -97,6 +100,7 @@ public:
 
     void                  notifyIdleWithUserTag(int64_t requestCount, int64_t resultErrorCount,
                                      bool deviceError,
+                                     std::pair<int32_t, int32_t> mostRequestedFpsRange,
                                      const std::vector<hardware::CameraStreamStats>& streamStats,
                                      const std::string& userTag, int videoStabilizationMode,
                                      bool usedUltraWide, bool usedZoomOverride);

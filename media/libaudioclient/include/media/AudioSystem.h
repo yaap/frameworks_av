@@ -187,7 +187,10 @@ public:
 
     // helper function to obtain AudioFlinger service handle
     static sp<IAudioFlinger> get_audio_flinger();
-    static sp<IAudioFlinger> get_audio_flinger_for_fuzzer();
+
+    // function to disable creation of thread pool (Used for testing).
+    // This should be called before get_audio_flinger() or get_audio_policy_service().
+    static void disableThreadPool();
 
     static float linearToLog(int volume);
     static int logToLinear(float volume);
@@ -371,9 +374,13 @@ public:
     static status_t startInput(audio_port_handle_t portId);
     static status_t stopInput(audio_port_handle_t portId);
     static void releaseInput(audio_port_handle_t portId);
+    static status_t setDeviceAbsoluteVolumeEnabled(audio_devices_t deviceType,
+                                                   const char *address,
+                                                   bool enabled,
+                                                   audio_stream_type_t streamToDriveAbs);
     static status_t initStreamVolume(audio_stream_type_t stream,
-                                      int indexMin,
-                                      int indexMax);
+                                     int indexMin,
+                                     int indexMax);
     static status_t setStreamVolumeIndex(audio_stream_type_t stream,
                                          int index,
                                          audio_devices_t device);

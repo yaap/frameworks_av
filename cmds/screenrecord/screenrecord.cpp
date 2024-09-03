@@ -117,6 +117,7 @@ static AString gCodecName = "";         // codec name override
 static bool gSizeSpecified = false;     // was size explicitly requested?
 static bool gWantInfoScreen = false;    // do we want initial info screen?
 static bool gWantFrameTime = false;     // do we want times on each frame?
+static bool gSecureDisplay = false;     // should we create a secure virtual display?
 static uint32_t gVideoWidth = 0;        // default width+height
 static uint32_t gVideoHeight = 0;
 static uint32_t gBitRate = 20000000;     // 20Mbps
@@ -361,8 +362,8 @@ static status_t prepareVirtualDisplay(
         const ui::DisplayState& displayState,
         const sp<IGraphicBufferProducer>& bufferProducer,
         sp<IBinder>* pDisplayHandle, sp<SurfaceControl>* mirrorRoot) {
-    sp<IBinder> dpy = SurfaceComposerClient::createDisplay(
-            String8("ScreenRecorder"), false /*secure*/);
+    static const std::string kDisplayName("ScreenRecorder");
+    sp<IBinder> dpy = SurfaceComposerClient::createVirtualDisplay(kDisplayName, gSecureDisplay);
     SurfaceComposerClient::Transaction t;
     t.setDisplaySurface(dpy, bufferProducer);
     setDisplayProjection(t, dpy, displayState);
@@ -796,7 +797,7 @@ struct RecordingData {
     sp<Overlay> overlay;
 
     ~RecordingData() {
-        if (dpy != nullptr) SurfaceComposerClient::destroyDisplay(dpy);
+        if (dpy != nullptr) SurfaceComposerClient::destroyVirtualDisplay(dpy);
         if (overlay != nullptr) overlay->stop();
         if (encoder != nullptr) {
             encoder->stop();
@@ -1253,6 +1254,7 @@ int main(int argc, char* const argv[]) {
         { "persistent-surface", no_argument,        NULL, 'p' },
         { "bframes",            required_argument,  NULL, 'B' },
         { "display-id",         required_argument,  NULL, 'd' },
+        { "capture-secure",     no_argument,        NULL, 'S' },
         { NULL,                 0,                  NULL, 0 }
     };
 
@@ -1372,6 +1374,9 @@ int main(int argc, char* const argv[]) {
 
             fprintf(stderr, "Invalid physical display ID\n");
             return 2;
+        case 'S':
+            gSecureDisplay = true;
+            break;
         default:
             if (ic != '?') {
                 fprintf(stderr, "getopt_long returned unexpected value 0x%x\n", ic);

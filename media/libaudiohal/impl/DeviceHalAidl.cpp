@@ -58,6 +58,7 @@ using aidl::android::media::audio::common::MicrophoneInfo;
 using aidl::android::media::audio::IHalAdapterVendorExtension;
 using aidl::android::hardware::audio::common::getFrameSizeInBytes;
 using aidl::android::hardware::audio::common::isBitPositionFlagSet;
+using aidl::android::hardware::audio::common::kDumpFromAudioServerArgument;
 using aidl::android::hardware::audio::common::RecordTrackMetadata;
 using aidl::android::hardware::audio::core::sounddose::ISoundDose;
 using aidl::android::hardware::audio::core::AudioPatch;
@@ -386,7 +387,7 @@ class OutputStreamCallbackAidl : public StreamCallbackBase,
         return runCb([](CbRef cb) { cb->onWriteReady(); });
     }
     ndk::ScopedAStatus onError() override {
-        return runCb([](CbRef cb) { cb->onError(); });
+        return runCb([](CbRef cb) { cb->onError(true /*isHardError*/); });
     }
     ndk::ScopedAStatus onDrainReady() override {
         return runCb([](CbRef cb) { cb->onDrainReady(); });
@@ -459,13 +460,17 @@ status_t DeviceHalAidl::openOutputStream(
     args.portConfigId = mixPortConfig.id;
     const bool isOffload = isBitPositionFlagSet(
             aidlOutputFlags, AudioOutputFlags::COMPRESS_OFFLOAD);
+    const bool isHwAvSync = isBitPositionFlagSet(
+            aidlOutputFlags, AudioOutputFlags::HW_AV_SYNC);
     std::shared_ptr<OutputStreamCallbackAidl> streamCb;
     if (isOffload) {
         streamCb = ndk::SharedRefBase::make<OutputStreamCallbackAidl>(this);
     }
     auto eventCb = ndk::SharedRefBase::make<OutputStreamEventCallbackAidl>(this);
-    if (isOffload) {
+    if (isOffload || isHwAvSync) {
         args.offloadInfo = aidlConfig.offloadInfo;
+    }
+    if (isOffload) {
         args.callback = streamCb;
     }
     args.bufferSizeFrames = aidlConfig.frameCount;
@@ -478,15 +483,21 @@ status_t DeviceHalAidl::openOutputStream(
                 __func__, ret.desc.toString().c_str());
         return NO_INIT;
     }
-    *outStream = sp<StreamOutHalAidl>::make(*config, std::move(context), aidlPatch.latenciesMs[0],
+    auto stream = sp<StreamOutHalAidl>::make(*config, std::move(context), aidlPatch.latenciesMs[0],
             std::move(ret.stream), mVendorExt, this /*callbackBroker*/);
-    void* cbCookie = (*outStream).get();
+    *outStream = stream;
+    /* StreamOutHalInterface* */ void* cbCookie = (*outStream).get();
     {
         std::lock_guard l(mLock);
         mCallbacks.emplace(cbCookie, Callbacks{});
         mMapper.addStream(*outStream, mixPortConfig.id, aidlPatch.id);
     }
-    if (streamCb) streamCb->setCookie(cbCookie);
+    if (streamCb) {
+        streamCb->setCookie(cbCookie);
+        // Although StreamOutHalAidl implements StreamOutHalInterfaceCallback,
+        // we always go via the CallbackBroker for consistency.
+        setStreamOutCallback(cbCookie, stream);
+    }
     eventCb->setCookie(cbCookie);
     cleanups.disarmAll();
     return OK;
@@ -589,7 +600,6 @@ status_t DeviceHalAidl::createAudioPatch(unsigned int num_sources,
     // that the HAL module uses `int32_t` for patch IDs. The following assert ensures
     // that both the framework and the HAL use the same value for "no ID":
     static_assert(AUDIO_PATCH_HANDLE_NONE == 0);
-    int32_t aidlPatchId = static_cast<int32_t>(*patch);
 
     // Upon conversion, mix port configs contain audio configuration, while
     // device port configs contain device address. This data is used to find
@@ -611,11 +621,27 @@ status_t DeviceHalAidl::createAudioPatch(unsigned int num_sources,
                         ::aidl::android::legacy2aidl_audio_port_config_AudioPortConfig(
                                 sinks[i], isInput, 0)));
     }
+    int32_t aidlPatchId = static_cast<int32_t>(*patch);
     Hal2AidlMapper::Cleanups cleanups(mMapperAccessor);
     {
         std::lock_guard l(mLock);
-        RETURN_STATUS_IF_ERROR(mMapper.createOrUpdatePatch(
-                        aidlSources, aidlSinks, &aidlPatchId, &cleanups));
+        // Check for patches that only exist for the framework, or have different HAL patch ID.
+        if (int32_t aidlHalPatchId = mMapper.findFwkPatch(aidlPatchId); aidlHalPatchId != 0) {
+            if (aidlHalPatchId == aidlPatchId) {
+                // This patch was previously released by the HAL. Thus we need to pass '0'
+                // to the HAL to obtain a new patch.
+                int32_t newAidlPatchId = 0;
+                RETURN_STATUS_IF_ERROR(mMapper.createOrUpdatePatch(
+                                aidlSources, aidlSinks, &newAidlPatchId, &cleanups));
+                mMapper.updateFwkPatch(aidlPatchId, newAidlPatchId);
+            } else {
+                RETURN_STATUS_IF_ERROR(mMapper.createOrUpdatePatch(
+                                aidlSources, aidlSinks, &aidlHalPatchId, &cleanups));
+            }
+        } else {
+            RETURN_STATUS_IF_ERROR(mMapper.createOrUpdatePatch(
+                            aidlSources, aidlSinks, &aidlPatchId, &cleanups));
+        }
     }
     *patch = static_cast<audio_patch_handle_t>(aidlPatchId);
     cleanups.disarmAll();
@@ -631,7 +657,19 @@ status_t DeviceHalAidl::releaseAudioPatch(audio_patch_handle_t patch) {
         return BAD_VALUE;
     }
     std::lock_guard l(mLock);
-    RETURN_STATUS_IF_ERROR(mMapper.releaseAudioPatch(static_cast<int32_t>(patch)));
+    // Check for patches that only exist for the framework, or have different HAL patch ID.
+    int32_t aidlPatchId = static_cast<int32_t>(patch);
+    if (int32_t aidlHalPatchId = mMapper.findFwkPatch(aidlPatchId); aidlHalPatchId != 0) {
+        if (aidlHalPatchId == aidlPatchId) {
+            // This patch was previously released by the HAL, just need to finish its removal.
+            mMapper.eraseFwkPatch(aidlPatchId);
+            return OK;
+        } else {
+            // This patch has a HAL patch ID which is different
+            aidlPatchId = aidlHalPatchId;
+        }
+    }
+    RETURN_STATUS_IF_ERROR(mMapper.releaseAudioPatch(aidlPatchId));
     return OK;
 }
 
@@ -880,7 +918,9 @@ error::Result<audio_hw_sync_t> DeviceHalAidl::getHwAvSync() {
 status_t DeviceHalAidl::dump(int fd, const Vector<String16>& args) {
     TIME_CHECK();
     if (mModule == nullptr) return NO_INIT;
-    return mModule->dump(fd, Args(args).args(), args.size());
+    Vector<String16> newArgs = args;
+    newArgs.push(String16(kDumpFromAudioServerArgument));
+    return mModule->dump(fd, Args(newArgs).args(), newArgs.size());
 }
 
 status_t DeviceHalAidl::supportsBluetoothVariableLatency(bool* supports) {
@@ -988,7 +1028,7 @@ status_t DeviceHalAidl::setSimulateDeviceConnections(bool enabled) {
     if (mModule == nullptr) return NO_INIT;
     {
         std::lock_guard l(mLock);
-        mMapper.resetUnusedPatchesPortConfigsAndPorts();
+        mMapper.resetUnusedPatchesAndPortConfigs();
     }
     ModuleDebug debug{ .simulateDeviceConnections = enabled };
     status_t status = statusTFromBinderStatus(mModule->setModuleDebug(debug));

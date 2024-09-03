@@ -14,8 +14,13 @@
  * limitations under the License.
  */
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <memory>
+#include <optional>
+#include <regex>
 
 #include "VirtualCameraService.h"
 #include "aidl/android/companion/virtualcamera/BnVirtualCameraCallback.h"
@@ -29,6 +34,7 @@
 #include "binder/Binder.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "util/MetadataUtil.h"
 #include "util/Permissions.h"
 #include "utils/Errors.h"
 
@@ -44,15 +50,18 @@ using ::aidl::android::companion::virtualcamera::SensorOrientation;
 using ::aidl::android::companion::virtualcamera::VirtualCameraConfiguration;
 using ::aidl::android::hardware::camera::common::CameraDeviceStatus;
 using ::aidl::android::hardware::camera::common::TorchModeStatus;
+using ::aidl::android::hardware::camera::device::CameraMetadata;
 using ::aidl::android::hardware::camera::provider::BnCameraProviderCallback;
 using ::aidl::android::hardware::graphics::common::PixelFormat;
 using ::aidl::android::view::Surface;
 using ::testing::_;
+using ::testing::ElementsAre;
 using ::testing::Eq;
 using ::testing::Ge;
 using ::testing::IsEmpty;
 using ::testing::IsNull;
 using ::testing::Not;
+using ::testing::Optional;
 using ::testing::Return;
 using ::testing::SizeIs;
 
@@ -62,10 +71,22 @@ constexpr int kMaxFps = 30;
 constexpr SensorOrientation kSensorOrientation =
     SensorOrientation::ORIENTATION_0;
 constexpr LensFacing kLensFacing = LensFacing::FRONT;
+constexpr int kDefaultDeviceId = 0;
 constexpr char kCreateVirtualDevicePermissions[] =
     "android.permission.CREATE_VIRTUAL_DEVICE";
 
 const VirtualCameraConfiguration kEmptyVirtualCameraConfiguration;
+
+class MockVirtualCameraCallback : public BnVirtualCameraCallback {
+ public:
+  MOCK_METHOD(ndk::ScopedAStatus, onStreamConfigured,
+              (int32_t, const ::aidl::android::view::Surface&, int, int,
+               ::aidl::android::companion::virtualcamera::Format pixelFormat),
+              (override));
+  MOCK_METHOD(ndk::ScopedAStatus, onProcessCaptureRequest, (int32_t, int32_t),
+              (override));
+  MOCK_METHOD(ndk::ScopedAStatus, onStreamClosed, (int32_t), (override));
+};
 
 VirtualCameraConfiguration createConfiguration(const int width, const int height,
                                                const Format format,
@@ -77,6 +98,8 @@ VirtualCameraConfiguration createConfiguration(const int width, const int height
                                                   .maxFps = maxFps});
   configuration.sensorOrientation = kSensorOrientation;
   configuration.lensFacing = kLensFacing;
+  configuration.virtualCameraCallback =
+      ndk::SharedRefBase::make<MockVirtualCameraCallback>();
   return configuration;
 }
 
@@ -110,6 +133,7 @@ class VirtualCameraServiceTest : public ::testing::Test {
     mCameraProvider->setCallback(mMockCameraProviderCallback);
     mCameraService = ndk::SharedRefBase::make<VirtualCameraService>(
         mCameraProvider, mMockPermissionsProxy);
+    mCameraService->disableEglVerificationForTest();
 
     ON_CALL(mMockPermissionsProxy, checkCallingPermission)
         .WillByDefault(Return(true));
@@ -124,8 +148,8 @@ class VirtualCameraServiceTest : public ::testing::Test {
     bool aidlRet;
 
     ASSERT_TRUE(mCameraService
-                    ->registerCamera(mNdkOwnerToken,
-                                     mVgaYUV420OnlyConfiguration, &aidlRet)
+                    ->registerCamera(mNdkOwnerToken, mVgaYUV420OnlyConfiguration,
+                                     kDefaultDeviceId, &aidlRet)
                     .isOk());
     ASSERT_TRUE(aidlRet);
   }
@@ -134,18 +158,48 @@ class VirtualCameraServiceTest : public ::testing::Test {
     close(mDevNullFd);
   }
 
-  void execute_shell_command(const std::string cmd) {
-    std::array<const char*, 1> args{cmd.data()};
-    ASSERT_THAT(
-        mCameraService->handleShellCommand(mDevNullFd, mDevNullFd, mDevNullFd,
-                                           args.data(), args.size()),
-        Eq(NO_ERROR));
+  binder_status_t execute_shell_command(const std::string& cmd) {
+    const static std::regex whitespaceRegex("\\s+");
+    std::vector<std::string> tokens;
+    std::copy_if(
+        std::sregex_token_iterator(cmd.begin(), cmd.end(), whitespaceRegex, -1),
+        std::sregex_token_iterator(), std::back_inserter(tokens),
+        [](const std::string& token) { return !token.empty(); });
+
+    std::vector<const char*> argv;
+    argv.reserve(tokens.size());
+    std::transform(tokens.begin(), tokens.end(), std::back_inserter(argv),
+                   [](const std::string& str) { return str.c_str(); });
+
+    return mCameraService->handleShellCommand(
+        mDevNullFd, mDevNullFd, mDevNullFd, argv.data(), argv.size());
   }
 
   std::vector<std::string> getCameraIds() {
     std::vector<std::string> cameraIds;
     EXPECT_TRUE(mCameraProvider->getCameraIdList(&cameraIds).isOk());
     return cameraIds;
+  }
+
+  std::optional<camera_metadata_enum_android_lens_facing> getCameraLensFacing(
+      const std::string& id) {
+    std::shared_ptr<VirtualCameraDevice> camera = mCameraProvider->getCamera(id);
+    if (camera == nullptr) {
+      return std::nullopt;
+    }
+    CameraMetadata metadata;
+    camera->getCameraCharacteristics(&metadata);
+    return getLensFacing(metadata);
+  }
+
+  std::optional<int32_t> getCameraSensorOrienation(const std::string& id) {
+    std::shared_ptr<VirtualCameraDevice> camera = mCameraProvider->getCamera(id);
+    if (camera == nullptr) {
+      return std::nullopt;
+    }
+    CameraMetadata metadata;
+    camera->getCameraCharacteristics(&metadata);
+    return getSensorOrientation(metadata);
   }
 
  protected:
@@ -169,10 +223,10 @@ TEST_F(VirtualCameraServiceTest, RegisterCameraWithYuvInputSucceeds) {
   ndk::SpAIBinder ndkToken(AIBinder_fromPlatformBinder(token));
   bool aidlRet;
 
-  ASSERT_TRUE(
-      mCameraService
-          ->registerCamera(ndkToken, mVgaYUV420OnlyConfiguration, &aidlRet)
-          .isOk());
+  ASSERT_TRUE(mCameraService
+                  ->registerCamera(ndkToken, mVgaYUV420OnlyConfiguration,
+                                   kDefaultDeviceId, &aidlRet)
+                  .isOk());
 
   EXPECT_TRUE(aidlRet);
   EXPECT_THAT(getCameraIds(), SizeIs(1));
@@ -186,7 +240,9 @@ TEST_F(VirtualCameraServiceTest, RegisterCameraWithRgbaInputSucceeds) {
   VirtualCameraConfiguration config =
       createConfiguration(kVgaWidth, kVgaHeight, Format::RGBA_8888, kMaxFps);
 
-  ASSERT_TRUE(mCameraService->registerCamera(ndkToken, config, &aidlRet).isOk());
+  ASSERT_TRUE(mCameraService
+                  ->registerCamera(ndkToken, config, kDefaultDeviceId, &aidlRet)
+                  .isOk());
 
   EXPECT_TRUE(aidlRet);
   EXPECT_THAT(getCameraIds(), SizeIs(1));
@@ -198,7 +254,7 @@ TEST_F(VirtualCameraServiceTest, RegisterCameraTwiceSecondReturnsFalse) {
 
   ASSERT_TRUE(mCameraService
                   ->registerCamera(mNdkOwnerToken, mVgaYUV420OnlyConfiguration,
-                                   &aidlRet)
+                                   kDefaultDeviceId, &aidlRet)
                   .isOk());
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), SizeIs(1));
@@ -209,8 +265,27 @@ TEST_F(VirtualCameraServiceTest, EmptyConfigurationFails) {
 
   ASSERT_FALSE(mCameraService
                    ->registerCamera(mNdkOwnerToken,
-                                    kEmptyVirtualCameraConfiguration, &aidlRet)
+                                    kEmptyVirtualCameraConfiguration,
+                                    kDefaultDeviceId, &aidlRet)
                    .isOk());
+  EXPECT_FALSE(aidlRet);
+  EXPECT_THAT(getCameraIds(), IsEmpty());
+}
+
+TEST_F(VirtualCameraServiceTest,
+       ConfigurationWithoutVirtualCameraCallbackFails) {
+  sp<BBinder> token = sp<BBinder>::make();
+  ndk::SpAIBinder ndkToken(AIBinder_fromPlatformBinder(token));
+  bool aidlRet;
+
+  VirtualCameraConfiguration config =
+      createConfiguration(kVgaWidth, kVgaHeight, Format::RGBA_8888, kMaxFps);
+  config.virtualCameraCallback = nullptr;
+
+  ASSERT_FALSE(mCameraService
+                   ->registerCamera(ndkToken, config, kDefaultDeviceId, &aidlRet)
+                   .isOk());
+
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), IsEmpty());
 }
@@ -222,7 +297,9 @@ TEST_F(VirtualCameraServiceTest, ConfigurationWithUnsupportedPixelFormatFails) {
       createConfiguration(kVgaWidth, kVgaHeight, Format::UNKNOWN, kMaxFps);
 
   ASSERT_FALSE(
-      mCameraService->registerCamera(mNdkOwnerToken, config, &aidlRet).isOk());
+      mCameraService
+          ->registerCamera(mNdkOwnerToken, config, kDefaultDeviceId, &aidlRet)
+          .isOk());
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), IsEmpty());
 }
@@ -233,18 +310,9 @@ TEST_F(VirtualCameraServiceTest, ConfigurationWithTooHighResFails) {
       createConfiguration(1000000, 1000000, Format::YUV_420_888, kMaxFps);
 
   ASSERT_FALSE(
-      mCameraService->registerCamera(mNdkOwnerToken, config, &aidlRet).isOk());
-  EXPECT_FALSE(aidlRet);
-  EXPECT_THAT(getCameraIds(), IsEmpty());
-}
-
-TEST_F(VirtualCameraServiceTest, ConfigurationWithUnalignedResolutionFails) {
-  bool aidlRet;
-  VirtualCameraConfiguration config =
-      createConfiguration(641, 481, Format::YUV_420_888, kMaxFps);
-
-  ASSERT_FALSE(
-      mCameraService->registerCamera(mNdkOwnerToken, config, &aidlRet).isOk());
+      mCameraService
+          ->registerCamera(mNdkOwnerToken, config, kDefaultDeviceId, &aidlRet)
+          .isOk());
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), IsEmpty());
 }
@@ -255,7 +323,9 @@ TEST_F(VirtualCameraServiceTest, ConfigurationWithNegativeResolutionFails) {
       createConfiguration(-1, kVgaHeight, Format::YUV_420_888, kMaxFps);
 
   ASSERT_FALSE(
-      mCameraService->registerCamera(mNdkOwnerToken, config, &aidlRet).isOk());
+      mCameraService
+          ->registerCamera(mNdkOwnerToken, config, kDefaultDeviceId, &aidlRet)
+          .isOk());
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), IsEmpty());
 }
@@ -266,7 +336,9 @@ TEST_F(VirtualCameraServiceTest, ConfigurationWithTooLowMaxFpsFails) {
       createConfiguration(kVgaWidth, kVgaHeight, Format::YUV_420_888, 0);
 
   ASSERT_FALSE(
-      mCameraService->registerCamera(mNdkOwnerToken, config, &aidlRet).isOk());
+      mCameraService
+          ->registerCamera(mNdkOwnerToken, config, kDefaultDeviceId, &aidlRet)
+          .isOk());
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), IsEmpty());
 }
@@ -277,7 +349,9 @@ TEST_F(VirtualCameraServiceTest, ConfigurationWithTooHighMaxFpsFails) {
       createConfiguration(kVgaWidth, kVgaHeight, Format::YUV_420_888, 90);
 
   ASSERT_FALSE(
-      mCameraService->registerCamera(mNdkOwnerToken, config, &aidlRet).isOk());
+      mCameraService
+          ->registerCamera(mNdkOwnerToken, config, kDefaultDeviceId, &aidlRet)
+          .isOk());
   EXPECT_FALSE(aidlRet);
   EXPECT_THAT(getCameraIds(), IsEmpty());
 }
@@ -311,7 +385,7 @@ TEST_F(VirtualCameraServiceTest, RegisterCameraWithoutPermissionFails) {
 
   EXPECT_THAT(mCameraService
                   ->registerCamera(mNdkOwnerToken, mVgaYUV420OnlyConfiguration,
-                                   &aidlRet)
+                                   kDefaultDeviceId, &aidlRet)
                   .getExceptionCode(),
               Eq(EX_SECURITY));
 }
@@ -327,7 +401,7 @@ TEST_F(VirtualCameraServiceTest, UnregisterCameraWithoutPermissionFails) {
 }
 
 TEST_F(VirtualCameraServiceTest, GetIdWithoutPermissionFails) {
-  int32_t aidlRet;
+  std::string aidlRet;
   EXPECT_CALL(mMockPermissionsProxy,
               checkCallingPermission(kCreateVirtualDevicePermissions))
       .WillOnce(Return(false));
@@ -370,15 +444,95 @@ TEST_F(VirtualCameraServiceTest, ShellCmdWithNoArgs) {
 }
 
 TEST_F(VirtualCameraServiceTest, TestCameraShellCmd) {
-  execute_shell_command("enable_test_camera");
+  EXPECT_THAT(execute_shell_command("enable_test_camera"), Eq(NO_ERROR));
 
   std::vector<std::string> cameraIdsAfterEnable = getCameraIds();
   EXPECT_THAT(cameraIdsAfterEnable, SizeIs(1));
 
-  execute_shell_command("disable_test_camera");
+  EXPECT_THAT(execute_shell_command("disable_test_camera"), Eq(NO_ERROR));
 
   std::vector<std::string> cameraIdsAfterDisable = getCameraIds();
   EXPECT_THAT(cameraIdsAfterDisable, IsEmpty());
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithId) {
+  EXPECT_THAT(
+      execute_shell_command("enable_test_camera --camera_id=hello12345"),
+      Eq(NO_ERROR));
+
+  std::vector<std::string> cameraIdsAfterEnable = getCameraIds();
+  EXPECT_THAT(cameraIdsAfterEnable,
+              ElementsAre("device@1.1/virtual/hello12345"));
+
+  EXPECT_THAT(execute_shell_command("disable_test_camera"), Eq(NO_ERROR));
+
+  std::vector<std::string> cameraIdsAfterDisable = getCameraIds();
+  EXPECT_THAT(cameraIdsAfterDisable, IsEmpty());
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithInvalidId) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera --camera_id="),
+              Eq(STATUS_BAD_VALUE));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithUnknownCommand) {
+  EXPECT_THAT(execute_shell_command("brew_coffee --flavor=vanilla"),
+              Eq(STATUS_BAD_VALUE));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithMalformedOption) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera **camera_id=12345"),
+              Eq(STATUS_BAD_VALUE));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithLensFacing) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera --lens_facing=front"),
+              Eq(NO_ERROR));
+
+  std::vector<std::string> cameraIds = getCameraIds();
+  ASSERT_THAT(cameraIds, SizeIs(1));
+  EXPECT_THAT(getCameraLensFacing(cameraIds[0]),
+              Optional(Eq(ANDROID_LENS_FACING_FRONT)));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithInvalidLensFacing) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera --lens_facing=west"),
+              Eq(STATUS_BAD_VALUE));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithInputFps) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera --input_fps=15"),
+              Eq(NO_ERROR));
+
+  std::vector<std::string> cameraIds = getCameraIds();
+  ASSERT_THAT(cameraIds, SizeIs(1));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithInvalidInputFps) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera --input_fps=1001"),
+              Eq(STATUS_BAD_VALUE));
+  EXPECT_THAT(execute_shell_command("enable_test_camera --input_fps=0"),
+              Eq(STATUS_BAD_VALUE));
+  EXPECT_THAT(execute_shell_command("enable_test_camera --input_fps=foo"),
+              Eq(STATUS_BAD_VALUE));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithSensorOrientation90) {
+  EXPECT_THAT(
+      execute_shell_command("enable_test_camera --sensor_orientation=90"),
+      Eq(NO_ERROR));
+
+  std::vector<std::string> cameraIds = getCameraIds();
+  ASSERT_THAT(cameraIds, SizeIs(1));
+  EXPECT_THAT(getCameraSensorOrienation(cameraIds[0]), Optional(Eq(90)));
+}
+
+TEST_F(VirtualCameraServiceTest, TestCameraShellCmdWithSensorOrientationNoArgs) {
+  EXPECT_THAT(execute_shell_command("enable_test_camera"), Eq(NO_ERROR));
+
+  std::vector<std::string> cameraIds = getCameraIds();
+  ASSERT_THAT(cameraIds, SizeIs(1));
+  EXPECT_THAT(getCameraSensorOrienation(cameraIds[0]), Optional(Eq(0)));
 }
 
 }  // namespace

@@ -17,6 +17,7 @@
 #ifndef ANDROID_SERVERS_CAMERA_PHOTOGRAPHY_CAMERAOFFLINESESSIONCLIENT_H
 #define ANDROID_SERVERS_CAMERA_PHOTOGRAPHY_CAMERAOFFLINESESSIONCLIENT_H
 
+#include <android/hardware/ICameraService.h>
 #include <android/hardware/camera2/BnCameraOfflineSession.h>
 #include <android/hardware/camera2/ICameraDeviceCallbacks.h>
 #include "common/FrameProcessorBase.h"
@@ -47,6 +48,7 @@ public:
             sp<CameraOfflineSessionBase> session,
             const KeyedVector<sp<IBinder>, sp<CompositeStream>>& offlineCompositeStreamMap,
             const sp<ICameraDeviceCallbacks>& remoteCallback,
+            std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
             const std::string& clientPackageName,
             const std::optional<std::string>& clientFeatureId,
             const std::string& cameraIdStr, int cameraFacing, int sensorOrientation,
@@ -54,10 +56,11 @@ public:
             CameraService::BasicClient(
                     cameraService,
                     IInterface::asBinder(remoteCallback),
+                    attributionAndPermissionUtils,
                     // (v)ndk doesn't have offline session support
                     clientPackageName, /*overridePackageName*/false, clientFeatureId,
                     cameraIdStr, cameraFacing, sensorOrientation, clientPid, clientUid, servicePid,
-                    /*overrideToPortrait*/false),
+                    hardware::ICameraService::ROTATION_OVERRIDE_NONE),
             mRemoteCallback(remoteCallback), mOfflineSession(session),
             mCompositeStreamMap(offlineCompositeStreamMap) {}
 
@@ -110,6 +113,7 @@ public:
     void notifyShutter(const CaptureResultExtras& resultExtras, nsecs_t timestamp) override;
     status_t notifyActive(float maxPreviewFps) override;
     void notifyIdle(int64_t requestCount, int64_t resultErrorCount, bool deviceError,
+            std::pair<int32_t, int32_t> mostRequestedFpsRange,
             const std::vector<hardware::CameraStreamStats>& streamStats) override;
     void notifyAutoFocus(uint8_t newState, int triggerId) override;
     void notifyAutoExposure(uint8_t newState, int triggerId) override;

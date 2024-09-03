@@ -574,7 +574,7 @@ void CameraManagerGlobal::onStatusChanged(
 void CameraManagerGlobal::onStatusChangedLocked(
         const CameraDeviceStatus &status, const std::string &cameraId) {
     if (!validStatus(status)) {
-        ALOGE("%s: Invalid status %d", __FUNCTION__, status);
+        ALOGE("%s: Invalid status %d", __FUNCTION__, static_cast<int>(status));
         return;
     }
 
@@ -629,7 +629,7 @@ void CameraManagerGlobal::onStatusChangedLocked(
         const CameraDeviceStatus &status, const std::string& cameraId,
         const std::string& physicalCameraId) {
     if (!validStatus(status)) {
-        ALOGE("%s: Invalid status %d", __FUNCTION__, status);
+        ALOGE("%s: Invalid status %d", __FUNCTION__, static_cast<int>(status));
         return;
     }
 
@@ -643,7 +643,8 @@ void CameraManagerGlobal::onStatusChangedLocked(
     if (logicalCamStatus != CameraDeviceStatus::STATUS_PRESENT &&
             logicalCamStatus != CameraDeviceStatus::STATUS_NOT_AVAILABLE) {
         ALOGE("%s: Physical camera id %s status %d change for an invalid logical camera state %d",
-                __FUNCTION__, physicalCameraId.c_str(), status, logicalCamStatus);
+              __FUNCTION__, physicalCameraId.c_str(), static_cast<int>(status),
+              static_cast<int>(logicalCamStatus));
         return;
     }
 
@@ -866,6 +867,25 @@ ACameraManager::getTagFromName(const char *cameraId, const char *name, uint32_t 
     return status == OK ? ACAMERA_OK : ACAMERA_ERROR_METADATA_NOT_FOUND;
 }
 
-ACameraManager::~ACameraManager() {
+void ACameraManager::registerAvailabilityCallback(
+        const ACameraManager_AvailabilityCallbacks* callback) {
+    mGlobalManager->registerAvailabilityCallback(callback);
+}
 
+void ACameraManager::unregisterAvailabilityCallback(
+        const ACameraManager_AvailabilityCallbacks* callback) {
+    mGlobalManager->unregisterAvailabilityCallback(callback);
+}
+
+void ACameraManager::registerExtendedAvailabilityCallback(
+        const ACameraManager_ExtendedAvailabilityCallbacks* callback) {
+    mGlobalManager->registerExtendedAvailabilityCallback(callback);
+}
+
+void ACameraManager::unregisterExtendedAvailabilityCallback(
+        const ACameraManager_ExtendedAvailabilityCallbacks* callback) {
+    mGlobalManager->unregisterExtendedAvailabilityCallback(callback);
+}
+
+ACameraManager::~ACameraManager() {
 }

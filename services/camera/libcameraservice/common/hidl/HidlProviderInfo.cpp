@@ -861,7 +861,7 @@ status_t HidlProviderInfo::HidlDeviceInfo3::dumpState(int fd) {
 
 status_t HidlProviderInfo::HidlDeviceInfo3::isSessionConfigurationSupported(
         const SessionConfiguration &configuration, bool overrideForPerfClass,
-        bool checkSessionParams, bool *status) {
+        camera3::metadataGetter getMetadata, bool checkSessionParams, bool *status) {
 
     if (checkSessionParams) {
         // HIDL device doesn't support checking session parameters
@@ -870,8 +870,6 @@ status_t HidlProviderInfo::HidlDeviceInfo3::isSessionConfigurationSupported(
 
     hardware::camera::device::V3_7::StreamConfiguration configuration_3_7;
     bool earlyExit = false;
-    camera3::metadataGetter getMetadata = [this](const std::string &id,
-            bool /*overrideForPerfClass*/) {return this->deviceInfo(id);};
     auto bRes = SessionConfigurationUtils::convertToHALStreamCombination(configuration,
             mId, mCameraCharacteristics, getMetadata, mPhysicalIds,
             configuration_3_7, overrideForPerfClass, mProviderTagid,
@@ -959,7 +957,7 @@ status_t HidlProviderInfo::convertToHALStreamCombinationAndCameraIdsLocked(
                 SessionConfigurationUtils::targetPerfClassPrimaryCamera(
                         perfClassPrimaryCameraIds, cameraId, targetSdkVersion);
         res = mManager->getCameraCharacteristicsLocked(cameraId, overrideForPerfClass, &deviceInfo,
-                /*overrideToPortrait*/false);
+                 hardware::ICameraService::ROTATION_OVERRIDE_NONE);
         if (res != OK) {
             return res;
         }
@@ -967,7 +965,7 @@ status_t HidlProviderInfo::convertToHALStreamCombinationAndCameraIdsLocked(
                 [this](const std::string &id, bool overrideForPerfClass) {
                     CameraMetadata physicalDeviceInfo;
                     mManager->getCameraCharacteristicsLocked(id, overrideForPerfClass,
-                            &physicalDeviceInfo, /*overrideToPortrait*/false);
+                            &physicalDeviceInfo, hardware::ICameraService::ROTATION_OVERRIDE_NONE);
                     return physicalDeviceInfo;
                 };
         std::vector<std::string> physicalCameraIds;

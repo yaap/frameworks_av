@@ -72,8 +72,10 @@ cc_defaults {
         "libsensorprivacy",
         "libstagefright",
         "libstagefright_foundation",
+        "libvendorsupport",
         "libxml2",
         "libyuv",
+        "android.companion.virtual.virtualdevice_aidl-cpp",
         "android.companion.virtualdevice.flags-aconfig-cc",
         "android.hardware.camera.common@1.0",
         "android.hardware.camera.device@1.0",
@@ -86,6 +88,7 @@ cc_defaults {
         "android.hardware.common-V2-ndk",
         "android.hardware.common.fmq-V1-ndk",
         "camera_platform_flags_c_lib",
+        "com.android.window.flags.window-aconfig_flags_c_lib",
         "media_permission-aidl-cpp",
     ],
 
@@ -187,17 +190,17 @@ cc_library {
         "aidl/AidlCameraServiceListener.cpp",
         "aidl/AidlUtils.cpp",
         "aidl/DeathPipe.cpp",
+        "utils/AttributionAndPermissionUtils.cpp",
         "utils/CameraServiceProxyWrapper.cpp",
-        "utils/CameraThreadState.cpp",
         "utils/CameraTraces.cpp",
         "utils/AutoConditionLock.cpp",
         "utils/SchedulingPolicyUtils.cpp",
         "utils/SessionConfigurationUtils.cpp",
         "utils/SessionConfigurationUtilsHidl.cpp",
-        "utils/SessionStatsBuilder.cpp",
         "utils/TagMonitor.cpp",
         "utils/LatencyHistogram.cpp",
         "utils/Utils.cpp",
+        "utils/VirtualDeviceCameraIdMapper.cpp",
     ],
 
     header_libs: [
@@ -229,7 +232,6 @@ cc_library {
         "-Werror",
         "-Wno-ignored-qualifiers",
     ],
-
 }
 
 cc_library_static {
@@ -246,6 +248,7 @@ cc_library_static {
         "device3/ZoomRatioMapper.cpp",
         "utils/ExifUtils.cpp",
         "utils/SessionConfigurationUtilsHost.cpp",
+        "utils/SessionStatsBuilder.cpp",
     ],
 
     header_libs: [
@@ -263,7 +266,7 @@ cc_library_static {
         "liblog",
         "libutils",
         "libxml2",
-        "camera_platform_flags_c_lib"
+        "camera_platform_flags_c_lib",
     ],
 
     include_dirs: [
@@ -279,5 +282,4 @@ cc_library_static {
         "-Werror",
         "-Wno-ignored-qualifiers",
     ],
-
 }

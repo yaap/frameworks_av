@@ -44,5 +44,16 @@
             ],
             "file_patterns": ["(?i)drm|crypto"]
         }
+    ],
+    // Postsubmit tests for TV devices
+    "tv-postsubmit": [
+        {
+            "name": "CtsMediaDecoderTestCases",
+            "options": [
+                {
+                    "include-filter": "android.media.decoder.cts.DecoderRenderTest"
+                }
+            ]
+        }
     ]
 }

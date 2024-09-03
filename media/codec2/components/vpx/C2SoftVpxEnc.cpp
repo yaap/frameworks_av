@@ -22,6 +22,7 @@
 #include <media/hardware/VideoAPI.h>
 
 #include <Codec2BufferUtils.h>
+#include <Codec2CommonUtils.h>
 #include <C2Debug.h>
 #include "C2SoftVpxEnc.h"
 
@@ -63,12 +64,14 @@ C2SoftVpxEnc::IntfImpl::IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helpe
                     0u, (uint64_t)C2MemoryUsage::CPU_READ))
             .build());
 
+    // Odd dimension support in encoders requires Android V and above
+    size_t stepSize = isAtLeastV() ? 1 : 2;
     addParameter(
         DefineParam(mSize, C2_PARAMKEY_PICTURE_SIZE)
             .withDefault(new C2StreamPictureSizeInfo::input(0u, 64, 64))
             .withFields({
-                C2F(mSize, width).inRange(2, 2048, 2),
-                C2F(mSize, height).inRange(2, 2048, 2),
+                C2F(mSize, width).inRange(2, 2048, stepSize),
+                C2F(mSize, height).inRange(2, 2048, stepSize),
             })
             .withSetter(SizeSetter)
             .build());
@@ -351,12 +354,9 @@ uint32_t C2SoftVpxEnc::IntfImpl::getSyncFramePeriod() const {
     return (uint32_t)c2_max(c2_min(period + 0.5, double(UINT32_MAX)), 1.);
 }
 
-C2R C2SoftVpxEnc::IntfImpl::PictureQuantizationSetter(bool mayBlock,
-                                                     C2P<C2StreamPictureQuantizationTuning::output>
-                                                     &me) {
+C2R C2SoftVpxEnc::IntfImpl::PictureQuantizationSetter(
+        bool mayBlock, C2P<C2StreamPictureQuantizationTuning::output>& me) {
     (void)mayBlock;
-    // these are the ones we're going to set, so want them to default
-    // to the DEFAULT values for the codec
     int32_t iMin = VPX_QP_DEFAULT_MIN, pMin = VPX_QP_DEFAULT_MIN;
     int32_t iMax = VPX_QP_DEFAULT_MAX, pMax = VPX_QP_DEFAULT_MAX;
     for (size_t i = 0; i < me.v.flexCount(); ++i) {
@@ -379,8 +379,8 @@ C2R C2SoftVpxEnc::IntfImpl::PictureQuantizationSetter(bool mayBlock,
           iMin, iMax, pMin, pMax);
 
     // vpx library takes same range for I/P picture type
-    int32_t maxFrameQP = std::min({iMax, pMax});
-    int32_t minFrameQP = std::max({iMin, pMin});
+    int32_t maxFrameQP = std::min(iMax, pMax);
+    int32_t minFrameQP = std::max(iMin, pMin);
     if (minFrameQP > maxFrameQP) {
         minFrameQP = maxFrameQP;
     }
@@ -465,6 +465,7 @@ C2SoftVpxEnc::C2SoftVpxEnc(const char* name, c2_node_id_t id,
       mTemporalPatternIdx(0),
       mLastTimestamp(0x7FFFFFFFFFFFFFFFull),
       mSignalledOutputEos(false),
+      mHeaderGenerated(false),
       mSignalledError(false) {
     for (int i = 0; i < MAXTEMPORALLAYERS; i++) {
         mTemporalLayerBitrateRatio[i] = 1.0f;
@@ -494,6 +495,7 @@ void C2SoftVpxEnc::onRelease() {
 
     // this one is not allocated by us
     mCodecInterface = nullptr;
+    mHeaderGenerated = false;
 }
 
 c2_status_t C2SoftVpxEnc::onStop() {
@@ -558,6 +560,7 @@ status_t C2SoftVpxEnc::initEncoder() {
           (uint32_t)mBitrateControlMode, mTemporalLayers, mIntf->getSyncFramePeriod(),
           mMinQuantizer, mMaxQuantizer);
 
+    mHeaderGenerated = false;
     mCodecConfiguration = new vpx_codec_enc_cfg_t;
     if (!mCodecConfiguration) goto CleanUp;
     codec_return = vpx_codec_enc_config_default(mCodecInterface,
@@ -871,6 +874,27 @@ void C2SoftVpxEnc::process(
         work->worklets.front()->output.ordinal = work->input.ordinal;
         work->workletsProcessed = 1u;
         return;
+    }
+
+    // Header generation is limited to Android V and above, as MediaMuxer did not handle
+    // CSD for VP9 correctly in Android U and before.
+    if (isAtLeastV() && !mHeaderGenerated) {
+        vpx_fixed_buf_t* codec_private_data = vpx_codec_get_global_headers(mCodecContext);
+        if (codec_private_data) {
+            std::unique_ptr<C2StreamInitDataInfo::output> csd =
+                    C2StreamInitDataInfo::output::AllocUnique(codec_private_data->sz, 0u);
+            if (!csd) {
+                ALOGE("CSD allocation failed");
+                mSignalledError = true;
+                work->result = C2_NO_MEMORY;
+                work->workletsProcessed = 1u;
+                return;
+            }
+            memcpy(csd->m.value, codec_private_data->buf, codec_private_data->sz);
+            work->worklets.front()->output.configUpdate.push_back(std::move(csd));
+            ALOGV("CSD Produced of size %zu bytes", codec_private_data->sz);
+        }
+        mHeaderGenerated = true;
     }
 
     const C2ConstGraphicBlock inBuffer =

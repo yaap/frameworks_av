@@ -142,15 +142,17 @@ status_t AidlConversionSpatializer::setParameter(EffectParamReader& param) {
                           toString(mode).c_str());
                     return status;
                 }
-                ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
                 aidlParam = MAKE_SPECIFIC_PARAMETER(Spatializer, spatializer, headTrackingSensorId,
                                                     sensorId);
-                ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
                 return statusTFromBinderStatus(mEffect->setParameter(aidlParam));
             }
             default: {
-                ALOGE("%s %d invalid command %u", __func__, __LINE__, command);
-                return BAD_VALUE;
+                // for vendor extension, copy data area to the DefaultExtension, parameter ignored
+                VendorExtension ext = VALUE_OR_RETURN_STATUS(
+                        aidl::android::legacy2aidl_EffectParameterReader_VendorExtension(param));
+                aidlParam =
+                        MAKE_SPECIFIC_PARAMETER(Spatializer, spatializer, vendor, ext);
+                break;
             }
         }
     } else {
@@ -158,7 +160,6 @@ status_t AidlConversionSpatializer::setParameter(EffectParamReader& param) {
                 ::aidl::android::legacy2aidl_EffectParameterReader_Parameter(param));
     }
 
-    ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
     return statusTFromBinderStatus(mEffect->setParameter(aidlParam));
 }
 
@@ -178,16 +179,18 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                 if (!range) {
                     return BAD_VALUE;
                 }
+                std::vector<Spatialization::Level> levels;
                 for (const auto level : ::ndk::enum_range<Spatialization::Level>()) {
                     const auto spatializer =
                             Spatializer::make<Spatializer::spatializationLevel>(level);
                     if (spatializer >= range->min && spatializer <= range->max) {
-                        if (status_t status = param.writeToValue(&level); status != OK) {
-                            ALOGI("%s %d: write level %s to value failed %d", __func__, __LINE__,
-                                  toString(level).c_str(), status);
-                            return status;
-                        }
+                        levels.emplace_back(level);
                     }
+                }
+                const uint8_t num = levels.size();
+                RETURN_STATUS_IF_ERROR(param.writeToValue(&num));
+                for (const auto level : levels) {
+                    RETURN_STATUS_IF_ERROR(param.writeToValue(&level));
                 }
                 return OK;
             }
@@ -200,7 +203,6 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                 const auto level = VALUE_OR_RETURN_STATUS(GET_PARAMETER_SPECIFIC_FIELD(
                         aidlParam, Spatializer, spatializer, Spatializer::spatializationLevel,
                         Spatialization::Level));
-                ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
                 return param.writeToValue(&level);
             }
             case SPATIALIZER_PARAM_HEADTRACKING_SUPPORTED: {
@@ -227,7 +229,6 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                 const auto mode = VALUE_OR_RETURN_STATUS(GET_PARAMETER_SPECIFIC_FIELD(
                         aidlParam, Spatializer, spatializer, Spatializer::headTrackingMode,
                         HeadTracking::Mode));
-                ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
                 return param.writeToValue(&mode);
             }
             case SPATIALIZER_PARAM_SUPPORTED_CHANNEL_MASKS: {
@@ -239,17 +240,15 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                 const auto& supportedLayouts = VALUE_OR_RETURN_STATUS(GET_PARAMETER_SPECIFIC_FIELD(
                         aidlParam, Spatializer, spatializer, Spatializer::supportedChannelLayout,
                         std::vector<AudioChannelLayout>));
+                // audio_channel_mask_t is uint32_t enum, write number in 32bit
+                const uint32_t num = supportedLayouts.size();
+                RETURN_STATUS_IF_ERROR(param.writeToValue(&num));
                 for (const auto& layout : supportedLayouts) {
                     audio_channel_mask_t mask = VALUE_OR_RETURN_STATUS(
                             ::aidl::android::aidl2legacy_AudioChannelLayout_audio_channel_mask_t(
                                     layout, false /* isInput */));
-                    if (status_t status = param.writeToValue(&mask); status != OK) {
-                        ALOGI("%s %d: write mask %s to value failed %d", __func__, __LINE__,
-                              layout.toString().c_str(), status);
-                        return status;
-                    }
+                    RETURN_STATUS_IF_ERROR(param.writeToValue(&mask));
                 }
-                ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
                 return OK;
             }
             case SPATIALIZER_PARAM_SUPPORTED_SPATIALIZATION_MODES: {
@@ -258,16 +257,18 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                 if (!range) {
                     return BAD_VALUE;
                 }
+                std::vector<Spatialization::Mode> modes;
                 for (const auto mode : ::ndk::enum_range<Spatialization::Mode>()) {
                     if (const auto spatializer =
                                 Spatializer::make<Spatializer::spatializationMode>(mode);
                         spatializer >= range->min && spatializer <= range->max) {
-                        if (status_t status = param.writeToValue(&mode); status != OK) {
-                            ALOGI("%s %d: write mode %s to value failed %d", __func__, __LINE__,
-                                  toString(mode).c_str(), status);
-                            return status;
-                        }
+                        modes.emplace_back(mode);
                     }
+                }
+                const uint8_t num = modes.size();
+                RETURN_STATUS_IF_ERROR(param.writeToValue(&num));
+                for (const auto mode : modes) {
+                    RETURN_STATUS_IF_ERROR(param.writeToValue(&mode));
                 }
                 return OK;
             }
@@ -277,17 +278,18 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                 if (!range) {
                     return BAD_VALUE;
                 }
+                std::vector<HeadTracking::ConnectionMode> modes;
                 for (const auto mode : ::ndk::enum_range<HeadTracking::ConnectionMode>()) {
                     if (const auto spatializer =
                                 Spatializer::make<Spatializer::headTrackingConnectionMode>(mode);
                         spatializer < range->min || spatializer > range->max) {
-                        continue;
+                        modes.emplace_back(mode);
                     }
-                    if (status_t status = param.writeToValue(&mode); status != OK) {
-                        ALOGI("%s %d: write mode %s to value failed %d", __func__, __LINE__,
-                                toString(mode).c_str(), status);
-                        return status;
-                    }
+                }
+                const uint8_t num = modes.size();
+                RETURN_STATUS_IF_ERROR(param.writeToValue(&num));
+                for (const auto mode : modes) {
+                    RETURN_STATUS_IF_ERROR(param.writeToValue(&mode));
                 }
                 return OK;
             }
@@ -311,21 +313,19 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
                                                      Spatializer::headTrackingSensorId, int32_t));
                 uint32_t modeInt32 = static_cast<int32_t>(mode);
                 if (status = param.writeToValue(&modeInt32); status != OK) {
-                    ALOGI("%s %d: write mode %s to value failed %d", __func__, __LINE__,
+                    ALOGW("%s %d: write mode %s to value failed %d", __func__, __LINE__,
                           toString(mode).c_str(), status);
                     return status;
                 }
                 if (status = param.writeToValue(&sensorId); status != OK) {
-                    ALOGI("%s %d: write sensorId %d to value failed %d", __func__, __LINE__,
+                    ALOGW("%s %d: write sensorId %d to value failed %d", __func__, __LINE__,
                           sensorId, status);
                     return status;
                 }
-                ALOGI("%s %d: %s", __func__, __LINE__, aidlParam.toString().c_str());
                 return OK;
             }
             default: {
-                ALOGE("%s %d invalid command %u", __func__, __LINE__, command);
-                return BAD_VALUE;
+                VENDOR_EXTENSION_GET_AND_RETURN(Spatializer, spatializer, param);
             }
         }
     } else {
@@ -343,8 +343,6 @@ status_t AidlConversionSpatializer::getParameter(EffectParamWriter& param) {
         idTag.extension.setParcelable(defaultExt);
         Parameter::Id id = UNION_MAKE(Parameter::Id, vendorEffectTag, idTag);
         RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mEffect->getParameter(id, &aidlParam)));
-        ALOGI("%s %d: %s", __func__, __LINE__,
-              aidlParam.get<Parameter::specific>().toString().c_str());
         // copy the AIDL extension data back to effect_param_t
         return VALUE_OR_RETURN_STATUS(
                 ::aidl::android::aidl2legacy_Parameter_EffectParameterWriter(aidlParam, param));

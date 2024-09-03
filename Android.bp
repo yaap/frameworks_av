@@ -34,6 +34,24 @@ license {
     ],
 }
 
+aidl_interface_defaults {
+    name: "audio-aidl-defaults",
+    unstable: true,
+    host_supported: true,
+    backend: {
+        cpp: {
+            enabled: true,
+        },
+        java: {
+            enabled: true,
+        },
+        rust: {
+            enabled: true,
+        },
+    },
+
+}
+
 aidl_interface {
     name: "av-types-aidl",
     unstable: true,
@@ -69,6 +87,18 @@ aidl_interface {
             sdk_version: "module_current",
         },
     },
+}
+
+aidl_interface {
+    name: "audio-permission-aidl",
+    // TODO remove
+    vendor_available: true,
+    double_loadable: true,
+    defaults: ["audio-aidl-defaults"],
+    local_include_dir: "aidl",
+    srcs: [
+        "aidl/com/android/media/permission/*",
+    ],
 }
 
 cc_library_headers {
@@ -132,4 +162,20 @@ aidl_interface {
     ],
     frozen: true,
 
+}
+
+latest_av_audio_types_aidl = "av-audio-types-aidl-V1"
+
+cc_defaults {
+    name: "latest_av_audio_types_aidl_ndk_shared",
+    shared_libs: [
+        latest_av_audio_types_aidl + "-ndk",
+    ],
+}
+
+cc_defaults {
+    name: "latest_av_audio_types_aidl_ndk_static",
+    static_libs: [
+        latest_av_audio_types_aidl + "-ndk",
+    ],
 }

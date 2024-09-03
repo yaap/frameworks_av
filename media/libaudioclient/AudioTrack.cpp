@@ -233,25 +233,9 @@ status_t AudioTrack::getMetrics(mediametrics::Item * &item)
     return NO_ERROR;
 }
 
-AudioTrack::AudioTrack() : AudioTrack(AttributionSourceState())
-{
-}
-
 AudioTrack::AudioTrack(const AttributionSourceState& attributionSource)
-    : mStatus(NO_INIT),
-      mState(STATE_STOPPED),
-      mPreviousPriority(ANDROID_PRIORITY_NORMAL),
-      mPreviousSchedulingGroup(SP_DEFAULT),
-      mPausedPosition(0),
-      mSelectedDeviceId(AUDIO_PORT_HANDLE_NONE),
-      mRoutedDeviceId(AUDIO_PORT_HANDLE_NONE),
-      mClientAttributionSource(attributionSource),
-      mAudioTrackCallback(new AudioTrackCallback())
+    : mClientAttributionSource(attributionSource)
 {
-    mAttributes.content_type = AUDIO_CONTENT_TYPE_UNKNOWN;
-    mAttributes.usage = AUDIO_USAGE_UNKNOWN;
-    mAttributes.flags = AUDIO_FLAG_NONE;
-    strcpy(mAttributes.tags, "");
 }
 
 AudioTrack::AudioTrack(
@@ -271,21 +255,12 @@ AudioTrack::AudioTrack(
         bool doNotReconnect,
         float maxRequiredSpeed,
         audio_port_handle_t selectedDeviceId)
-    : mStatus(NO_INIT),
-      mState(STATE_STOPPED),
-      mPreviousPriority(ANDROID_PRIORITY_NORMAL),
-      mPreviousSchedulingGroup(SP_DEFAULT),
-      mPausedPosition(0),
-      mAudioTrackCallback(new AudioTrackCallback())
 {
-    mAttributes = AUDIO_ATTRIBUTES_INITIALIZER;
-
-    // make_unique does not aggregate init until c++20
-    mSetParams = std::unique_ptr<SetParams>{
-            new SetParams{streamType, sampleRate, format, channelMask, frameCount, flags, callback,
-                          notificationFrames, 0 /*sharedBuffer*/, false /*threadCanCallJava*/,
-                          sessionId, transferType, offloadInfo, attributionSource, pAttributes,
-                          doNotReconnect, maxRequiredSpeed, selectedDeviceId}};
+    mSetParams = std::make_unique<SetParams>(
+        streamType, sampleRate, format, channelMask, frameCount, flags, callback,
+        notificationFrames, nullptr /*sharedBuffer*/, false /*threadCanCallJava*/,
+        sessionId, transferType, offloadInfo, attributionSource, pAttributes,
+        doNotReconnect, maxRequiredSpeed, selectedDeviceId);
 }
 
 namespace {
@@ -400,9 +375,6 @@ AudioTrack::~AudioTrack()
 }
 
 void AudioTrack::stopAndJoinCallbacks() {
-    // Prevent nullptr crash if it did not open properly.
-    if (mStatus != NO_ERROR) return;
-
     // Make sure that callback function exits in the case where
     // it is looping on buffer full condition in obtainBuffer().
     // Otherwise the callback thread will never exit.
@@ -919,6 +891,7 @@ void AudioTrack::stop()
     const int64_t beginNs = systemTime();
 
     AutoMutex lock(mLock);
+    if (mProxy == nullptr) return;  // not successfully initialized.
     mediametrics::Defer defer([&]() {
         mediametrics::LogItem(mMetricsId)
             .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_STOP)
@@ -1200,6 +1173,13 @@ status_t AudioTrack::setSampleRate(uint32_t rate)
 
     mSampleRate = rate;
     mProxy->setSampleRate(effectiveSampleRate);
+
+    mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_SETSAMPLERATE)
+            .set(AMEDIAMETRICS_PROP_PREFIX_EFFECTIVE AMEDIAMETRICS_PROP_SAMPLERATE,
+                    static_cast<int32_t>(effectiveSampleRate))
+            .set(AMEDIAMETRICS_PROP_SAMPLERATE, static_cast<int32_t>(rate))
+            .record();
 
     return NO_ERROR;
 }
@@ -1707,14 +1687,14 @@ status_t AudioTrack::setOutputDevice(audio_port_handle_t deviceId) {
         mSelectedDeviceId = deviceId;
         if (mStatus == NO_ERROR) {
             if (isOffloadedOrDirect_l()) {
-                if (mState == STATE_STOPPED || mState == STATE_FLUSHED) {
-                    ALOGD("%s(%d): creating a new AudioTrack", __func__, mPortId);
-                    result = restoreTrack_l("setOutputDevice", true /* forceRestore */);
-                } else {
+                if (isPlaying_l()) {
                     ALOGW("%s(%d). Offloaded or Direct track is not STOPPED or FLUSHED. "
                           "State: %s.",
                             __func__, mPortId, stateToString(mState));
                     result = INVALID_OPERATION;
+                } else {
+                    ALOGD("%s(%d): creating a new AudioTrack", __func__, mPortId);
+                    result = restoreTrack_l("setOutputDevice", true /* forceRestore */);
                 }
             } else {
                 // allow track invalidation when track is not playing to propagate
@@ -3062,6 +3042,7 @@ VolumeShaper::Status AudioTrack::applyVolumeShaper(
         const sp<VolumeShaper::Configuration>& configuration,
         const sp<VolumeShaper::Operation>& operation)
 {
+    const int64_t beginNs = systemTime();
     AutoMutex lock(mLock);
     mVolumeHandler->setIdIfNecessary(configuration);
     media::VolumeShaperConfiguration config;
@@ -3069,6 +3050,18 @@ VolumeShaper::Status AudioTrack::applyVolumeShaper(
     media::VolumeShaperOperation op;
     operation->writeToParcelable(&op);
     VolumeShaper::Status status;
+
+    mediametrics::Defer defer([&] {
+        mediametrics::LogItem(mMetricsId)
+                .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_APPLYVOLUMESHAPER)
+                .set(AMEDIAMETRICS_PROP_EXECUTIONTIMENS, (int64_t)(systemTime() - beginNs))
+                .set(AMEDIAMETRICS_PROP_STATE, stateToString(mState))
+                .set(AMEDIAMETRICS_PROP_STATUS, (int32_t)status)
+                .set(AMEDIAMETRICS_PROP_TOSTRING, configuration->toString()
+                                 .append(" ")
+                                 .append(operation->toString()))
+                .record(); });
+
     mAudioTrack->applyVolumeShaper(config, op, &status);
 
     if (status == DEAD_OBJECT) {

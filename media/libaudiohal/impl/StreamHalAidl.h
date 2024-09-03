@@ -32,6 +32,7 @@
 #include <media/audiohal/StreamHalInterface.h>
 #include <media/AidlConversionUtil.h>
 #include <media/AudioParameter.h>
+#include <mediautils/Synchronization.h>
 
 #include "ConversionHelperAidl.h"
 #include "StreamPowerLog.h"
@@ -93,6 +94,10 @@ class StreamContextAidl {
     }
     size_t getBufferSizeBytes() const { return mFrameSizeBytes * mBufferSizeFrames; }
     size_t getBufferSizeFrames() const { return mBufferSizeFrames; }
+    size_t getBufferDurationMs(int32_t sampleRate) const {
+        auto bufferSize = mIsMmapped ? getMmapBurstSize() : mBufferSizeFrames;
+        return sampleRate != 0 ? bufferSize * MILLIS_PER_SECOND / sampleRate : 0;
+    }
     CommandMQ* getCommandMQ() const { return mCommandMQ.get(); }
     DataMQ* getDataMQ() const { return mDataMQ.get(); }
     size_t getFrameSizeBytes() const { return mFrameSizeBytes; }
@@ -100,7 +105,7 @@ class StreamContextAidl {
     bool isAsynchronous() const { return mIsAsynchronous; }
     bool isMmapped() const { return mIsMmapped; }
     const MmapBufferDescriptor& getMmapBufferDescriptor() const { return mMmapBufferDescriptor; }
-
+    size_t getMmapBurstSize() const { return mMmapBufferDescriptor.burstSizeFrames;}
   private:
     static std::unique_ptr<DataMQ> maybeCreateDataMQ(
             const ::aidl::android::hardware::audio::core::StreamDescriptor& descriptor) {
@@ -190,6 +195,11 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
     // For tests.
     friend class sp<StreamHalAidl>;
 
+    struct StatePositions {
+        int64_t framesAtFlushOrDrain;
+        int64_t framesAtStandby;
+    };
+
     template<class T>
     static std::shared_ptr<::aidl::android::hardware::audio::core::IStreamCommon> getStreamCommon(
             const std::shared_ptr<T>& stream);
@@ -208,7 +218,8 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
     status_t getLatency(uint32_t *latency);
 
     // Always returns non-negative values.
-    status_t getObservablePosition(int64_t *frames, int64_t *timestamp);
+    status_t getObservablePosition(int64_t* frames, int64_t* timestamp,
+            StatePositions* statePositions = nullptr);
 
     // Always returns non-negative values.
     status_t getHardwarePosition(int64_t *frames, int64_t *timestamp);
@@ -232,9 +243,22 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
 
     status_t exit();
 
+    void onAsyncTransferReady();
+    void onAsyncDrainReady();
+    void onAsyncError();
+
     const bool mIsInput;
     const audio_config_base_t mConfig;
     const StreamContextAidl mContext;
+    // This lock is used to make sending of a command and receiving a reply an atomic
+    // operation. Otherwise, when two threads are trying to send a command, they may both advance to
+    // reading of the reply once the HAL has consumed the command from the MQ, and that creates a
+    // race condition between them.
+    //
+    // Note that only access to command and reply MQs needs to be protected because the data MQ is
+    // only accessed by the I/O thread. Also, there is no need to protect lookup operations on the
+    // queues as they are thread-safe, only send/receive operation must be protected.
+    std::mutex mCommandReplyLock;
 
   private:
     static audio_config_base_t configToBase(const audio_config& config) {
@@ -248,17 +272,26 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
         std::lock_guard l(mLock);
         return mLastReply.state;
     }
+    // Note: Since `sendCommand` takes mLock while holding mCommandReplyLock, never call
+    // it with `mLock` being held.
     status_t sendCommand(
-            const ::aidl::android::hardware::audio::core::StreamDescriptor::Command &command,
+            const ::aidl::android::hardware::audio::core::StreamDescriptor::Command& command,
             ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr,
-            bool safeFromNonWorkerThread = false);
+            bool safeFromNonWorkerThread = false,
+            StatePositions* statePositions = nullptr);
     status_t updateCountersIfNeeded(
-            ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr);
+            ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr,
+            StatePositions* statePositions = nullptr);
 
     const std::shared_ptr<::aidl::android::hardware::audio::core::IStreamCommon> mStream;
     const std::shared_ptr<::aidl::android::media::audio::IHalAdapterVendorExtension> mVendorExt;
+    const int64_t mLastReplyLifeTimeNs;
     std::mutex mLock;
     ::aidl::android::hardware::audio::core::StreamDescriptor::Reply mLastReply GUARDED_BY(mLock);
+    int64_t mLastReplyExpirationNs GUARDED_BY(mLock) = 0;
+    // Cached values of observable positions when the stream last entered certain state.
+    // Updated for output streams only.
+    StatePositions mStatePositions GUARDED_BY(mLock) = {};
     // mStreamPowerLog is used for audio signal power logging.
     StreamPowerLog mStreamPowerLog;
     std::atomic<pid_t> mWorkerTid = -1;
@@ -266,7 +299,9 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
 
 class CallbackBroker;
 
-class StreamOutHalAidl : public StreamOutHalInterface, public StreamHalAidl {
+class StreamOutHalAidl : public virtual StreamOutHalInterface,
+                         public virtual StreamOutHalInterfaceCallback,
+                         public StreamHalAidl {
   public:
     // Extract the output stream parameters and set by AIDL APIs.
     status_t setParameters(const String8& kvPairs) override;
@@ -285,10 +320,7 @@ class StreamOutHalAidl : public StreamOutHalInterface, public StreamHalAidl {
 
     // Return the number of audio frames written by the audio dsp to DAC since
     // the output has exited standby.
-    status_t getRenderPosition(uint32_t *dspFrames) override;
-
-    // Get the local time at which the next write to the audio driver will be presented.
-    status_t getNextWriteTimestamp(int64_t *timestamp) override;
+    status_t getRenderPosition(uint64_t *dspFrames) override;
 
     // Set the callback for notifying completion of non-blocking write and drain.
     status_t setCallback(wp<StreamOutHalInterfaceCallback> callback) override;
@@ -308,11 +340,18 @@ class StreamOutHalAidl : public StreamOutHalInterface, public StreamHalAidl {
     // Requests notification when data buffered by the driver/hardware has been played.
     status_t drain(bool earlyNotify) override;
 
-    // Notifies to the audio driver to flush the queued data.
+    // Notifies to the audio driver to flush (that is, drop) the queued data. Stream must
+    // already be paused before calling 'flush'.
     status_t flush() override;
 
     // Return a recent count of the number of audio frames presented to an external observer.
+    // This excludes frames which have been written but are still in the pipeline. See the
+    // table at the start of the 'StreamOutHalInterface' for the specification of the frame
+    // count behavior w.r.t. 'flush', 'drain' and 'standby' operations.
     status_t getPresentationPosition(uint64_t *frames, struct timespec *timestamp) override;
+
+    // Notifies the HAL layer that the framework considers the current playback as completed.
+    status_t presentationComplete() override;
 
     // Called when the metadata of the stream's source has been changed.
     status_t updateSourceMetadata(const SourceMetadata& sourceMetadata) override;
@@ -344,6 +383,11 @@ class StreamOutHalAidl : public StreamOutHalInterface, public StreamHalAidl {
 
     status_t exit() override;
 
+    // StreamOutHalInterfaceCallback
+    void onWriteReady() override;
+    void onDrainReady() override;
+    void onError(bool isHardError) override;
+
   private:
     friend class sp<StreamOutHalAidl>;
 
@@ -352,6 +396,7 @@ class StreamOutHalAidl : public StreamOutHalInterface, public StreamHalAidl {
 
     const std::shared_ptr<::aidl::android::hardware::audio::core::IStreamOut> mStream;
     const wp<CallbackBroker> mCallbackBroker;
+    mediautils::atomic_wp<StreamOutHalInterfaceCallback> mClientCallback;
 
     AudioOffloadMetadata mOffloadMetadata;
 
@@ -384,6 +429,7 @@ class StreamInHalAidl : public StreamInHalInterface, public StreamHalAidl {
 
     // Return a recent count of the number of audio frames received and
     // the clock time associated with that frame count.
+    // The count must not reset to zero when a PCM input enters standby.
     status_t getCapturePosition(int64_t *frames, int64_t *time) override;
 
     // Get active microphones

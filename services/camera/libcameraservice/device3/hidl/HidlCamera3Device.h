@@ -33,10 +33,11 @@ class HidlCamera3Device :
 
     explicit HidlCamera3Device(
         std::shared_ptr<CameraServiceProxyWrapper>& cameraServiceProxyWrapper,
-        const std::string& id, bool overrideForPerfClass, bool overrideToPortrait,
+        std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
+        const std::string& id, bool overrideForPerfClass, int rotationOverride,
         bool legacyClient = false) :
-        Camera3Device(cameraServiceProxyWrapper, id, overrideForPerfClass, overrideToPortrait,
-                legacyClient) { }
+        Camera3Device(cameraServiceProxyWrapper, attributionAndPermissionUtils, id,
+                overrideForPerfClass, rotationOverride, legacyClient) { }
 
     virtual ~HidlCamera3Device() {}
 
@@ -178,7 +179,7 @@ class HidlCamera3Device :
                 const Vector<int32_t>& sessionParamKeys,
                 bool useHalBufManager,
                 bool supportCameraMute,
-                bool overrideToPortrait,
+                int rotationOverride,
                 bool supportSettingsOverride);
 
         status_t switchToOffline(
@@ -231,7 +232,7 @@ class HidlCamera3Device :
                 const Vector<int32_t>& sessionParamKeys,
                 bool useHalBufManager,
                 bool supportCameraMute,
-                bool overrideToPortrait,
+                int rotationOverride,
                 bool supportSettingsOverride) override;
 
     virtual sp<Camera3DeviceInjectionMethods>

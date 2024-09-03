@@ -21,6 +21,7 @@
 #include <audio_utils/primitives.h>
 #include <media/stagefright/foundation/MediaDefs.h>
 
+#include <C2Debug.h>
 #include <C2PlatformSupport.h>
 #include <SimpleC2Interface.h>
 
@@ -81,10 +82,6 @@ public:
                     FLAC_COMPRESSION_LEVEL_MIN, FLAC_COMPRESSION_LEVEL_MAX)})
                 .withSetter(Setter<decltype(*mComplexity)>::NonStrictValueWithNoDeps)
                 .build());
-        addParameter(
-                DefineParam(mInputMaxBufSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
-                .withConstValue(new C2StreamMaxBufferSizeInfo::input(0u, 4608))
-                .build());
 
         addParameter(
                 DefineParam(mPcmEncodingInfo, C2_PARAMKEY_PCM_ENCODING)
@@ -96,6 +93,26 @@ public:
                 })
                 .withSetter((Setter<decltype(*mPcmEncodingInfo)>::StrictValueWithNoDeps))
                 .build());
+
+        addParameter(
+                DefineParam(mInputMaxBufSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
+                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, kMaxBlockSize))
+                .withFields({
+                    C2F(mInputMaxBufSize, value).any(),
+                })
+                .withSetter(MaxInputSizeSetter, mChannelCount, mPcmEncodingInfo)
+                .build());
+    }
+
+    static C2R MaxInputSizeSetter(bool mayBlock,
+            C2P<C2StreamMaxBufferSizeInfo::input> &me,
+            const C2P<C2StreamChannelCountInfo::input> &channelCount,
+            const C2P<C2StreamPcmEncodingInfo::input> &pcmEncoding) {
+        (void)mayBlock;
+        C2R res = C2R::Ok();
+        int bytesPerSample = pcmEncoding.v.value == C2Config::PCM_FLOAT ? 4 : 2;
+        me.set().value = kMaxBlockSize * bytesPerSample * channelCount.v.value;
+        return res;
     }
 
     uint32_t getSampleRate() const { return mSampleRate->value; }
@@ -138,7 +155,7 @@ c2_status_t C2SoftFlacEnc::onInit() {
     mSignalledError = false;
     mSignalledOutputEos = false;
     mIsFirstFrame = true;
-    mAnchorTimeStamp = 0ull;
+    mAnchorTimeStamp = 0;
     mProcessedSamples = 0u;
     mEncoderWriteData = false;
     mEncoderReturnedNbBytes = 0;
@@ -169,7 +186,7 @@ c2_status_t C2SoftFlacEnc::onStop() {
     mSignalledError = false;
     mSignalledOutputEos = false;
     mIsFirstFrame = true;
-    mAnchorTimeStamp = 0ull;
+    mAnchorTimeStamp = 0;
     mProcessedSamples = 0u;
     mEncoderWriteData = false;
     mEncoderReturnedNbBytes = 0;
@@ -219,7 +236,7 @@ void C2SoftFlacEnc::process(
               inSize, (int)work->input.ordinal.timestamp.peeku(),
               (int)work->input.ordinal.frameIndex.peeku(), work->input.flags);
     if (mIsFirstFrame && inSize) {
-        mAnchorTimeStamp = work->input.ordinal.timestamp.peekull();
+        mAnchorTimeStamp = work->input.ordinal.timestamp.peekll();
         mIsFirstFrame = false;
     }
 
@@ -388,7 +405,7 @@ FLAC__StreamEncoderWriteStatus C2SoftFlacEnc::onEncodedFlacAvailable(
     C2WriteView wView = mOutputBlock->map().get();
     uint8_t* outData = wView.data();
     const uint32_t sampleRate = mIntf->getSampleRate();
-    const uint64_t outTimeStamp = mProcessedSamples * 1000000ll / sampleRate;
+    const int64_t outTimeStamp = mProcessedSamples * 1000000ll / sampleRate;
     ALOGV("writing %zu bytes of encoded data on output", bytes);
     // increment mProcessedSamples to maintain audio synchronization during
     // play back
@@ -445,6 +462,9 @@ status_t C2SoftFlacEnc::configureEncoder() {
     }
 
     mBlockSize = FLAC__stream_encoder_get_blocksize(mFlacStreamEncoder);
+
+    // Update kMaxBlockSize to match maximum size used by the encoder
+    CHECK(mBlockSize <= kMaxBlockSize);
 
     ALOGV("encoder successfully configured");
     return OK;

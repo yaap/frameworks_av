@@ -15,9 +15,11 @@
  */
 
 #define LOG_TAG "AidlUtils"
+//#define LOG_NDEBUG 0
 
 #include <aidl/AidlUtils.h>
 #include <aidl/ExtensionMetadataTags.h>
+#include <aidl/SessionCharacteristicsTags.h>
 #include <aidl/VndkVersionMetadataTags.h>
 #include <aidlcommonsupport/NativeHandle.h>
 #include <camera/StringUtils.h>
@@ -313,6 +315,7 @@ status_t filterVndkKeys(int vndkVersion, CameraMetadata &metadata, bool isStatic
     if (vndkVersion == __ANDROID_API_FUTURE__) {
         // VNDK version derived from ro.board.api_level is a version code-name that
         // corresponds to the current SDK version.
+        ALOGV("%s: VNDK version is API FUTURE, not filtering any keys", __FUNCTION__);
         return OK;
     }
     const auto &apiLevelToKeys =
@@ -321,9 +324,14 @@ status_t filterVndkKeys(int vndkVersion, CameraMetadata &metadata, bool isStatic
     // versions above the given one, need to have their keys filtered from the
     // metadata in order to avoid metadata invalidation.
     auto it = apiLevelToKeys.upper_bound(vndkVersion);
+    ALOGV("%s: VNDK version for filtering is %d", __FUNCTION__ , vndkVersion);
     while (it != apiLevelToKeys.end()) {
         for (const auto &key : it->second) {
             status_t res = metadata.erase(key);
+            // Should be okay to not use get_local_camera_metadata_tag_name
+            // since we're not filtering vendor tags
+            ALOGV("%s: Metadata key being filtered is %s", __FUNCTION__ ,
+                    get_camera_metadata_tag_name(key));
             if (res != OK) {
                 ALOGE("%s metadata key %d could not be erased", __FUNCTION__, key);
                 return res;
@@ -331,6 +339,49 @@ status_t filterVndkKeys(int vndkVersion, CameraMetadata &metadata, bool isStatic
         }
         it++;
     }
+    return OK;
+}
+
+status_t copySessionCharacteristics(const CameraMetadata& from, CameraMetadata* to,
+                                    int queryVersion) {
+    // Ensure the vendor ID are the same before attempting
+    // anything else. If vendor IDs differ we cannot safely copy the characteristics.
+    if (from.getVendorId() != to->getVendorId()) {
+        ALOGE("%s: Incompatible CameraMetadata objects. Vendor IDs differ. From: %lu; To: %lu",
+              __FUNCTION__, from.getVendorId(), to->getVendorId());
+        return BAD_VALUE;
+    }
+
+    // Allow public tags according to the queryVersion
+    std::unordered_set<uint32_t> validPublicTags;
+    auto last = api_level_to_session_characteristic_keys.upper_bound(queryVersion);
+    for (auto it = api_level_to_session_characteristic_keys.begin(); it != last; it++) {
+        validPublicTags.insert(it->second.cbegin(), it->second.cend());
+    }
+
+    const camera_metadata_t* src = from.getAndLock();
+    camera_metadata_ro_entry_t entry{};
+    for (size_t i = 0; i < get_camera_metadata_entry_count(src); i++) {
+        int ret = get_camera_metadata_ro_entry(src, i, &entry);
+        if (ret != OK) {
+            ALOGE("%s: Could not fetch entry at index %lu. Error: %d", __FUNCTION__, i, ret);
+            from.unlock(src);
+            return BAD_VALUE;
+        }
+
+        if (entry.tag < (uint32_t)VENDOR_SECTION_START &&
+                validPublicTags.find(entry.tag) == validPublicTags.end()) {
+            ALOGI("%s: Session Characteristics contains tag %s but not supported by query version "
+                  "(%d)",
+                  __FUNCTION__, get_camera_metadata_tag_name(entry.tag), queryVersion);
+            continue;
+        }
+
+        // The entry is either a vendor tag, or a valid session characteristic key.
+        // Copy over the value
+        to->update(entry);
+    }
+    from.unlock(src);
     return OK;
 }
 

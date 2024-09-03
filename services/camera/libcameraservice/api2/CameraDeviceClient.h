@@ -50,6 +50,7 @@ struct CameraDeviceClientBase :
 protected:
     CameraDeviceClientBase(const sp<CameraService>& cameraService,
             const sp<hardware::camera2::ICameraDeviceCallbacks>& remoteCallback,
+            std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
             const std::string& clientPackageName,
             bool systemNativeClient,
             const std::optional<std::string>& clientFeatureId,
@@ -60,7 +61,7 @@ protected:
             int clientPid,
             uid_t clientUid,
             int servicePid,
-            bool overrideToPortrait);
+            int rotationOverride);
 
     sp<hardware::camera2::ICameraDeviceCallbacks> mRemoteCallback;
 };
@@ -181,6 +182,7 @@ public:
     CameraDeviceClient(const sp<CameraService>& cameraService,
             const sp<hardware::camera2::ICameraDeviceCallbacks>& remoteCallback,
             std::shared_ptr<CameraServiceProxyWrapper> cameraServiceProxyWrapper,
+            std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
             const std::string& clientPackageName,
             bool clientPackageOverride,
             const std::optional<std::string>& clientFeatureId,
@@ -191,7 +193,7 @@ public:
             uid_t clientUid,
             int servicePid,
             bool overrideForPerfClass,
-            bool overrideToPortrait,
+            int rotationOverride,
             const std::string& originalCameraId);
     virtual ~CameraDeviceClient();
 
@@ -227,6 +229,7 @@ public:
      */
 
     virtual void notifyIdle(int64_t requestCount, int64_t resultErrorCount, bool deviceError,
+                            std::pair<int32_t, int32_t> mostRequestedFpsRange,
                             const std::vector<hardware::CameraStreamStats>& streamStats);
     virtual void notifyError(int32_t errorCode,
                              const CaptureResultExtras& resultExtras);
@@ -363,14 +366,17 @@ private:
     // Override the camera characteristics for performance class primary cameras.
     bool mOverrideForPerfClass;
 
-    // The string representation of object passed into CaptureRequest.setTag.
-    std::string mUserTag;
-    // The last set video stabilization mode
-    int mVideoStabilizationMode = -1;
-    // Whether a zoom_ratio < 1.0 has been used during this session
-    bool mUsedUltraWide = false;
-    // Whether a zoom settings override has been used during this session
-    bool mUsedSettingsOverrideZoom = false;
+    // Various fields used to collect session statistics
+    struct RunningSessionStats {
+        // The string representation of object passed into CaptureRequest.setTag.
+        std::string mUserTag;
+        // The last set video stabilization mode
+        int mVideoStabilizationMode = -1;
+        // Whether a zoom_ratio < 1.0 has been used during this session
+        bool mUsedUltraWide = false;
+        // Whether a zoom settings override has been used during this session
+        bool mUsedSettingsOverrideZoom = false;
+    } mRunningSessionStats;
 
     // This only exists in case of camera ID Remapping.
     const std::string mOriginalCameraId;

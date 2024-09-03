@@ -29,6 +29,7 @@
 #include <system/audio_effects/effect_visualizer.h>
 
 #include <utils/Log.h>
+#include <Utils.h>
 
 #include "EffectConversionHelperAidl.h"
 #include "EffectProxy.h"
@@ -37,18 +38,20 @@ namespace android {
 namespace effect {
 
 using ::aidl::android::aidl_utils::statusTFromBinderStatus;
+using ::aidl::android::hardware::audio::common::getChannelCount;
 using ::aidl::android::hardware::audio::effect::CommandId;
 using ::aidl::android::hardware::audio::effect::Descriptor;
 using ::aidl::android::hardware::audio::effect::Flags;
 using ::aidl::android::hardware::audio::effect::IEffect;
 using ::aidl::android::hardware::audio::effect::Parameter;
 using ::aidl::android::hardware::audio::effect::State;
+using ::aidl::android::media::audio::common::AudioChannelLayout;
 using ::aidl::android::media::audio::common::AudioDeviceDescription;
 using ::aidl::android::media::audio::common::AudioMode;
 using ::aidl::android::media::audio::common::AudioSource;
-using ::android::hardware::EventFlag;
 using android::effect::utils::EffectParamReader;
 using android::effect::utils::EffectParamWriter;
+using android::hardware::EventFlag;
 
 using ::android::status_t;
 
@@ -181,7 +184,7 @@ status_t EffectConversionHelperAidl::handleSetConfig(uint32_t cmdSize, const voi
     State state;
     RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mEffect->getState(&state)));
     if (state == State::INIT) {
-        ALOGI("%s at state %s, opening effect with input %s output %s", __func__,
+        ALOGD("%s at state %s, opening effect with input %s output %s", __func__,
               android::internal::ToString(state).c_str(), common.input.toString().c_str(),
               common.output.toString().c_str());
         IEffect::OpenEffectReturn openReturn;
@@ -189,10 +192,12 @@ status_t EffectConversionHelperAidl::handleSetConfig(uint32_t cmdSize, const voi
                 statusTFromBinderStatus(mEffect->open(common, std::nullopt, &openReturn)));
         updateMqsAndEventFlags(openReturn);
     } else if (mCommon != common) {
-        ALOGI("%s at state %s, setParameter", __func__, android::internal::ToString(state).c_str());
+        ALOGV("%s at state %s, setCommonParameter %s", __func__,
+              android::internal::ToString(state).c_str(), common.toString().c_str());
         Parameter aidlParam = UNION_MAKE(Parameter, common, common);
         RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mEffect->setParameter(aidlParam)));
     }
+    mOutputAccessMode = config->outputCfg.accessMode;
     mCommon = common;
 
     return *static_cast<int32_t*>(pReplyData) = OK;
@@ -397,12 +402,12 @@ status_t EffectConversionHelperAidl::handleSetOffload(uint32_t cmdSize, const vo
     effect_offload_param_t* offload = (effect_offload_param_t*)pCmdData;
     // send to proxy to update active sub-effect
     if (mIsProxyEffect) {
-        ALOGI("%s offload param offload %s ioHandle %d", __func__,
+        ALOGV("%s offload param offload %s ioHandle %d", __func__,
               offload->isOffload ? "true" : "false", offload->ioHandle);
         const auto& effectProxy = std::static_pointer_cast<EffectProxy>(mEffect);
         RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(effectProxy->setOffloadParam(offload)));
         if (mCommon.ioHandle != offload->ioHandle) {
-            ALOGI("%s ioHandle update [%d to %d]", __func__, mCommon.ioHandle, offload->ioHandle);
+            ALOGV("%s ioHandle update [%d to %d]", __func__, mCommon.ioHandle, offload->ioHandle);
             mCommon.ioHandle = offload->ioHandle;
             Parameter aidlParam = UNION_MAKE(Parameter, common, mCommon);
             RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mEffect->setParameter(aidlParam)));
@@ -515,6 +520,16 @@ status_t EffectConversionHelperAidl::reopen() {
     // status MQ won't be changed after open
     updateDataMqs(openReturn);
     return OK;
+}
+
+size_t EffectConversionHelperAidl::getAudioChannelCount() const {
+    return getChannelCount(mCommon.input.base.channelMask,
+                           ~AudioChannelLayout::LAYOUT_HAPTIC_AB /* mask */);
+}
+
+size_t EffectConversionHelperAidl::getHapticChannelCount() const {
+    return getChannelCount(mCommon.input.base.channelMask,
+                           AudioChannelLayout::LAYOUT_HAPTIC_AB /* mask */);
 }
 
 }  // namespace effect

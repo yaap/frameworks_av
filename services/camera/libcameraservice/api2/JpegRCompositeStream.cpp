@@ -520,6 +520,15 @@ bool JpegRCompositeStream::isJpegRCompositeStream(const sp<Surface> &surface) {
     return false;
 }
 
+bool JpegRCompositeStream::isJpegRCompositeStreamInfo(const OutputStreamInfo& streamInfo) {
+    if ((streamInfo.format == HAL_PIXEL_FORMAT_BLOB) &&
+            (streamInfo.dataSpace == static_cast<int>(kJpegRDataSpace))) {
+        return true;
+    }
+
+    return false;
+}
+
 void JpegRCompositeStream::deriveDynamicRangeAndDataspace(int64_t dynamicProfile,
         int64_t* /*out*/dynamicRange, int64_t* /*out*/dataSpace) {
     if ((dynamicRange == nullptr) || (dataSpace == nullptr)) {
@@ -832,8 +841,8 @@ status_t JpegRCompositeStream::getCompositeStreamInfo(const OutputStreamInfo &st
     (*compositeOutput)[0].colorSpace =
         ANDROID_REQUEST_AVAILABLE_COLOR_SPACE_PROFILES_MAP_UNSPECIFIED;
 
-    if (CameraProviderManager::isConcurrentDynamicRangeCaptureSupported(staticInfo,
-                streamInfo.dynamicRangeProfile,
+    if (CameraProviderManager::isConcurrentDynamicRangeCaptureSupported(
+                staticInfo, dynamicRange,
                 ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD)) {
         compositeOutput->push_back({});
         (*compositeOutput)[1].width = streamInfo.width;
@@ -856,8 +865,9 @@ void JpegRCompositeStream::getStreamStats(hardware::CameraStreamStats* streamSta
 
     bool deviceError;
     std::map<int, StreamStats> stats;
+    std::pair<int32_t, int32_t> mostRequestedFps;
     mSessionStatsBuilder.buildAndReset(&streamStats->mRequestCount, &streamStats->mErrorCount,
-            &deviceError, &stats);
+            &deviceError, &mostRequestedFps, &stats);
     if (stats.find(mP010StreamId) != stats.end()) {
         streamStats->mWidth = mBlobWidth;
         streamStats->mHeight = mBlobHeight;

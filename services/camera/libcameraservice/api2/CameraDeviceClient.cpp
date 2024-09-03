@@ -20,7 +20,6 @@
 
 #include <com_android_internal_camera_flags.h>
 #include <cutils/properties.h>
-#include <utils/CameraThreadState.h>
 #include <utils/Log.h>
 #include <utils/SessionConfigurationUtils.h>
 #include <utils/Trace.h>
@@ -61,6 +60,7 @@ namespace flags = com::android::internal::camera::flags;
 CameraDeviceClientBase::CameraDeviceClientBase(
         const sp<CameraService>& cameraService,
         const sp<hardware::camera2::ICameraDeviceCallbacks>& remoteCallback,
+        std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
         const std::string& clientPackageName,
         bool systemNativeClient,
         const std::optional<std::string>& clientFeatureId,
@@ -71,9 +71,10 @@ CameraDeviceClientBase::CameraDeviceClientBase(
         int clientPid,
         uid_t clientUid,
         int servicePid,
-        bool overrideToPortrait) :
+        int rotationOverride) :
     BasicClient(cameraService,
             IInterface::asBinder(remoteCallback),
+            attributionAndPermissionUtils,
             clientPackageName,
             systemNativeClient,
             clientFeatureId,
@@ -83,7 +84,7 @@ CameraDeviceClientBase::CameraDeviceClientBase(
             clientPid,
             clientUid,
             servicePid,
-            overrideToPortrait),
+            rotationOverride),
     mRemoteCallback(remoteCallback) {
 }
 
@@ -92,6 +93,7 @@ CameraDeviceClientBase::CameraDeviceClientBase(
 CameraDeviceClient::CameraDeviceClient(const sp<CameraService>& cameraService,
         const sp<hardware::camera2::ICameraDeviceCallbacks>& remoteCallback,
         std::shared_ptr<CameraServiceProxyWrapper> cameraServiceProxyWrapper,
+        std::shared_ptr<AttributionAndPermissionUtils> attributionAndPermissionUtils,
         const std::string& clientPackageName,
         bool systemNativeClient,
         const std::optional<std::string>& clientFeatureId,
@@ -102,12 +104,13 @@ CameraDeviceClient::CameraDeviceClient(const sp<CameraService>& cameraService,
         uid_t clientUid,
         int servicePid,
         bool overrideForPerfClass,
-        bool overrideToPortrait,
+        int rotationOverride,
         const std::string& originalCameraId) :
-    Camera2ClientBase(cameraService, remoteCallback, cameraServiceProxyWrapper, clientPackageName,
+    Camera2ClientBase(cameraService, remoteCallback, cameraServiceProxyWrapper,
+            attributionAndPermissionUtils, clientPackageName,
             systemNativeClient, clientFeatureId, cameraId, /*API1 camera ID*/ -1, cameraFacing,
             sensorOrientation, clientPid, clientUid, servicePid, overrideForPerfClass,
-            overrideToPortrait),
+            rotationOverride),
     mInputStream(),
     mStreamingRequestId(REQUEST_ID_NONE),
     mRequestIdCounter(0),
@@ -544,27 +547,28 @@ binder::Status CameraDeviceClient::submitRequestList(
 
         // Save certain CaptureRequest settings
         if (!request.mUserTag.empty()) {
-            mUserTag = request.mUserTag;
+            mRunningSessionStats.mUserTag = request.mUserTag;
         }
         camera_metadata_entry entry =
                 physicalSettingsList.begin()->metadata.find(
                         ANDROID_CONTROL_VIDEO_STABILIZATION_MODE);
         if (entry.count == 1) {
-            mVideoStabilizationMode = entry.data.u8[0];
+            mRunningSessionStats.mVideoStabilizationMode = entry.data.u8[0];
         }
-        if (flags::log_ultrawide_usage()) {
+
+        if (!mRunningSessionStats.mUsedUltraWide && flags::log_ultrawide_usage()) {
             entry = physicalSettingsList.begin()->metadata.find(
                     ANDROID_CONTROL_ZOOM_RATIO);
             if (entry.count == 1 && entry.data.f[0] < 1.0f ) {
-                mUsedUltraWide = true;
+                mRunningSessionStats.mUsedUltraWide = true;
             }
         }
-        if (!mUsedSettingsOverrideZoom && flags::log_zoom_override_usage()) {
+        if (!mRunningSessionStats.mUsedSettingsOverrideZoom && flags::log_zoom_override_usage()) {
             entry = physicalSettingsList.begin()->metadata.find(
                     ANDROID_CONTROL_SETTINGS_OVERRIDE);
             if (entry.count == 1 && entry.data.i32[0] ==
                     ANDROID_CONTROL_SETTINGS_OVERRIDE_ZOOM) {
-                mUsedSettingsOverrideZoom = true;
+                mRunningSessionStats.mUsedSettingsOverrideZoom = true;
             }
         }
     }
@@ -898,6 +902,11 @@ binder::Status CameraDeviceClient::createStream(
 
     Mutex::Autolock icl(mBinderSerializationLock);
 
+    if (!outputConfiguration.isComplete()) {
+        return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT,
+                "OutputConfiguration isn't valid!");
+    }
+
     const std::vector<sp<IGraphicBufferProducer>>& bufferProducers =
             outputConfiguration.getGraphicBufferProducers();
     size_t numBufferProducers = bufferProducers.size();
@@ -914,7 +923,7 @@ binder::Status CameraDeviceClient::createStream(
     bool useReadoutTimestamp = outputConfiguration.useReadoutTimestamp();
 
     res = SessionConfigurationUtils::checkSurfaceType(numBufferProducers, deferredConsumer,
-            outputConfiguration.getSurfaceType());
+            outputConfiguration.getSurfaceType(), /*isConfigurationComplete*/true);
     if (!res.isOk()) {
         return res;
     }
@@ -957,7 +966,7 @@ binder::Status CameraDeviceClient::createStream(
         res = SessionConfigurationUtils::createSurfaceFromGbp(streamInfo,
                 isStreamInfoValid, surface, bufferProducer, mCameraIdStr,
                 mDevice->infoPhysical(physicalCameraId), sensorPixelModesUsed, dynamicRangeProfile,
-                streamUseCase, timestampBase, mirrorMode, colorSpace, mPrivilegedClient);
+                streamUseCase, timestampBase, mirrorMode, colorSpace, /*respectSurfaceSize*/false, mPrivilegedClient);
 
         if (!res.isOk())
             return res;
@@ -1069,6 +1078,10 @@ binder::Status CameraDeviceClient::createDeferredSurfaceStreamLocked(
 
     if (!mDevice.get()) {
         return STATUS_ERROR(CameraService::ERROR_DISCONNECTED, "Camera device no longer alive");
+    }
+    if (!outputConfiguration.isComplete()) {
+        return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT,
+                "OutputConfiguration isn't valid!");
     }
 
     // Infer the surface info for deferred surface stream creation.
@@ -1262,6 +1275,10 @@ binder::Status CameraDeviceClient::updateOutputConfiguration(int streamId,
     if (!mDevice.get()) {
         return STATUS_ERROR(CameraService::ERROR_DISCONNECTED, "Camera device no longer alive");
     }
+    if (!outputConfiguration.isComplete()) {
+        return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT,
+                "OutputConfiguration isn't valid!");
+    }
 
     const std::vector<sp<IGraphicBufferProducer> >& bufferProducers =
             outputConfiguration.getGraphicBufferProducers();
@@ -1329,7 +1346,7 @@ binder::Status CameraDeviceClient::updateOutputConfiguration(int streamId,
         res = SessionConfigurationUtils::createSurfaceFromGbp(outInfo,
                 /*isStreamInfoValid*/ false, surface, newOutputsMap.valueAt(i), mCameraIdStr,
                 mDevice->infoPhysical(physicalCameraId), sensorPixelModesUsed, dynamicRangeProfile,
-                streamUseCase, timestampBase, mirrorMode, colorSpace, mPrivilegedClient);
+                streamUseCase, timestampBase, mirrorMode, colorSpace, /*respectSurfaceSize*/false, mPrivilegedClient);
         if (!res.isOk())
             return res;
 
@@ -1642,6 +1659,11 @@ binder::Status CameraDeviceClient::finalizeOutputConfigurations(int32_t streamId
 
     Mutex::Autolock icl(mBinderSerializationLock);
 
+    if (!outputConfiguration.isComplete()) {
+        return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT,
+                "OutputConfiguration isn't valid!");
+    }
+
     const std::vector<sp<IGraphicBufferProducer> >& bufferProducers =
             outputConfiguration.getGraphicBufferProducers();
     const std::string &physicalId = outputConfiguration.getPhysicalCameraId();
@@ -1707,7 +1729,7 @@ binder::Status CameraDeviceClient::finalizeOutputConfigurations(int32_t streamId
         res = SessionConfigurationUtils::createSurfaceFromGbp(mStreamInfoMap[streamId],
                 true /*isStreamInfoValid*/, surface, bufferProducer, mCameraIdStr,
                 mDevice->infoPhysical(physicalId), sensorPixelModesUsed, dynamicRangeProfile,
-                streamUseCase, timestampBase, mirrorMode, colorSpace, mPrivilegedClient);
+                streamUseCase, timestampBase, mirrorMode, colorSpace, /*respectSurfaceSize*/false, mPrivilegedClient);
 
         if (!res.isOk())
             return res;
@@ -1910,9 +1932,9 @@ binder::Status CameraDeviceClient::switchToOffline(
     sp<CameraOfflineSessionClient> offlineClient;
     if (offlineSession.get() != nullptr) {
         offlineClient = new CameraOfflineSessionClient(sCameraService,
-                offlineSession, offlineCompositeStreamMap, cameraCb, mClientPackageName,
-                mClientFeatureId, mCameraIdStr, mCameraFacing, mOrientation, mClientPid, mClientUid,
-                mServicePid);
+                offlineSession, offlineCompositeStreamMap, cameraCb, mAttributionAndPermissionUtils,
+                mClientPackageName, mClientFeatureId, mCameraIdStr, mCameraFacing, mOrientation,
+                mClientPid, mClientUid, mServicePid);
         ret = sCameraService->addOfflineClient(mCameraIdStr, offlineClient);
     }
 
@@ -2053,6 +2075,7 @@ void CameraDeviceClient::notifyRepeatingRequestError(long lastFrameNumber) {
 
 void CameraDeviceClient::notifyIdle(
         int64_t requestCount, int64_t resultErrorCount, bool deviceError,
+        std::pair<int32_t, int32_t> mostRequestedFpsRange,
         const std::vector<hardware::CameraStreamStats>& streamStats) {
     // Thread safe. Don't bother locking.
     sp<hardware::camera2::ICameraDeviceCallbacks> remoteCb = getRemoteCallback();
@@ -2073,8 +2096,12 @@ void CameraDeviceClient::notifyIdle(
         }
     }
     Camera2ClientBase::notifyIdleWithUserTag(requestCount, resultErrorCount, deviceError,
-            fullStreamStats, mUserTag, mVideoStabilizationMode, mUsedUltraWide,
-            mUsedSettingsOverrideZoom);
+            mostRequestedFpsRange,
+            fullStreamStats,
+            mRunningSessionStats.mUserTag,
+            mRunningSessionStats.mVideoStabilizationMode,
+            mRunningSessionStats.mUsedUltraWide,
+            mRunningSessionStats.mUsedSettingsOverrideZoom);
 }
 
 void CameraDeviceClient::notifyShutter(const CaptureResultExtras& resultExtras,
@@ -2192,7 +2219,7 @@ binder::Status CameraDeviceClient::checkPidStatus(const char* checkLocation) {
 // TODO: move to Camera2ClientBase
 bool CameraDeviceClient::enforceRequestPermissions(CameraMetadata& metadata) {
 
-    const int pid = CameraThreadState::getCallingPid();
+    const int pid = getCallingPid();
     const int selfPid = getpid();
     camera_metadata_entry_t entry;
 
@@ -2231,7 +2258,7 @@ bool CameraDeviceClient::enforceRequestPermissions(CameraMetadata& metadata) {
         String16 permissionString =
             toString16("android.permission.CAMERA_DISABLE_TRANSMIT_LED");
         if (!checkCallingPermission(permissionString)) {
-            const int uid = CameraThreadState::getCallingUid();
+            const int uid = getCallingUid();
             ALOGE("Permission Denial: "
                   "can't disable transmit LED pid=%d, uid=%d", pid, uid);
             return false;

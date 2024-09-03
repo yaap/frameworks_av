@@ -139,6 +139,7 @@
                 <Limit name="bitrate" range="1-40000000" />
             </Variant>
             <Feature name="adaptive-playback" />
+            <Feature name="dynamic-color-aspects" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.hevc.decoder" type="video/hevc" variant="slow-cpu,!slow-cpu">
@@ -160,6 +161,7 @@
                 <Limit name="bitrate" range="1-5000000" />
             </Variant>
             <Feature name="adaptive-playback" />
+            <Feature name="dynamic-color-aspects" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.vp8.decoder" type="video/x-vnd.on2.vp8" variant="slow-cpu,!slow-cpu">
@@ -178,6 +180,7 @@
                 <Limit name="bitrate" range="1-40000000" />
             </Variant>
             <Feature name="adaptive-playback" />
+            <Feature name="dynamic-color-aspects" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.vp9.decoder" type="video/x-vnd.on2.vp9" variant="slow-cpu,!slow-cpu">
@@ -197,6 +200,27 @@
                 <Limit name="bitrate" range="1-5000000" />
             </Variant>
             <Feature name="adaptive-playback" />
+            <Feature name="dynamic-color-aspects" />
+            <Attribute name="software-codec" />
+        </MediaCodec>
+        <MediaCodec name="c2.android.av1-dav1d.decoder" type="video/av01" variant="slow-cpu,!slow-cpu">
+            <Limit name="alignment" value="1x1" />
+            <Limit name="block-size" value="16x16" />
+            <Variant name="!slow-cpu">
+                <Limit name="size" min="2x2" max="2048x2048" />
+                <Limit name="block-count" range="1-8192" /> <!-- max 2048x1024 -->
+                <Limit name="blocks-per-second" range="1-245760" />
+                <Limit name="bitrate" range="1-40000000" />
+            </Variant>
+            <Variant name="slow-cpu">
+                <Limit name="size" min="2x2" max="1280x1280" />
+                <Limit name="block-count" range="1-3600" /> <!-- max 1280x720 -->
+                <Limit name="blocks-per-second" range="1-108000" />
+                <Limit name="bitrate" range="1-5000000" />
+            </Variant>
+            <Feature name="adaptive-playback" />
+            <Feature name="dynamic-color-aspects" />
+            <Feature name="low-latency" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.av1.decoder" type="video/av01" variant="slow-cpu,!slow-cpu" rank="1024">
@@ -216,25 +240,7 @@
                 <Limit name="bitrate" range="1-5000000" />
             </Variant>
             <Feature name="adaptive-playback" />
-            <Feature name="low-latency" />
-            <Attribute name="software-codec" />
-        </MediaCodec>
-        <MediaCodec name="c2.android.av1-dav1d.decoder" type="video/av01" variant="slow-cpu,!slow-cpu">
-            <Limit name="alignment" value="1x1" />
-            <Limit name="block-size" value="16x16" />
-            <Variant name="!slow-cpu">
-                <Limit name="size" min="2x2" max="2048x2048" />
-                <Limit name="block-count" range="1-8192" /> <!-- max 2048x1024 -->
-                <Limit name="blocks-per-second" range="1-245760" />
-                <Limit name="bitrate" range="1-40000000" />
-            </Variant>
-            <Variant name="slow-cpu">
-                <Limit name="size" min="2x2" max="1280x1280" />
-                <Limit name="block-count" range="1-3600" /> <!-- max 1280x720 -->
-                <Limit name="blocks-per-second" range="1-108000" />
-                <Limit name="bitrate" range="1-5000000" />
-            </Variant>
-            <Feature name="adaptive-playback" />
+            <Feature name="dynamic-color-aspects" />
             <Feature name="low-latency" />
             <Attribute name="software-codec" />
         </MediaCodec>
@@ -337,7 +343,7 @@
         </MediaCodec>
         <MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" variant="slow-cpu,!slow-cpu">
             <Alias name="OMX.google.vp8.encoder" />
-            <Limit name="alignment" value="2x2" />
+            <Limit name="alignment" value="1x1" />
             <Limit name="block-size" value="16x16" />
             <Variant name="!slow-cpu">
                 <Limit name="size" min="2x2" max="2048x2048" />
@@ -353,6 +359,7 @@
                 <Limit name="bitrate" range="1-20000000" />
             </Variant>
             <Feature name="bitrate-modes" value="VBR,CBR" />
+            <Feature name="qp-bounds" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.hevc.encoder" type="video/hevc" variant="!slow-cpu">
@@ -367,22 +374,24 @@
             <Limit name="complexity" range="0-10"  default="0" />
             <Limit name="quality" range="0-100"  default="80" />
             <Feature name="bitrate-modes" value="VBR,CBR,CQ" />
+            <Feature name="qp-bounds" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" variant="!slow-cpu">
             <Alias name="OMX.google.vp9.encoder" />
             <!-- profiles and levels:  ProfileMain : Level_Version0-3 -->
             <Limit name="size" min="2x2" max="2048x2048" />
-            <Limit name="alignment" value="2x2" />
+            <Limit name="alignment" value="1x1" />
             <Limit name="block-size" value="16x16" />
             <!-- 2016 devices can encode at about 8fps at this block count -->
             <Limit name="block-count" range="1-3600" /> <!-- max 1280x720 -->
             <Limit name="bitrate" range="1-40000000" />
             <Feature name="bitrate-modes" value="VBR,CBR" />
+            <Feature name="qp-bounds" />
             <Attribute name="software-codec" />
         </MediaCodec>
         <MediaCodec name="c2.android.av1.encoder" type="video/av01" enabled="false" minsdk="34" variant="slow-cpu,!slow-cpu">
-            <Limit name="alignment" value="2x2" />
+            <Limit name="alignment" value="1x1" />
             <Limit name="block-size" value="16x16" />
             <Variant name="!slow-cpu">
                 <Limit name="size" min="2x2" max="1920x1920" />
@@ -397,6 +406,7 @@
             <Limit name="quality" range="0-100"  default="80" />
             <Limit name="complexity" range="0-5"  default="0" />
             <Feature name="bitrate-modes" value="VBR,CBR,CQ" />
+            <Feature name="qp-bounds" />
             <Attribute name="software-codec" />
         </MediaCodec>
     </Encoders>

@@ -30,6 +30,8 @@
 
 #include "include/SoftwareRenderer.h"
 
+#include <android_media_codec.h>
+
 #include <android/api-level.h>
 #include <android/content/pm/IPackageManagerNative.h>
 #include <android/hardware/cas/native/1.0/IDescrambler.h>
@@ -3017,6 +3019,13 @@ status_t MediaCodec::setInputSurface(
     return PostAndAwaitResponse(msg, &response);
 }
 
+status_t MediaCodec::detachOutputSurface() {
+    sp<AMessage> msg = new AMessage(kWhatDetachSurface, this);
+
+    sp<AMessage> response;
+    return PostAndAwaitResponse(msg, &response);
+}
+
 status_t MediaCodec::setSurface(const sp<Surface> &surface) {
     sp<AMessage> msg = new AMessage(kWhatSetSurface, this);
     msg->setObject("surface", surface);
@@ -3395,9 +3404,6 @@ status_t MediaCodec::queueEncryptedBuffer(
     if (bufferInfos == nullptr || bufferInfos->value.empty()) {
         return BAD_VALUE;
     }
-    if (cryptoInfos == nullptr || cryptoInfos->value.empty()) {
-        return BAD_VALUE;
-    }
     status_t err = OK;
     sp<AMessage> msg = new AMessage(kWhatQueueInputBuffer, this);
     msg->setSize("index", index);
@@ -3405,8 +3411,12 @@ status_t MediaCodec::queueEncryptedBuffer(
         new WrapperObject<sp<hardware::HidlMemory>>{buffer}};
     msg->setObject("memory", memory);
     msg->setSize("offset", offset);
-    msg->setSize("ssize", size);
-    msg->setObject("cryptoInfos", cryptoInfos);
+    if (cryptoInfos != nullptr) {
+        msg->setSize("ssize", size);
+        msg->setObject("cryptoInfos", cryptoInfos);
+    } else {
+        msg->setSize("size", size);
+    }
     msg->setObject("accessUnitInfo", bufferInfos);
     if (OK != (err = generateFlagsFromAccessUnitInfo(msg, bufferInfos))) {
         return err;
@@ -3965,6 +3975,15 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                     switch (mState) {
                         case INITIALIZING:
                         {
+                            // Resource error during INITIALIZING state needs to be logged
+                            // through metrics, to be able to track such occurrences.
+                            if (isResourceError(err)) {
+                                mediametrics_setInt32(mMetricsHandle, kCodecError, err);
+                                mediametrics_setCString(mMetricsHandle, kCodecErrorState,
+                                                        stateString(mState).c_str());
+                                flushMediametrics();
+                                initMediametrics();
+                            }
                             setState(UNINITIALIZED);
                             break;
                         }
@@ -4675,7 +4694,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                     }
 
                     mResourceManagerProxy->removeClient();
-                    mReleaseSurface.reset();
+                    mDetachedSurface.reset();
 
                     if (mReplyID != nullptr) {
                         postPendingRepliesAndDeferredMessages("kWhatReleaseCompleted");
@@ -4848,6 +4867,23 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                 mFlags |= kFlagPushBlankBuffersOnShutdown;
             }
 
+            uint32_t flags;
+            CHECK(msg->findInt32("flags", (int32_t *)&flags));
+
+            if (android::media::codec::provider_->null_output_surface_support()) {
+                if (obj == nullptr
+                        && (flags & CONFIGURE_FLAG_DETACHED_SURFACE)
+                        && !(flags & CONFIGURE_FLAG_ENCODE)) {
+                    sp<Surface> surface = getOrCreateDetachedSurface();
+                    if (surface == nullptr) {
+                        mErrorLog.log(
+                                LOG_TAG, "Detached surface mode is not supported by this codec");
+                        PostReplyWithError(replyID, INVALID_OPERATION);
+                    }
+                    obj = surface;
+                }
+            }
+
             if (obj != NULL) {
                 if (!format->findInt32(KEY_ALLOW_FRAME_DROP, &mAllowFrameDroppingBySurface)) {
                     // allow frame dropping by surface by default
@@ -4871,8 +4907,6 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
             mApiUsageMetrics.isUsingOutputSurface = true;
 
-            uint32_t flags;
-            CHECK(msg->findInt32("flags", (int32_t *)&flags));
             if (flags & CONFIGURE_FLAG_USE_BLOCK_MODEL ||
                 flags & CONFIGURE_FLAG_USE_CRYPTO_ASYNC) {
                 if (!(mFlags & kFlagIsAsync)) {
@@ -4887,8 +4921,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                 if (flags & CONFIGURE_FLAG_USE_CRYPTO_ASYNC) {
                     mFlags |= kFlagUseCryptoAsync;
                     if ((mFlags & kFlagUseBlockModel)) {
-                        ALOGW("CrytoAsync not yet enabled for block model,\
-                                falling back to normal");
+                        ALOGW("CrytoAsync not yet enabled for block model, "
+                                "falling back to normal");
                     }
                 }
             }
@@ -4945,8 +4979,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
             mDescrambler = static_cast<IDescrambler *>(descrambler);
             mBufferChannel->setDescrambler(mDescrambler);
-            if ((mFlags & kFlagUseCryptoAsync) &&
-                mCrypto  && (mDomain == DOMAIN_VIDEO)) {
+            if ((mFlags & kFlagUseCryptoAsync) && mCrypto) {
                 // set kFlagUseCryptoAsync but do-not use this for block model
                 // this is to propagate the error in onCryptoError()
                 // TODO (b/274628160): Enable Use of CONFIG_FLAG_USE_CRYPTO_ASYNC
@@ -4993,6 +5026,23 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
             break;
         }
 
+        case kWhatDetachSurface:
+        {
+            // detach surface is equivalent to setSurface(mDetachedSurface)
+            sp<Surface> surface = getOrCreateDetachedSurface();
+
+            if (surface == nullptr) {
+                sp<AReplyToken> replyID;
+                CHECK(msg->senderAwaitsResponse(&replyID));
+                mErrorLog.log(LOG_TAG, "Detaching surface is not supported by the codec.");
+                PostReplyWithError(replyID, INVALID_OPERATION);
+                break;
+            }
+
+            msg->setObject("surface", surface);
+        }
+        [[fallthrough]];
+
         case kWhatSetSurface:
         {
             sp<AReplyToken> replyID;
@@ -5010,14 +5060,17 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                     sp<Surface> surface = static_cast<Surface *>(obj.get());
                     if (mSurface == NULL) {
                         // do not support setting surface if it was not set
-                        mErrorLog.log(LOG_TAG,
-                                      "Cannot set surface if the codec is not configured with "
-                                      "a surface already");
+                        mErrorLog.log(LOG_TAG, base::StringPrintf(
+                                      "Cannot %s surface if the codec is not configured with "
+                                      "a surface already",
+                                      msg->what() == kWhatDetachSurface ? "detach" : "set"));
                         err = INVALID_OPERATION;
                     } else if (obj == NULL) {
                         // do not support unsetting surface
                         mErrorLog.log(LOG_TAG, "Unsetting surface is not supported");
                         err = BAD_VALUE;
+                    } else if (android::media::codec::provider_->null_output_surface_support()) {
+                        err = handleSetSurface(surface, true /* callCodec */);
                     } else {
                         uint32_t generation;
                         err = connectToSurface(surface, &generation);
@@ -5051,7 +5104,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                 default:
                     mErrorLog.log(LOG_TAG, base::StringPrintf(
-                            "setSurface() is valid only at Executing states; currently %s",
+                            "%sSurface() is valid only at Executing states; currently %s",
+                            msg->what() == kWhatDetachSurface ? "detach" : "set",
                             apiStateString().c_str()));
                     err = INVALID_OPERATION;
                     break;
@@ -5272,29 +5326,39 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
             bool forceSync = false;
             if (asyncNotify != nullptr && mSurface != NULL) {
-                if (!mReleaseSurface) {
-                    uint64_t usage = 0;
-                    if (mSurface->getConsumerUsage(&usage) != OK) {
-                        usage = 0;
-                    }
-                    mReleaseSurface.reset(new ReleaseSurface(usage));
-                }
-                if (mSurface != mReleaseSurface->getSurface()) {
-                    uint32_t generation;
-                    status_t err = connectToSurface(mReleaseSurface->getSurface(), &generation);
-                    ALOGW_IF(err != OK, "error connecting to release surface: err = %d", err);
-                    if (err == OK && !(mFlags & kFlagUsesSoftwareRenderer)) {
-                        err = mCodec->setSurface(mReleaseSurface->getSurface(), generation);
-                        ALOGW_IF(err != OK, "error setting release surface: err = %d", err);
-                    }
-                    if (err == OK) {
-                        (void)disconnectFromSurface();
-                        mSurface = mReleaseSurface->getSurface();
-                        mSurfaceGeneration = generation;
-                    } else {
-                        // We were not able to switch the surface, so force
+                if (android::media::codec::provider_->null_output_surface_support()) {
+                    if (handleSetSurface(getOrCreateDetachedSurface(), true /* callCodec */,
+                                         true /* onShutDown */) != OK) {
+                        // We were not able to detach the surface, so force
                         // synchronous release.
                         forceSync = true;
+                    }
+                } else {
+                    if (!mDetachedSurface) {
+                        uint64_t usage = 0;
+                        if (mSurface->getConsumerUsage(&usage) != OK) {
+                            usage = 0;
+                        }
+                        mDetachedSurface.reset(new ReleaseSurface(usage));
+                    }
+                    if (mSurface != mDetachedSurface->getSurface()) {
+                        uint32_t generation;
+                        status_t err =
+                            connectToSurface(mDetachedSurface->getSurface(), &generation);
+                        ALOGW_IF(err != OK, "error connecting to release surface: err = %d", err);
+                        if (err == OK && !(mFlags & kFlagUsesSoftwareRenderer)) {
+                            err = mCodec->setSurface(mDetachedSurface->getSurface(), generation);
+                            ALOGW_IF(err != OK, "error setting release surface: err = %d", err);
+                        }
+                        if (err == OK) {
+                            (void)disconnectFromSurface();
+                            mSurface = mDetachedSurface->getSurface();
+                            mSurfaceGeneration = generation;
+                        } else {
+                            // We were not able to switch the surface, so force
+                            // synchronous release.
+                            forceSync = true;
+                        }
                     }
                 }
             }
@@ -5996,6 +6060,10 @@ void MediaCodec::setState(State newState) {
         mErrorLog.clear();
     }
 
+    if (android::media::codec::provider_->set_state_early()) {
+        mState = newState;
+    }
+
     if (newState == UNINITIALIZED) {
         // return any straggling buffers, e.g. if we got here on an error
         returnBuffersToCodec();
@@ -6006,7 +6074,9 @@ void MediaCodec::setState(State newState) {
         mFlags &= ~kFlagSawMediaServerDie;
     }
 
-    mState = newState;
+    if (!android::media::codec::provider_->set_state_early()) {
+        mState = newState;
+    }
 
     if (mBatteryChecker != nullptr) {
         mBatteryChecker->setExecuting(isExecuting());
@@ -6207,15 +6277,8 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
         cryptoInfo->setInt32("secure", mFlags & kFlagIsSecure);
         sp<RefBase> obj;
         if (msg->findObject("cryptoInfos", &obj)) {
-            sp<CryptoInfosWrapper> infos{(CryptoInfosWrapper*)obj.get()};
-            sp<CryptoInfosWrapper> asyncInfos{
-                    new CryptoInfosWrapper(std::vector<std::unique_ptr<CodecCryptoInfo>>())};
-            for (std::unique_ptr<CodecCryptoInfo> &info : infos->value) {
-                if (info) {
-                    asyncInfos->value.emplace_back(new CryptoAsync::CryptoAsyncInfo(info));
-                }
-            }
-            buffer->meta()->setObject("cryptoInfos", asyncInfos);
+            // this object is a standalone object when created (no copy requied here)
+            buffer->meta()->setObject("cryptoInfos", obj);
         } else {
             size_t key_len = (key != nullptr)? 16 : 0;
             size_t iv_len = (iv != nullptr)? 16 : 0;
@@ -6354,7 +6417,6 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
             }
         }
         if (mCryptoAsync) {
-            // TODO b/316565675 - enable async path for audio
             // prepare a message and enqueue
             sp<AMessage> cryptoInfo = new AMessage();
             buildCryptoInfoAMessage(cryptoInfo, CryptoAsync::kActionDecrypt);
@@ -6590,9 +6652,9 @@ ssize_t MediaCodec::dequeuePortBuffer(int32_t portIndex) {
     CHECK_EQ(info, &mPortBuffers[portIndex][index]);
     availBuffers->erase(availBuffers->begin());
 
-    CHECK(!info->mOwnedByClient);
     {
         Mutex::Autolock al(mBufferLock);
+        CHECK(!info->mOwnedByClient);
         info->mOwnedByClient = true;
 
         // set image-data
@@ -6609,6 +6671,23 @@ ssize_t MediaCodec::dequeuePortBuffer(int32_t portIndex) {
     }
 
     return index;
+}
+
+sp<Surface> MediaCodec::getOrCreateDetachedSurface() {
+    if (mDomain != DOMAIN_VIDEO || (mFlags & kFlagIsEncoder)) {
+        return nullptr;
+    }
+
+    if (!mDetachedSurface) {
+        uint64_t usage = 0;
+        if (!mSurface || mSurface->getConsumerUsage(&usage) != OK) {
+            // TODO: should we use a/the default consumer usage?
+            usage = 0;
+        }
+        mDetachedSurface.reset(new ReleaseSurface(usage));
+    }
+
+    return mDetachedSurface->getSurface();
 }
 
 status_t MediaCodec::connectToSurface(const sp<Surface> &surface, uint32_t *generation) {
@@ -6684,7 +6763,56 @@ status_t MediaCodec::disconnectFromSurface() {
     return err;
 }
 
+status_t MediaCodec::handleSetSurface(const sp<Surface> &surface, bool callCodec, bool onShutDown) {
+    uint32_t generation;
+    status_t err = OK;
+    if (surface != nullptr) {
+        err = connectToSurface(surface, &generation);
+        if (err == ALREADY_EXISTS) {
+            // reconnecting to same surface
+            return OK;
+        }
+
+        if (err == OK && callCodec) {
+            if (mFlags & kFlagUsesSoftwareRenderer) {
+                if (mSoftRenderer != NULL
+                        && (mFlags & kFlagPushBlankBuffersOnShutdown)) {
+                    pushBlankBuffersToNativeWindow(mSurface.get());
+                }
+                // do not create a new software renderer on shutdown (release)
+                // as it will not be used anyway
+                if (!onShutDown) {
+                    surface->setDequeueTimeout(-1);
+                    mSoftRenderer = new SoftwareRenderer(surface);
+                    // TODO: check if this was successful
+                }
+            } else {
+                err = mCodec->setSurface(surface, generation);
+            }
+
+            mReliabilityContextMetrics.setOutputSurfaceCount++;
+        }
+    }
+
+    if (err == OK) {
+        if (mSurface != NULL) {
+            (void)disconnectFromSurface();
+        }
+
+        if (surface != NULL) {
+            mSurface = surface;
+            mSurfaceGeneration = generation;
+        }
+    }
+
+    return err;
+}
+
 status_t MediaCodec::handleSetSurface(const sp<Surface> &surface) {
+    if (android::media::codec::provider_->null_output_surface_support()) {
+        return handleSetSurface(surface, false /* callCodec */);
+    }
+
     status_t err = OK;
     if (mSurface != NULL) {
         (void)disconnectFromSurface();

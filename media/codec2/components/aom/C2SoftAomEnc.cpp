@@ -29,6 +29,12 @@
 
 #include "C2SoftAomEnc.h"
 
+/* Quantization param values defined by the spec */
+#define AOM_QP_MIN 0
+#define AOM_QP_MAX 63
+#define AOM_QP_DEFAULT_MIN AOM_QP_MIN
+#define AOM_QP_DEFAULT_MAX AOM_QP_MAX
+
 namespace android {
 
 constexpr char COMPONENT_NAME[] = "c2.android.av1.encoder";
@@ -50,11 +56,13 @@ C2SoftAomEnc::IntfImpl::IntfImpl(const std::shared_ptr<C2ReflectorHelper>& helpe
                                  0u, (uint64_t)C2MemoryUsage::CPU_READ))
                          .build());
 
+    // Odd dimension support in encoders requires Android V and above
+    size_t stepSize = isAtLeastV() ? 1 : 2;
     addParameter(DefineParam(mSize, C2_PARAMKEY_PICTURE_SIZE)
                          .withDefault(new C2StreamPictureSizeInfo::input(0u, 320, 240))
                          .withFields({
-                                 C2F(mSize, width).inRange(2, 2048, 2),
-                                 C2F(mSize, height).inRange(2, 2048, 2),
+                                 C2F(mSize, width).inRange(2, 2048, stepSize),
+                                 C2F(mSize, height).inRange(2, 2048, stepSize),
                          })
                          .withSetter(SizeSetter)
                          .build());
@@ -173,6 +181,19 @@ C2SoftAomEnc::IntfImpl::IntfImpl(const std::shared_ptr<C2ReflectorHelper>& helpe
                                      .inRange(C2Color::MATRIX_UNSPECIFIED, C2Color::MATRIX_OTHER)})
                     .withSetter(CodedColorAspectsSetter, mColorAspects)
                     .build());
+
+    addParameter(
+            DefineParam(mPictureQuantization, C2_PARAMKEY_PICTURE_QUANTIZATION)
+            .withDefault(C2StreamPictureQuantizationTuning::output::AllocShared(
+                    0 /* flexCount */, 0u /* stream */))
+            .withFields({C2F(mPictureQuantization, m.values[0].type_).oneOf(
+                            {C2Config::I_FRAME, C2Config::P_FRAME}),
+                         C2F(mPictureQuantization, m.values[0].min).inRange(
+                            AOM_QP_DEFAULT_MIN, AOM_QP_DEFAULT_MAX),
+                         C2F(mPictureQuantization, m.values[0].max).inRange(
+                            AOM_QP_DEFAULT_MIN, AOM_QP_DEFAULT_MAX)})
+            .withSetter(PictureQuantizationSetter)
+            .build());
 }
 
 C2R C2SoftAomEnc::IntfImpl::BitrateSetter(bool mayBlock, C2P<C2StreamBitrateInfo::output>& me) {
@@ -302,6 +323,54 @@ C2R C2SoftAomEnc::IntfImpl::CodedColorAspectsSetter(
     me.set().primaries = coded.v.primaries;
     me.set().transfer = coded.v.transfer;
     me.set().matrix = coded.v.matrix;
+    return C2R::Ok();
+}
+
+C2R C2SoftAomEnc::IntfImpl::PictureQuantizationSetter(
+        bool mayBlock, C2P<C2StreamPictureQuantizationTuning::output>& me) {
+    (void)mayBlock;
+    int32_t iMin = AOM_QP_DEFAULT_MIN, pMin = AOM_QP_DEFAULT_MIN;
+    int32_t iMax = AOM_QP_DEFAULT_MAX, pMax = AOM_QP_DEFAULT_MAX;
+    for (size_t i = 0; i < me.v.flexCount(); ++i) {
+        const C2PictureQuantizationStruct &layer = me.v.m.values[i];
+        // layerMin is clamped to [AOM_QP_MIN, layerMax] to avoid error
+        // cases where layer.min > layer.max
+        int32_t layerMax = std::clamp(layer.max, AOM_QP_MIN, AOM_QP_MAX);
+        int32_t layerMin = std::clamp(layer.min, AOM_QP_MIN, layerMax);
+        if (layer.type_ == C2Config::picture_type_t(I_FRAME)) {
+            iMax = layerMax;
+            iMin = layerMin;
+            ALOGV("iMin %d iMax %d", iMin, iMax);
+        } else if (layer.type_ == C2Config::picture_type_t(P_FRAME)) {
+            pMax = layerMax;
+            pMin = layerMin;
+            ALOGV("pMin %d pMax %d", pMin, pMax);
+        }
+    }
+    ALOGV("PictureQuantizationSetter(entry): i %d-%d p %d-%d",
+          iMin, iMax, pMin, pMax);
+
+    // aom library takes same range for I/P picture type
+    int32_t maxFrameQP = std::min(iMax, pMax);
+    int32_t minFrameQP = std::max(iMin, pMin);
+    if (minFrameQP > maxFrameQP) {
+        minFrameQP = maxFrameQP;
+    }
+    // put them back into the structure
+    for (size_t i = 0; i < me.v.flexCount(); ++i) {
+        const C2PictureQuantizationStruct &layer = me.v.m.values[i];
+
+        if (layer.type_ == C2Config::picture_type_t(I_FRAME)) {
+            me.set().m.values[i].max = maxFrameQP;
+            me.set().m.values[i].min = minFrameQP;
+        }
+        else if (layer.type_ == C2Config::picture_type_t(P_FRAME)) {
+            me.set().m.values[i].max = maxFrameQP;
+            me.set().m.values[i].min = minFrameQP;
+        }
+    }
+    ALOGV("PictureQuantizationSetter(exit): minFrameQP = %d maxFrameQP = %d",
+          minFrameQP, maxFrameQP);
     return C2R::Ok();
 }
 
@@ -556,6 +625,7 @@ status_t C2SoftAomEnc::initEncoder() {
         mQuality = mIntf->getQuality_l();
         mComplexity = mIntf->getComplexity_l();
         mAV1EncLevel = mIntf->getLevel_l();
+        mQpBounds = mIntf->getPictureQuantization_l();
     }
 
 
@@ -571,6 +641,18 @@ status_t C2SoftAomEnc::initEncoder() {
         default:
             mBitrateControlMode = AOM_VBR;
             break;
+    }
+
+    if (mQpBounds->flexCount() > 0) {
+        // read min max qp for sequence
+        for (size_t i = 0; i < mQpBounds->flexCount(); ++i) {
+            const C2PictureQuantizationStruct &layer = mQpBounds->m.values[i];
+            if (layer.type_ == C2Config::picture_type_t(I_FRAME)) {
+                mMaxQuantizer = layer.max;
+                mMinQuantizer = layer.min;
+                break;
+            }
+        }
     }
 
     mCodecInterface = aom_codec_av1_cx();
@@ -605,7 +687,7 @@ status_t C2SoftAomEnc::initEncoder() {
     mCodecConfiguration->g_timebase.den = 1000000;
     // rc_target_bitrate is in kbps, mBitrate in bps
     mCodecConfiguration->rc_target_bitrate = (mBitrate->value + 500) / 1000;
-    mCodecConfiguration->rc_end_usage = mBitrateControlMode == AOM_Q ? AOM_Q : AOM_CBR;
+    mCodecConfiguration->rc_end_usage = mBitrateControlMode;
     // Disable frame drop - not allowed in MediaCodec now.
     mCodecConfiguration->rc_dropframe_thresh = 0;
     // Disable lagged encoding.
