@@ -1219,10 +1219,9 @@ public:
                         mTimestamp.mPosition[ExtendedTimestamp::LOCATION_KERNEL];
                 }
 
-    bool waitForHalStart() final EXCLUDES_ThreadBase_Mutex {
+    bool waitForHalStart(uint32_t timeoutMs) final EXCLUDES_ThreadBase_Mutex {
                     audio_utils::unique_lock _l(mutex());
-                    static const nsecs_t kWaitHalTimeoutNs = seconds(2);
-                    nsecs_t endWaitTimetNs = systemTime() + kWaitHalTimeoutNs;
+                    nsecs_t endWaitTimetNs = systemTime() + milliseconds(timeoutMs);
                     while (!mHalStarted) {
                         nsecs_t timeNs = systemTime();
                         if (timeNs >= endWaitTimetNs) {

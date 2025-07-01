@@ -17,6 +17,7 @@
 #ifndef ANDROID_AUDIO_TRACK_SHARED_H
 #define ANDROID_AUDIO_TRACK_SHARED_H
 
+#include <algorithm>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -426,6 +427,11 @@ public:
 
     virtual void stop() { }; // called by client in AudioTrack::stop()
 
+     void setMinMeasureMs(uint32_t measureMs) {
+         long measureNs = measureMs * 1'000'000L;
+         mMinMeasureNs = std::clamp(measureNs, kAbsoluteMinMeasureNs, kDefaultMinMeasureNs);
+     }
+
 private:
     // This is a copy of mCblk->mBufferSizeInFrames
     uint32_t   mBufferSizeInFrames;  // effective size of the buffer
@@ -437,6 +443,10 @@ private:
     // is initialized by the client constructor.
     ExtendedTimestampQueue::Observer mTimestampObserver;
     ExtendedTimestamp mTimestamp; // initialized by constructor
+    // Minimum timeout in nanoseconds for which we actually wait in obtainBuffer()
+    static constexpr long kDefaultMinMeasureNs = 10'000'000; // 10ms default
+    static constexpr long kAbsoluteMinMeasureNs = 1'000'000; // 1ms absolute min
+    long mMinMeasureNs = kDefaultMinMeasureNs;
 };
 
 // ----------------------------------------------------------------------------

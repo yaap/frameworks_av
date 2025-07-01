@@ -554,7 +554,10 @@ public:
 
     virtual void setStandby() EXCLUDES_ThreadBase_Mutex = 0;
     virtual void setStandby_l() REQUIRES(mutex()) = 0;
-    virtual bool waitForHalStart() EXCLUDES_ThreadBase_Mutex = 0;
+
+    static constexpr uint32_t kWaitHalTimeoutMs = 2'000;
+    virtual bool waitForHalStart(uint32_t timeoutMs = kWaitHalTimeoutMs)
+            EXCLUDES_ThreadBase_Mutex = 0;
 
     virtual bool hasFastMixer() const = 0;
     virtual FastTrackUnderruns getFastTrackUnderruns(size_t fastIndex) const = 0;

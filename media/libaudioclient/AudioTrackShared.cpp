@@ -117,8 +117,6 @@ ClientProxy::ClientProxy(audio_track_cblk_t* cblk, void *buffers, size_t frameCo
 const struct timespec ClientProxy::kForever = {INT_MAX /*tv_sec*/, 0 /*tv_nsec*/};
 const struct timespec ClientProxy::kNonBlocking = {0 /*tv_sec*/, 0 /*tv_nsec*/};
 
-#define MEASURE_NS 10000000 // attempt to provide accurate timeouts if requested >= MEASURE_NS
-
 // To facilitate quicker recovery from server failure, this value limits the timeout per each futex
 // wait.  However it does not protect infinite timeouts.  If defined to be zero, there is no limit.
 // FIXME May not be compatible with audio tunneling requirements where timeout should be in the
@@ -172,7 +170,7 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
         timeout = TIMEOUT_INFINITE;
     } else {
         timeout = TIMEOUT_FINITE;
-        if (requested->tv_sec > 0 || requested->tv_nsec >= MEASURE_NS) {
+        if (requested->tv_sec > 0 || requested->tv_nsec >= mMinMeasureNs) {
             measure = true;
         }
     }
