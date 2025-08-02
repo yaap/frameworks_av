@@ -156,13 +156,6 @@ ComponentStore::ComponentStore(const std::shared_ptr<C2ComponentStore>& store)
         mParamReflectors.push_back(paramReflector);
     }
 #endif
-    // MultiAccessUnit reflector helper is allocated once per store.
-    // All components in this store can reuse this reflector helper.
-    if (MultiAccessUnitHelper::isEnabledOnPlatform()) {
-        std::shared_ptr<C2ReflectorHelper> helper = std::make_shared<C2ReflectorHelper>();
-        mParamReflectors.push_back(helper);
-        mMultiAccessUnitReflector = helper;
-    }
 
     // Retrieve supported parameters from store
     using namespace std::placeholders;
@@ -253,7 +246,8 @@ std::shared_ptr<MultiAccessUnitInterface> ComponentStore::tryCreateMultiAccessUn
                 std::shared_ptr<C2ReflectorHelper> multiAccessReflector(new C2ReflectorHelper());
                 multiAccessUnitIntf = std::make_shared<MultiAccessUnitInterface>(
                         c2interface,
-                        mMultiAccessUnitReflector);
+                        multiAccessReflector);
+                mParamReflectors.push_back(multiAccessReflector);
             }
         }
     }
