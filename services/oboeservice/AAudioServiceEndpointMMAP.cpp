@@ -129,7 +129,12 @@ aaudio_result_t AAudioServiceEndpointMMAP::open(const aaudio::AAudioStreamReques
 
     std::set<audio_config_base_t, configComp> configsTried;
     int32_t numberOfAttempts = 0;
-    while (numberOfAttempts < AAUDIO_MAX_OPEN_ATTEMPTS) {
+    // If the performance mode is offload, it requires the stream to be opened with
+    // requested configuration. The framework do not provide conversion for offload use case.
+    const int maxOpenAttempts =
+            getPerformanceMode() == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED
+                    ? 1 : AAUDIO_MAX_OPEN_ATTEMPTS;
+    while (numberOfAttempts < maxOpenAttempts) {
         if (configsTried.find(config) != configsTried.end()) {
             // APM returning something that has already tried.
             ALOGW("Have already tried to open with format=%#x and sr=%d, but failed before",
@@ -202,16 +207,29 @@ aaudio_result_t AAudioServiceEndpointMMAP::openWithConfig(
           __func__, config->format, config->sample_rate,
           config->channel_mask, android::toString(deviceIds).c_str());
 
+    audio_offload_info_t* info = nullptr;
+    audio_offload_info_t offloadInfo = AUDIO_INFO_INITIALIZER;
+    if (getPerformanceMode() == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED) {
+        offloadInfo.format = config->format;
+        offloadInfo.sample_rate = config->sample_rate;
+        offloadInfo.channel_mask = config->channel_mask;
+        offloadInfo.stream_type = AUDIO_STREAM_MUSIC;
+        offloadInfo.has_video = false;
+        info = &offloadInfo;
+    }
+
     const std::lock_guard<std::mutex> lock(mMmapStreamLock);
-    const status_t status = MmapStreamInterface::openMmapStream(streamDirection,
-                                                                &attributes,
-                                                                config,
-                                                                mMmapClient,
-                                                                &deviceIds,
-                                                                &sessionId,
-                                                                this, // callback
-                                                                mMmapStream,
-                                                                &mPortHandle);
+    const status_t status = MmapStreamInterface::openMmapStream(
+            streamDirection,
+            &attributes,
+            config,
+            mMmapClient,
+            &deviceIds,
+            &sessionId,
+            this, // callback
+            info,
+            mMmapStream,
+            &mPortHandle);
     ALOGD("%s() mMapClient.attributionSource = %s => portHandle = %d\n",
           __func__, mMmapClient.attributionSource.toString().c_str(), mPortHandle);
     if (status != OK) {

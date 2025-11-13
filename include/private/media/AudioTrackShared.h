@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include <audio_utils/atomic.h>
 #include <audio_utils/minifloat.h>
 #include <utils/threads.h>
 #include <utils/Log.h>
@@ -316,7 +317,12 @@ protected:
     const bool      mIsOut;             // true for AudioTrack, false for AudioRecord
     const bool      mClientInServer;    // true for OutputTrack, false for AudioTrack & AudioRecord
     bool            mIsShutdown;        // latch set to true when shared memory corruption detected
-    size_t          mUnreleased;        // unreleased frames remaining from most recent obtainBuffer
+
+    // mUnreleased is the number frames remaining from most recent obtainBuffer(s).
+    // Generally accessed by a single thread, but for Java offload,
+    // this variable may be accessed from multiple threads.  It is used to
+    // bounds check the releaseBuffer call after the obtainBuffer.
+    audio_utils::atomic<size_t, audio_utils::memory_order_relaxed>  mUnreleased;
 };
 
 // ----------------------------------------------------------------------------

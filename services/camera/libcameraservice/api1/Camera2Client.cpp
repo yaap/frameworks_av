@@ -138,9 +138,14 @@ status_t Camera2Client::initializeImpl(TProviderPtr providerPtr, const std::stri
     // when the display rotates. The sensor orientation still needs to be calculated
     // and applied similar to the Camera2 path.
     using hardware::BnCameraService::ROTATION_OVERRIDE_ROTATION_ONLY;
+    using hardware::BnCameraService::ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE;
     bool enableTransformInverseDisplay = true;
+    bool rotationOnlyOverride = mRotationOverride == ROTATION_OVERRIDE_ROTATION_ONLY;
+    bool reverseRotationOnlyOverride =
+            wm_flags::enable_camera_compat_check_device_rotation_bugfix() &&
+                    mRotationOverride == ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE;
     if (wm_flags::enable_camera_compat_for_desktop_windowing()) {
-        enableTransformInverseDisplay = (mRotationOverride != ROTATION_OVERRIDE_ROTATION_ONLY);
+        enableTransformInverseDisplay = !rotationOnlyOverride && !reverseRotationOnlyOverride;
     }
     CameraUtils::getRotationTransform(staticInfo, OutputConfiguration::MIRROR_MODE_AUTO,
             enableTransformInverseDisplay, &mRotateAndCropPreviewTransform);
@@ -507,15 +512,13 @@ binder::Status Camera2Client::disconnect() {
     bool hasDeviceError = mDevice->hasDeviceError();
     mDevice->disconnect();
 
-    if (flags::api1_release_binderlock_before_cameraservice_disconnect()) {
+    {
         // CameraService::Client::disconnect calls CameraService which attempts to lock
         // CameraService's mServiceLock. This might lead to a deadlock if the cameraservice is
         // currently waiting to lock mSerializationLock on another thread.
         mBinderSerializationLock.unlock();
         CameraService::Client::disconnect();
         mBinderSerializationLock.lock();
-    } else {
-        CameraService::Client::disconnect();
     }
 
     int32_t closeLatencyMs = ns2ms(systemTime() - startTime);
@@ -628,11 +631,14 @@ status_t Camera2Client::setPreviewWindowL(const view::Surface& viewSurface,
     ATRACE_CALL();
     status_t res;
 
-    uint64_t viewSurfaceID;
-    res = viewSurface.getUniqueId(&viewSurfaceID);
-    if (res != OK) {
-        ALOGE("%s: Camera %d: Could not getUniqueId.", __FUNCTION__, mCameraId);
-        return res;
+    // We will get empty view surfaces here when the client wants to clear it.
+    uint64_t viewSurfaceID = 0;
+    if (!viewSurface.isEmpty()) {
+        res = viewSurface.getUniqueId(&viewSurfaceID);
+        if (res != OK) {
+            ALOGE("%s: Camera %d: Could not getUniqueId.", __FUNCTION__, mCameraId);
+            return res;
+        }
     }
 
     if (viewSurfaceID == mPreviewViewSurfaceID) {

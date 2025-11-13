@@ -146,6 +146,9 @@ status_t Engine::loadWithFallback(const T& configSource) {
     };
 
     loadCriteria(result.parsedConfig->criteria, result.parsedConfig->criterionTypes);
+
+    initializeLegacyStrategyMaps();
+
     return result.nbSkippedElement == 0? NO_ERROR : BAD_VALUE;
 }
 

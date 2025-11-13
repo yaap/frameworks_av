@@ -27,13 +27,15 @@
 #include <media/IMediaDeathNotifier.h>
 #include <android/media/MicrophoneInfoFw.h>
 #include <android/content/AttributionSourceState.h>
+#include <gui/Flags.h> // Remove with MediaSurfaceType and WB_MEDIA_MIGRATION.
 
 namespace android {
 
-class Surface;
 class IMediaRecorder;
 class ICameraRecordingProxy;
+#if not COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
 class IGraphicBufferProducer;
+#endif
 struct PersistentSurface;
 class Surface;
 
@@ -237,7 +239,7 @@ public:
     status_t    initCheck();
     status_t    setCamera(const sp<hardware::ICamera>& camera,
             const sp<ICameraRecordingProxy>& proxy);
-    status_t    setPreviewSurface(const sp<IGraphicBufferProducer>& surface);
+    status_t    setPreviewSurface(const sp<MediaSurfaceType>& surface);
     status_t    setVideoSource(int vs);
     status_t    setAudioSource(int as);
     status_t    setPrivacySensitive(bool privacySensitive);
@@ -264,7 +266,7 @@ public:
     status_t    release();
     void        notify(int msg, int ext1, int ext2);
     status_t    setInputSurface(const sp<PersistentSurface>& surface);
-    sp<IGraphicBufferProducer>     querySurfaceMediaSourceFromMediaServer();
+    sp<MediaSurfaceType>     querySurfaceMediaSourceFromMediaServer();
     status_t    getMetrics(Parcel *reply);
     status_t    setInputDevice(audio_port_handle_t deviceId);
     status_t    getRoutedDeviceIds(DeviceIdVector& deviceIds);
@@ -283,10 +285,10 @@ private:
     sp<IMediaRecorder>          mMediaRecorder;
     sp<MediaRecorderListener>   mListener;
 
-    // Reference to IGraphicBufferProducer
+    // Reference to Surface
     // for encoding GL Frames. That is useful only when the
     // video source is set to VIDEO_SOURCE_GRALLOC_BUFFER
-    sp<IGraphicBufferProducer>  mSurfaceMediaSource;
+    sp<MediaSurfaceType> mSurfaceMediaSource;
 
     media_recorder_states       mCurrentState;
     bool                        mIsAudioSourceSet;

@@ -119,6 +119,10 @@ VirtualCameraTestInstance::VirtualCameraTestInstance(const int fps)
     : mFps(fps) {
 }
 
+ScopedAStatus VirtualCameraTestInstance::onOpenCamera() {
+  return ScopedAStatus::ok();
+}
+
 ScopedAStatus VirtualCameraTestInstance::onStreamConfigured(
     const int32_t streamId, const Surface& surface, const int32_t width,
     const int32_t height, const Format pixelFormat) {

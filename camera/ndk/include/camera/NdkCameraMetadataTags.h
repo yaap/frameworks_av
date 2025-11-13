@@ -2425,7 +2425,7 @@ typedef enum acamera_metadata_tag {
      *
      * <p>If set to AUTO, the camera device detects which capture request key the application uses
      * to do zoom, ACAMERA_SCALER_CROP_REGION or ACAMERA_CONTROL_ZOOM_RATIO. If
-     * the application doesn't set android.scaler.zoomRatio or sets it to 1.0 in the capture
+     * the application doesn't set ACAMERA_CONTROL_ZOOM_RATIO or sets it to 1.0 in the capture
      * request, the effective zoom level is reflected in ACAMERA_SCALER_CROP_REGION in capture
      * results. If ACAMERA_CONTROL_ZOOM_RATIO is set to values other than 1.0, the effective
      * zoom level is reflected in ACAMERA_CONTROL_ZOOM_RATIO. AUTO is the default value
@@ -8655,9 +8655,15 @@ typedef enum acamera_metadata_enum_acamera_control_ae_mode {
      * (triggered by ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER) and
      * may be fired for captures for which the
      * ACAMERA_CONTROL_CAPTURE_INTENT field is set to
-     * STILL_CAPTURE</p>
+     * STILL_CAPTURE.</p>
+     * <p>It's important to wait for the precapture sequence
+     * to complete (i.e., ACAMERA_CONTROL_AE_STATE reaches
+     * FLASH_REQUIRED, CONVERGED, or LOCKED) before submitting a
+     * STILL_CAPTURE request. Otherwise, in low-light conditions,
+     * the image captures with flash fired won't have correct exposures.</p>
      *
      * @see ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER
+     * @see ACAMERA_CONTROL_AE_STATE
      * @see ACAMERA_CONTROL_CAPTURE_INTENT
      */
     ACAMERA_CONTROL_AE_MODE_ON_AUTO_FLASH                            = 2,
@@ -8670,9 +8676,15 @@ typedef enum acamera_metadata_enum_acamera_control_ae_mode {
      * (triggered by ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER) and
      * will always be fired for captures for which the
      * ACAMERA_CONTROL_CAPTURE_INTENT field is set to
-     * STILL_CAPTURE</p>
+     * STILL_CAPTURE.</p>
+     * <p>It's important to wait for the precapture sequence
+     * to complete (i.e., ACAMERA_CONTROL_AE_STATE reaches
+     * FLASH_REQUIRED, CONVERGED, or LOCKED) Dbefore submitting a
+     * STILL_CAPTURE request. Otherwise, in low-light conditions,
+     * the image captures with flash fired won't have correct exposures.</p>
      *
      * @see ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER
+     * @see ACAMERA_CONTROL_AE_STATE
      * @see ACAMERA_CONTROL_CAPTURE_INTENT
      */
     ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH                          = 3,

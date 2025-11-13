@@ -145,9 +145,10 @@ BinderResult<bool> NativePermissionController::validateUidPackagePair(
     }
     const auto cursor = package_map_.find(uid);
     if (cursor == package_map_.end()) {
-        return unexpectedExceptionCode(
-                Status::EX_ILLEGAL_ARGUMENT,
-                "NPC::validatedUidPackagePair: unknown uid");
+        return unexpectedExceptionCode(Status::EX_ILLEGAL_ARGUMENT,
+                                      ("NPC::validateUidPackagePair: uid not found: " +
+                                        std::to_string(uid) + " for package " + packageName)
+                                               .c_str());
     }
     return (std::find(cursor->second.begin(), cursor->second.end(), packageName) !=
             cursor->second.end());

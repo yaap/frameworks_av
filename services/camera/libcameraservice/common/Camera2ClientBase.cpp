@@ -293,7 +293,7 @@ binder::Status Camera2ClientBase<TClientBase>::disconnectImpl() {
     // deadlock while acquiring service lock in cacheDump.
     if (!TClientBase::mDisconnected) {
         ALOGD("Camera %s: start to cacheDump", TClientBase::mCameraIdStr.c_str());
-        Camera2ClientBase::getCameraService()->cacheDump();
+        Camera2ClientBase::getCameraService()->cacheDump(TClientBase::mCameraIdStr);
     }
 
     detachDevice();
@@ -375,13 +375,22 @@ void Camera2ClientBase<TClientBase>::notifyPhysicalCameraChange(const std::strin
         int orientation = orientationEntry.data.i32[0];
         int rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_NONE;
         bool landscapeSensor =  (orientation == 0 || orientation == 180);
-        if (((TClientBase::mRotationOverride ==
-                ICameraService::ROTATION_OVERRIDE_OVERRIDE_TO_PORTRAIT) && landscapeSensor) ||
-                        ((wm_flags::enable_camera_compat_for_desktop_windowing() &&
-                                TClientBase::mRotationOverride ==
-                                ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY)
-                                && !landscapeSensor)) {
+        bool rotationAndSensorOverride = TClientBase::mRotationOverride ==
+                ICameraService::ROTATION_OVERRIDE_OVERRIDE_TO_PORTRAIT;
+        bool rotationOnlyOverride = TClientBase::mRotationOverride ==
+                ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY;
+        bool reverseRotationOnlyOverride =
+                wm_flags::enable_camera_compat_check_device_rotation_bugfix() &&
+                        TClientBase::mRotationOverride ==
+                        ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE;
+        if ((rotationAndSensorOverride && landscapeSensor) ||
+                (wm_flags::enable_camera_compat_for_desktop_windowing() && rotationOnlyOverride &&
+                        !landscapeSensor)) {
             rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_90;
+        } else if (wm_flags::enable_camera_compat_for_desktop_windowing()
+                && !landscapeSensor
+                && reverseRotationOnlyOverride) {
+            rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_270;
         }
 
         static_cast<TClientBase *>(this)->setRotateAndCropOverride(rotateAndCropMode,

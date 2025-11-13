@@ -93,7 +93,7 @@ namespace camera3 {
             // Used to send buffer error callback when failing to return buffer
             const CaptureResultExtras &resultExtras = CaptureResultExtras{},
             ERROR_BUF_STRATEGY errorBufStrategy = ERROR_BUF_RETURN,
-            int32_t transform = -1);
+            const TransformationMap &transform = TransformationMap{});
 
     // helper function to collect the output buffers ready to be
     // returned to output streams, and to remove these buffers from

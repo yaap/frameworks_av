@@ -221,7 +221,6 @@ camera_status_t CameraDevice::isSessionConfigurationSupported(
     if (ret != ACAMERA_OK) {
         return ret;
     }
-
     SessionConfiguration sessionConfig;
     sessionConfig.inputWidth = 0;
     sessionConfig.inputHeight = 0;

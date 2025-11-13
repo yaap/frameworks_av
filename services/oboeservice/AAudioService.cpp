@@ -35,6 +35,8 @@
 #include "AAudioServiceStreamMMAP.h"
 #include "AAudioServiceStreamShared.h"
 
+#include <com_android_media_audioserver.h>
+
 using namespace android;
 using namespace aaudio;
 
@@ -113,6 +115,22 @@ AAudioService::openStream(const StreamRequest &_request, StreamParameters* _para
     const AAudioStreamConfiguration &configurationInput = request.getConstantConfiguration();
     const bool sharingModeMatchRequired = request.isSharingModeMatchRequired();
     const aaudio_sharing_mode_t sharingMode = configurationInput.getSharingMode();
+    const aaudio_performance_mode_t performanceMode = configurationInput.getPerformanceMode();
+    if (performanceMode != AAUDIO_PERFORMANCE_MODE_LOW_LATENCY &&
+        performanceMode != AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED) {
+        ALOGE("%s denied performance mode as %d for mmap path", __func__, performanceMode);
+        AIDL_RETURN(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+    }
+    if (performanceMode == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED &&
+        !com_android_media_audioserver_mmap_pcm_offload_support()) {
+        ALOGD("%s denied mmap offload due to flag is not enabled", __func__);
+        AIDL_RETURN(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+    }
+    if (performanceMode == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED &&
+            (sharingMode != AAUDIO_SHARING_MODE_EXCLUSIVE || !sharingModeMatchRequired)) {
+        ALOGE("%s mmap offload must be exclusive", __func__);
+        AIDL_RETURN(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+    }
 
     // Enforce limit on client processes.
     AttributionSourceState attributionSource = request.getAttributionSource();
@@ -294,6 +312,17 @@ Status AAudioService::exitStandby(int32_t streamHandle, Endpoint* endpoint, int3
         *endpoint = std::move(endpointParcelable).parcelable();
     }
     AIDL_RETURN(result);
+}
+
+Status AAudioService::updateTimestamp(int32_t streamHandle, int32_t *_aidl_return) {
+    static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
+
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
+    }
+    AIDL_RETURN(serviceStream->updateTimestamp());
 }
 
 bool AAudioService::isCallerInService() {

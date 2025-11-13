@@ -26,13 +26,33 @@
 
 namespace android::apexcodecs {
 
+class ApexConfigurableIntf {
+public:
+    virtual ~ApexConfigurableIntf() = default;
+
+    virtual ApexCodec_Status config(
+            const std::vector<C2Param *> &params,
+            std::vector<std::unique_ptr<C2SettingResult>> *results) const = 0;
+
+    virtual ApexCodec_Status query(
+            const std::vector<C2Param::Index> &heapParamIndices,
+            std::vector<std::unique_ptr<C2Param>>* const heapParams) const = 0;
+
+    virtual ApexCodec_Status querySupportedParams(
+            std::vector<std::shared_ptr<C2ParamDescriptor>> * const params) const = 0;
+
+    virtual ApexCodec_Status querySupportedValues(
+            std::vector<C2FieldSupportedValuesQuery> &fields) const = 0;
+};
+
+
 class ApexComponentIntf {
 public:
     virtual ~ApexComponentIntf() = default;
     virtual ApexCodec_Status start() = 0;
     virtual ApexCodec_Status flush() = 0;
     virtual ApexCodec_Status reset() = 0;
-    virtual ApexCodec_Configurable *getConfigurable() = 0;
+    virtual std::unique_ptr<ApexConfigurableIntf> getConfigurable() = 0;
     virtual ApexCodec_Status process(
             const ApexCodec_Buffer *input,
             ApexCodec_Buffer *output,
@@ -45,6 +65,7 @@ public:
     virtual ~ApexComponentStoreIntf() = default;
     virtual std::vector<std::shared_ptr<const C2Component::Traits>> listComponents() const = 0;
     virtual std::unique_ptr<ApexComponentIntf> createComponent(const char *name) = 0;
+    virtual std::shared_ptr<C2ParamReflector> getParamReflector() const = 0;
 };
 
 }  // namespace android

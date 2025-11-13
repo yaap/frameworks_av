@@ -157,7 +157,6 @@ TrackBase::TrackBase(
     // battery usage on it.
     mUid = clientUid;
 
-    // ALOGD("Creating track with %d buffers @ %d bytes", bufferCount, bufferSize);
 
     size_t minBufferSize = buffer == NULL ? roundup(frameCount) : frameCount;
     // check overflow when computing bufferSize due to multiplication by mFrameSize.
@@ -175,6 +174,8 @@ TrackBase::TrackBase(
         android_errorWriteLog(0x534e4554, "38340117");
         return;
     }
+    // ALOGD("%s(%d): Creating track with %zu buffers @ %zu bytes",
+    //        __func__, mId, bufferSize / mFrameSize, bufferSize);
 
     size_t size = sizeof(audio_track_cblk_t);
     if (buffer == NULL && alloc == ALLOC_CBLK) {
@@ -538,7 +539,8 @@ TrackHandle::~TrackHandle() {
 
 Status TrackHandle::getCblk(
         std::optional<media::SharedFileRegion>* _aidl_return) {
-    *_aidl_return = legacy2aidl_NullableIMemory_SharedFileRegion(mTrack->getCblk()).value();
+    *_aidl_return = VALUE_OR_RETURN_BINDER_STATUS(
+                legacy2aidl_NullableIMemory_SharedFileRegion(mTrack->getCblk()));
     return Status::ok();
 }
 
@@ -829,9 +831,7 @@ sp<IAfTrack> IAfTrack::create(
         size_t frameCountToBeReady,
         float speed,
         bool isSpatialized,
-        bool isBitPerfect,
-        float volume,
-        bool muted) {
+        bool isBitPerfect) {
     return sp<Track>::make(thread,
             client,
             streamType,
@@ -852,9 +852,7 @@ sp<IAfTrack> IAfTrack::create(
             frameCountToBeReady,
             speed,
             isSpatialized,
-            isBitPerfect,
-            volume,
-            muted);
+            isBitPerfect);
 }
 
 // Track constructor must be called with AudioFlinger::mLock and ThreadBase::mLock held
@@ -879,11 +877,9 @@ Track::Track(
             size_t frameCountToBeReady,
             float speed,
             bool isSpatialized,
-            bool isBitPerfect,
-            float volume,
-            bool muted)
+            bool isBitPerfect)
     :
-    AfPlaybackCommon(*this, *thread, volume, muted,
+    AfPlaybackCommon(*this, *thread,
                      attr, attributionSource, thread->isOffloadOrMmap(), type != TYPE_PATCH),
     TrackBase(thread, client, attr, sampleRate, format, channelMask, frameCount,
                   // TODO: Using unsecurePointer() has some associated security pitfalls
@@ -967,13 +963,6 @@ Track::Track(
     }
 
     populateUsageAndContentTypeFromStreamType();
-
-    // Audio patch and call assistant volume are always max
-    if (mAttr.usage == AUDIO_USAGE_CALL_ASSISTANT
-            || mAttr.usage == AUDIO_USAGE_VIRTUAL_SOURCE) {
-        setPortVolume(1.0f);
-        setPortMute(false);
-    }
 
     mServerLatencySupported = checkServerLatencySupported(format, flags);
 #ifdef TEE_SINK
@@ -1432,9 +1421,9 @@ status_t Track::start(AudioSystem::sync_event_t event __unused,
                         __func__,  mId, (int)mThreadIoHandle);
             }
         } else {
+            ALOGV("%s(%d): %s => ACTIVE on thread %d",
+                    __func__, mId, getTrackStateAsString(), (int)mThreadIoHandle);
             mState = TrackBase::ACTIVE;
-            ALOGV("%s(%d): ? => ACTIVE on thread %d",
-                    __func__, mId, (int)mThreadIoHandle);
         }
 
         auto* const playbackThread = thread->asIAfPlaybackThread().get();
@@ -1544,7 +1533,7 @@ void Track::stop()
         if (state == RESUMING || state == ACTIVE || state == PAUSING || state == PAUSED) {
             // If the track is not active (PAUSED and buffers full), flush buffers
             auto* const playbackThread = thread->asIAfPlaybackThread().get();
-            if (!playbackThread->isTrackActive(this)) {
+            if (!playbackThread->isTrackActive_l(this)) {
                 reset();
                 mState = STOPPED;
             } else if (isPatchTrack() || (!isFastTrack() && !isOffloaded() && !isDirect())) {
@@ -1643,7 +1632,7 @@ void Track::flush()
         // Flush the ring buffer now if the track is not active in the PlaybackThread.
         // Otherwise the flush would not be done until the track is resumed.
         // Requires FastTrack removal be BLOCK_UNTIL_ACKED
-        if (!playbackThread->isTrackActive(this)) {
+        if (!playbackThread->isTrackActive_l(this)) {
             (void)mServerProxy->flushBufferIfNeeded();
         }
 
@@ -1682,7 +1671,7 @@ void Track::flush()
             if (isDirect()) {
                 mFlushHwPending = true;
             }
-            if (!playbackThread->isTrackActive(this)) {
+            if (!playbackThread->isTrackActive_l(this)) {
                 reset();
             }
         }
@@ -2344,8 +2333,7 @@ OutputTrack::OutputTrack(
             size_t frameCount,
             const AttributionSourceState& attributionSource)
     :
-    AfPlaybackCommon(*this, *playbackThread, /* volume= */ 0.0f,
-                     /* muted= */ false,
+    AfPlaybackCommon(*this, *playbackThread,
                      AUDIO_ATTRIBUTES_INITIALIZER, attributionSource, /* isOffloadOrMmap= */ false,
                      /* shouldPlaybackHarden= */ false),
     Track(playbackThread, NULL, AUDIO_STREAM_PATCH,
@@ -2378,6 +2366,7 @@ OutputTrack::OutputTrack(
         ALOGW("%s(%d): Error creating output track on thread %d",
                 __func__, mId, (int)mThreadIoHandle);
     }
+    setPortVolume(1.f);
 }
 
 OutputTrack::~OutputTrack()
@@ -2628,9 +2617,7 @@ sp<IAfPatchTrack> IAfPatchTrack::create(
                                          *  as soon as possible to have
                                          *  the lowest possible latency
                                          *  even if it might glitch. */
-        float speed,
-        float volume,
-        bool muted)
+        float speed)
 {
     return sp<PatchTrack>::make(
             playbackThread,
@@ -2644,9 +2631,7 @@ sp<IAfPatchTrack> IAfPatchTrack::create(
             flags,
             timeout,
             frameCountToBeReady,
-            speed,
-            volume,
-            muted);
+            speed);
 }
 
 PatchTrack::PatchTrack(IAfPlaybackThread* playbackThread,
@@ -2660,10 +2645,8 @@ PatchTrack::PatchTrack(IAfPlaybackThread* playbackThread,
                                                      audio_output_flags_t flags,
                                                      const Timeout& timeout,
                                                      size_t frameCountToBeReady,
-                                                     float speed,
-                                                     float volume,
-                                                     bool muted)
-    : AfPlaybackCommon(*this, *playbackThread, volume, muted,
+                                                     float speed)
+    : AfPlaybackCommon(*this, *playbackThread,
                        AUDIO_ATTRIBUTES_INITIALIZER,
                        audioServerAttributionSource(getpid()),
                        /* isOffloadOrMmap= */ false,
@@ -2674,7 +2657,7 @@ PatchTrack::PatchTrack(IAfPlaybackThread* playbackThread,
               buffer, bufferSize, nullptr /* sharedBuffer */,
               AUDIO_SESSION_NONE, getpid(), audioServerAttributionSource(getpid()), flags,
               TYPE_PATCH, AUDIO_PORT_HANDLE_NONE, frameCountToBeReady, speed,
-              false /*isSpatialized*/, false /*isBitPerfect*/, volume, muted),
+              false /*isSpatialized*/, false /*isBitPerfect*/),
         PatchTrackBase(mCblk ? new AudioTrackClientProxy(mCblk, mBuffer, frameCount, mFrameSize,
                         true /*clientInServer*/) : nullptr,
                        playbackThread, timeout)
@@ -2687,6 +2670,9 @@ PatchTrack::PatchTrack(IAfPlaybackThread* playbackThread,
                 /* .mFallbackMode = */ AUDIO_TIMESTRETCH_FALLBACK_FAIL
         });
     }
+    // for now the secondary patch tracks contain the unattenuated volume and is unmuted.
+    // TODO(b/388241142): use volume capture rules to forward the mute state to its patch tracks
+    setPortVolume(1.f);
     ALOGV("%s(%d): sampleRate %d mPeerTimeout %d.%03d sec",
                                       __func__, mId, sampleRate,
                                       (int)mPeerTimeout.tv_sec,
@@ -2794,6 +2780,12 @@ void PatchTrack::releaseBuffer(Proxy::Buffer* buffer)
                 mFillingStatus = FS_FILLING;
             }
         }
+    }
+}
+
+void PatchTrack::setPlaybackRate(const AudioPlaybackRate& playbackRate) {
+    if (mProxy != nullptr) {
+        sp<AudioTrackClientProxy>::cast(mProxy)->setPlaybackRate(playbackRate);
     }
 }
 
@@ -3550,7 +3542,7 @@ sp<StreamInHalInterface> PassthruPatchRecord::obtainStream(
     if (!*thread) return nullptr;
     auto* const recordThread = (*thread)->asIAfRecordThread().get();
     audio_utils::lock_guard _l(recordThread->mutex());
-    return recordThread->getInput() ? recordThread->getInput()->stream : nullptr;
+    return recordThread->getInput_l() ? recordThread->getInput_l()->stream : nullptr;
 }
 
 // PatchProxyBufferProvider methods are called on DirectOutputThread
@@ -3704,6 +3696,10 @@ static AfPlaybackCommon::EnforcementLevel getOpControlEnforcementLevel(audio_usa
         return NONE;
     }
     if (hardening_strict()) {
+        // TODO (b/407607395)
+        if (usage == AUDIO_USAGE_ASSISTANCE_ACCESSIBILITY) {
+            return PARTIAL;
+        }
         return FULL;
     } else if (hardening_partial()) {
         return PARTIAL;
@@ -3712,14 +3708,12 @@ static AfPlaybackCommon::EnforcementLevel getOpControlEnforcementLevel(audio_usa
     }
 }
 
-AfPlaybackCommon::AfPlaybackCommon(IAfTrackBase& self, IAfThreadBase& thread, float volume,
-                                   bool muted, const audio_attributes_t& attr,
+AfPlaybackCommon::AfPlaybackCommon(IAfTrackBase& self, IAfThreadBase& thread,
+                                   const audio_attributes_t& attr,
                                    const AttributionSourceState& attributionSource,
                                    bool isOffloadOrMmap,
                                    bool shouldPlaybackHarden)
     : mSelf(self),
-      mMutedFromPort(muted),
-      mVolume(volume),
       mEnforcementLevel(getOpControlEnforcementLevel(attr.usage, *thread.afThreadCallback())) {
     ALOGI("creating track with enforcement level %d", mEnforcementLevel);
     using AppOpsManager::OP_CONTROL_AUDIO_PARTIAL;
@@ -3848,9 +3842,7 @@ sp<IAfMmapTrack> IAfMmapTrack::create(IAfThreadBase* thread,
           bool isOut,
           const android::content::AttributionSourceState& attributionSource,
           pid_t creatorPid,
-          audio_port_handle_t portId,
-          float volume,
-          bool muted)
+          audio_port_handle_t portId)
 {
     return sp<MmapTrack>::make(
             thread,
@@ -3862,9 +3854,7 @@ sp<IAfMmapTrack> IAfMmapTrack::create(IAfThreadBase* thread,
             isOut,
             attributionSource,
             creatorPid,
-            portId,
-            volume,
-            muted);
+            portId);
 }
 
 MmapTrack::MmapTrack(IAfThreadBase* thread,
@@ -3876,11 +3866,9 @@ MmapTrack::MmapTrack(IAfThreadBase* thread,
         bool isOut,
         const AttributionSourceState& attributionSource,
         pid_t creatorPid,
-        audio_port_handle_t portId,
-        float volume,
-        bool muted)
+        audio_port_handle_t portId)
     :   AfPlaybackCommon(*this, *thread,
-                         volume, muted, attr, attributionSource, /* isOffloadOrMmap */ true),
+                         attr, attributionSource, /* isOffloadOrMmap */ true),
         TrackBase(thread, NULL, attr, sampleRate, format,
                   channelMask, (size_t)0 /* frameCount */,
                   nullptr /* buffer */, (size_t)0 /* bufferSize */,
@@ -3896,12 +3884,6 @@ MmapTrack::MmapTrack(IAfThreadBase* thread,
 {
     // Once this item is logged by the server, the client can add properties.
     mTrackMetrics.logConstructor(creatorPid, uid(), id());
-    if (isOut && (attr.usage == AUDIO_USAGE_CALL_ASSISTANT
-            || attr.usage == AUDIO_USAGE_VIRTUAL_SOURCE)) {
-        // Audio patch and call assistant volume are always max
-        setPortVolume(1.0f);
-        setPortMute(false);
-    }
 }
 
 MmapTrack::~MmapTrack()

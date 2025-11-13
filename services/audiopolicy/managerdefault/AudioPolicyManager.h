@@ -129,12 +129,13 @@ public:
                                   std::vector<audio_io_handle_t> *secondaryOutputs,
                                   output_type_t *outputType,
                                   bool *isSpatialized,
-                                  bool *isBitPerfect,
-                                  float *volume,
-                                  bool *muted) override;
-        virtual status_t startOutput(audio_port_handle_t portId);
+                                  bool *isBitPerfect) override;
+        virtual status_t startOutput(
+                audio_port_handle_t portId, float* volume, bool* muted);
         virtual status_t stopOutput(audio_port_handle_t portId);
         virtual bool releaseOutput(audio_port_handle_t portId);
+
+        void addRoutableDeviceToProfiles(const sp<DeviceDescriptor> &device);
 
         base::expected<media::GetInputForAttrResponse, std::variant<binder::Status,
             media::audio::common::AudioConfigBase>>
@@ -187,6 +188,65 @@ public:
         virtual status_t getMaxVolumeIndexForAttributes(const audio_attributes_t &attr, int &index);
 
         virtual status_t getMinVolumeIndexForAttributes(const audio_attributes_t &attr, int &index);
+
+        /**
+         * Set the volume index for a given volume group and device.
+         *
+         * @param groupId the volume group id
+         * @param index the volume index to set
+         * @param muted state of the volume group
+         * @param device the device to set the volume index for
+         * @return NO_ERROR if the call is successful, otherwise an error code
+         */
+        virtual status_t setVolumeIndexForGroup(volume_group_t groupId, int index,
+                bool muted, audio_devices_t device);
+
+        /**
+         * Get the volume index for a given volume group and device.
+         *
+         * @param groupId the volume group id
+         * @param index the volume index to get
+         * @param device the device to get the volume index for
+         * @return NO_ERROR if the call is successful, otherwise an error code
+         */
+        virtual status_t getVolumeIndexForGroup(volume_group_t groupId, int &index,
+                audio_devices_t device);
+
+        /**
+         * Get the maximum volume index for a given volume group
+         *
+         * @param groupId the volume group id
+         * @param index the max volume index to get
+         * @return NO_ERROR if the call is successful, otherwise an error code
+         */
+        virtual status_t getMaxVolumeIndexForGroup(volume_group_t groupId, int &index);
+
+        /**
+         * Set the maximum volume index for a given volume group
+         *
+         * @param groupId the volume group id
+         * @param index the max volume index to set
+         * @return NO_ERROR if the call is successful, otherwise an error code
+         */
+        virtual status_t setMaxVolumeIndexForGroup(volume_group_t groupId, int index);
+
+        /**
+         * Get the minimum volume index for a given volume group.
+         *
+         * @param groupId
+         * @param index the min volume index to get
+         * @return NO_ERROR if the call is successful, otherwise an error code
+         */
+        virtual status_t getMinVolumeIndexForGroup(volume_group_t groupId, int &index);
+
+        /**
+         * Set the minimum volume index for a given volume group.
+         *
+         * @param groupId
+         * @param index the min volume index to set
+         * @return NO_ERROR if the call is successful, otherwise an error code
+         */
+        virtual status_t setMinVolumeIndexForGroup(volume_group_t groupId, int index);
 
         status_t setVolumeCurveIndex(int index,
                                      bool muted,
@@ -522,12 +582,15 @@ protected:
             return toVolumeSource(mEngine->getVolumeGroupForStreamType(
                 stream, fallbackOnDefault));
         }
+        IVolumeCurves &getVolumeCurves(volume_group_t volumeGroupId)
+        {
+            auto *curves = mEngine->getVolumeCurvesForVolumeGroup(volumeGroupId);
+            ALOG_ASSERT(curves != nullptr, "No curves for volume group %d", volumeGroupId);
+            return *curves;
+        }
         IVolumeCurves &getVolumeCurves(VolumeSource volumeSource)
         {
-          auto *curves = mEngine->getVolumeCurvesForVolumeGroup(
-              static_cast<volume_group_t>(volumeSource));
-          ALOG_ASSERT(curves != nullptr, "No curves for volume source %d", volumeSource);
-          return *curves;
+          return getVolumeCurves(static_cast<volume_group_t>(volumeSource));
         }
         IVolumeCurves &getVolumeCurves(const audio_attributes_t &attr)
         {
@@ -624,7 +687,7 @@ protected:
         virtual status_t checkAndSetVolume(IVolumeCurves &curves,
                                            VolumeSource volumeSource, int index,
                                            const sp<AudioOutputDescriptor>& outputDesc,
-                                           DeviceTypeSet deviceTypes,
+                                           DeviceTypeSet deviceTypes, bool adjustAttenuation,
                                            int delayMs = 0, bool force = false);
 
         void setVoiceVolume(int index, IVolumeCurves &curves, bool isVoiceVolSrc, int delayMs);

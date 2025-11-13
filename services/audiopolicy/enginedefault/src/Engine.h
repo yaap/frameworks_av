@@ -88,7 +88,6 @@ private:
 
     sp<DeviceDescriptor> getDeviceForInputSource(audio_source_t inputSource) const;
 
-    product_strategy_t getProductStrategyFromLegacy(legacy_strategy legacyStrategy) const;
     audio_devices_t getPreferredDeviceTypeForLegacyStrategy(
         const DeviceVector& availableOutputDevices, legacy_strategy legacyStrategy) const;
     DeviceVector getPreferredAvailableDevicesForInputSource(
@@ -98,7 +97,6 @@ private:
 
     bool isBtScoActive(DeviceVector& availableOutputDevices) const;
 
-    std::map<product_strategy_t, legacy_strategy> mLegacyStrategyMap;
 };
 } // namespace audio_policy
 } // namespace android

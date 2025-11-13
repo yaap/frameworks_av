@@ -42,13 +42,15 @@ IOProfile::CompatibilityScore IOProfile::getCompatibilityScore(
         audio_channel_mask_t channelMask,
         audio_channel_mask_t *updatedChannelMask,
         // FIXME type punning here
-        uint32_t flags) const {
+        uint32_t flags,
+        uint32_t additionalMandatoryFlags) const {
     const bool isPlaybackThread =
             getType() == AUDIO_PORT_TYPE_MIX && getRole() == AUDIO_PORT_ROLE_SOURCE;
     const bool isRecordThread =
             getType() == AUDIO_PORT_TYPE_MIX && getRole() == AUDIO_PORT_ROLE_SINK;
     ALOG_ASSERT(isPlaybackThread != isRecordThread);
-    const auto flagsCompatibleScore = getFlagsCompatibleScore(flags);
+    const auto flagsCompatibleScore =
+            getFlagsCompatibleScore(flags, additionalMandatoryFlags);
     if (!areAllDevicesSupported(devices) || flagsCompatibleScore == NO_MATCH) {
         return NO_MATCH;
     }
@@ -123,6 +125,13 @@ bool IOProfile::areAllDevicesSupported(const DeviceVector &devices) const {
         return true;
     }
     return mSupportedDevices.containsAllDevices(devices);
+}
+
+bool IOProfile::areAllDevicesRoutable(const DeviceVector &devices) const {
+    if (devices.empty()) {
+        return true;
+    }
+    return mRoutableDevices.containsAllDevices(devices);
 }
 
 bool IOProfile::isCompatibleProfileForFlags(uint32_t flags) const {
@@ -211,7 +220,8 @@ void IOProfile::importAudioPort(const audio_port_v7 &port) {
     }
 }
 
-IOProfile::CompatibilityScore IOProfile::getFlagsCompatibleScore(uint32_t flags) const {
+IOProfile::CompatibilityScore IOProfile::getFlagsCompatibleScore(
+        uint32_t flags, uint32_t additionalMandatoryFlags) const {
     const bool isPlaybackThread =
             getType() == AUDIO_PORT_TYPE_MIX && getRole() == AUDIO_PORT_ROLE_SOURCE;
     const bool isRecordThread =
@@ -219,7 +229,8 @@ IOProfile::CompatibilityScore IOProfile::getFlagsCompatibleScore(uint32_t flags)
     ALOG_ASSERT(isPlaybackThread != isRecordThread);
 
     const uint32_t mustMatchOutputFlags =
-            AUDIO_OUTPUT_FLAG_DIRECT|AUDIO_OUTPUT_FLAG_HW_AV_SYNC|AUDIO_OUTPUT_FLAG_MMAP_NOIRQ;
+            AUDIO_OUTPUT_FLAG_DIRECT|AUDIO_OUTPUT_FLAG_HW_AV_SYNC|AUDIO_OUTPUT_FLAG_MMAP_NOIRQ
+            | additionalMandatoryFlags;
     if (isPlaybackThread &&
         !audio_output_flags_is_subset((audio_output_flags_t)getFlags(),
                                       (audio_output_flags_t)flags,

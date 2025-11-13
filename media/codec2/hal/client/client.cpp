@@ -26,9 +26,10 @@
 #include <codec2/common/HalSelection.h>
 #include <codec2/hidl/client.h>
 
-#include <C2Debug.h>
 #include <C2BufferPriv.h>
+#include <C2Component.h>
 #include <C2Config.h> // for C2StreamUsageTuning
+#include <C2Debug.h>
 #include <C2PlatformSupport.h>
 
 #include <android/hardware/media/bufferpool/2.0/IClientManager.h>
@@ -2212,6 +2213,21 @@ c2_status_t Codec2Client::createComponent_hidl(
 c2_status_t Codec2Client::createInterface(
         const C2String& name,
         std::shared_ptr<Codec2Client::Interface>* const interface) {
+    if (mApexBase) {
+        if (__builtin_available(android 36, *)) {
+            ApexCodec_Component *comp = nullptr;
+            c2_status_t status =
+                (c2_status_t)ApexCodec_Component_create(mApexBase, name.c_str(), &comp);
+            if (status != C2_OK) {
+                return status;
+            }
+            // interface owns |comp| and will release it in the destructor.
+            interface->reset(new Codec2Client::Interface(comp, name));
+            return C2_OK;
+        } else {
+            return C2_OMITTED;
+        }
+    }
     if (mAidlBase) {
         std::shared_ptr<c2_aidl::IComponentInterface> aidlInterface;
         ::ndk::ScopedAStatus transStatus = mAidlBase->createInterface(
@@ -2261,30 +2277,26 @@ c2_status_t Codec2Client::createInterface(
 
 c2_status_t Codec2Client::createInputSurface(
         std::shared_ptr<InputSurface>* const inputSurface) {
-    if (mAidlBase) {
-        // FIXME
+    if (mApexBase) {
+        // Not supported for APEX.
         return C2_OMITTED;
     }
-
-    c2_status_t status;
-    Return<void> transStatus = mHidlBase1_0->createInputSurface(
-            [&status, inputSurface](
-                    c2_hidl::Status s,
-                    const sp<c2_hidl::IInputSurface>& i) {
-                status = static_cast<c2_status_t>(s);
-                if (status != C2_OK) {
-                    return;
-                }
-                *inputSurface = std::make_shared<InputSurface>(i);
-            });
-    if (!transStatus.isOk()) {
-        LOG(ERROR) << "createInputSurface -- transaction failed.";
-        return C2_TRANSACTION_FAILED;
-    } else if (status != C2_OK) {
-        LOG(DEBUG) << "createInputSurface -- call failed: "
-                   << status << ".";
+    if (!mAidlBase) {
+        // Only AIDL supports InputSurface.
+        return C2_OMITTED;
     }
-    return status;
+    if (!IsCodec2AidlInputSurfaceSelected()) {
+        return C2_OMITTED;
+    }
+    std::shared_ptr<c2_aidl::IInputSurface> interface;
+    ndk::ScopedAStatus status = mAidlBase->createInputSurface(&interface);
+    c2_status_t c2Status = GetC2Status(status, "createInputSurface");
+    if (c2Status != C2_OK) {
+        LOG(ERROR) << "createInputSurface() failed: " << c2Status;
+        return c2Status;
+    }
+    *inputSurface = std::make_shared<InputSurface>(interface);
+    return C2_OK;
 }
 
 std::vector<C2Component::Traits> const& Codec2Client::listComponents() const {
@@ -2296,6 +2308,28 @@ std::vector<C2Component::Traits> Codec2Client::_listComponents(
     std::vector<C2Component::Traits> traits;
     std::string const& serviceName = getServiceName();
 
+    if (mApexBase) {
+        if (__builtin_available(android 36, *)) {
+            for (size_t i = 0; ; ++i) {
+                ApexCodec_ComponentTraits *apexTraits = ApexCodec_Traits_get(mApexBase, i);
+                if (!apexTraits) {
+                    break;
+                }
+                traits.emplace_back();
+                C2Component::Traits& trait = traits.back();
+                trait.name      = apexTraits->name;
+                trait.mediaType = apexTraits->mediaType;
+                trait.domain    = (C2Component::domain_t)apexTraits->domain;
+                trait.kind      = (C2Component::kind_t)apexTraits->kind;
+                trait.owner     = serviceName;
+            }
+            *success = true;
+        } else {
+            *success = false;
+            LOG(WARNING) << "ApexCodecs not supported on Android version older than 36";
+        }
+        return traits;
+    }
     if (mAidlBase) {
         std::vector<c2_aidl::IComponentStore::ComponentTraits> aidlTraits;
         ::ndk::ScopedAStatus transStatus = mAidlBase->listComponents(&aidlTraits);
@@ -2781,6 +2815,12 @@ std::shared_ptr<Codec2Client::InputSurface> Codec2Client::CreateInputSurface(
     return nullptr;
 }
 
+std::shared_ptr<Codec2Client::InputSurface> Codec2Client::CreateInputSurfaceFromInterface(
+        const ::ndk::SpAIBinder &interface) {
+    return std::make_shared<Codec2Client::InputSurface>(
+            c2_aidl::IInputSurface::fromBinder(interface));
+}
+
 bool Codec2Client::IsAidlSelected() {
     return c2_aidl::utils::IsSelected();
 }
@@ -2809,6 +2849,27 @@ Codec2Client::Interface::Interface(const std::shared_ptr<AidlBase>& base)
             }()
         },
         mAidlBase{base} {
+}
+
+Codec2Client::Interface::Interface(
+        ApexCodec_Component *base, const C2String &name)
+      : Configurable{[base]() -> ApexCodec_Configurable * {
+            if (__builtin_available(android 36, *)) {
+                return ApexCodec_Component_getConfigurable(base);
+            } else {
+                return nullptr;
+            }
+        }(), name},
+        mApexBase{base} {
+}
+
+Codec2Client::Interface::~Interface() {
+    if (mApexBase) {
+        if (__builtin_available(android 36, *)) {
+            ApexCodec_Component_destroy(mApexBase);
+        }
+        mApexBase = nullptr;
+    }
 }
 
 // Codec2Client::Component
@@ -3611,92 +3672,6 @@ void Codec2Client::Component::holdIgbaBlocks(
     }
 }
 
-c2_status_t Codec2Client::Component::connectToInputSurface(
-        const std::shared_ptr<InputSurface>& inputSurface,
-        std::shared_ptr<InputSurfaceConnection>* connection) {
-    if (mApexBase) {
-        // FIXME
-        return C2_OMITTED;
-    }
-    if (mAidlBase) {
-        // FIXME
-        return C2_OMITTED;
-    }
-    c2_status_t status;
-    Return<void> transStatus = mHidlBase1_0->connectToInputSurface(
-            inputSurface->mBase,
-            [&status, connection](
-                    c2_hidl::Status s, const sp<c2_hidl::IInputSurfaceConnection>& c) {
-                status = static_cast<c2_status_t>(s);
-                if (status != C2_OK) {
-                    LOG(DEBUG) << "connectToInputSurface -- call failed: "
-                               << status << ".";
-                    return;
-                }
-                *connection = std::make_shared<InputSurfaceConnection>(c);
-            });
-    if (!transStatus.isOk()) {
-        LOG(ERROR) << "connectToInputSurface -- transaction failed";
-        return C2_TRANSACTION_FAILED;
-    }
-    return status;
-}
-
-c2_status_t Codec2Client::Component::connectToOmxInputSurface(
-        const sp<HGraphicBufferProducer1>& producer,
-        const sp<HGraphicBufferSource>& source,
-        std::shared_ptr<InputSurfaceConnection>* connection) {
-    if (mApexBase) {
-        LOG(WARNING) << "Connecting to OMX input surface is not supported for AIDL C2 HAL";
-        return C2_OMITTED;
-    }
-    if (mAidlBase) {
-        LOG(WARNING) << "Connecting to OMX input surface is not supported for AIDL C2 HAL";
-        return C2_OMITTED;
-    }
-    c2_status_t status;
-    Return<void> transStatus = mHidlBase1_0->connectToOmxInputSurface(
-            producer, source,
-            [&status, connection](
-                    c2_hidl::Status s, const sp<c2_hidl::IInputSurfaceConnection>& c) {
-                status = static_cast<c2_status_t>(s);
-                if (status != C2_OK) {
-                    LOG(DEBUG) << "connectToOmxInputSurface -- call failed: "
-                               << status << ".";
-                    return;
-                }
-                *connection = std::make_shared<InputSurfaceConnection>(c);
-            });
-    if (!transStatus.isOk()) {
-        LOG(ERROR) << "connectToOmxInputSurface -- transaction failed.";
-        return C2_TRANSACTION_FAILED;
-    }
-    return status;
-}
-
-c2_status_t Codec2Client::Component::disconnectFromInputSurface() {
-    if (mApexBase) {
-        // FIXME
-        return C2_OMITTED;
-    }
-    if (mAidlBase) {
-        // FIXME
-        return C2_OMITTED;
-    }
-    Return<c2_hidl::Status> transStatus = mHidlBase1_0->disconnectFromInputSurface();
-    if (!transStatus.isOk()) {
-        LOG(ERROR) << "disconnectToInputSurface -- transaction failed.";
-        return C2_TRANSACTION_FAILED;
-    }
-    c2_status_t status =
-            static_cast<c2_status_t>(static_cast<c2_hidl::Status>(transStatus));
-    if (status != C2_OK) {
-        LOG(DEBUG) << "disconnectFromInputSurface -- call failed: "
-                   << status << ".";
-    }
-    return status;
-}
-
 Codec2Client::Component::AidlDeathManager *Codec2Client::Component::GetAidlDeathManager() {
     // This object never gets destructed
     static AidlDeathManager *sManager = new AidlDeathManager();
@@ -3760,54 +3735,90 @@ c2_status_t Codec2Client::Component::setDeathListener(
 }
 
 // Codec2Client::InputSurface
-Codec2Client::InputSurface::InputSurface(const sp<c2_hidl::IInputSurface>& base)
+Codec2Client::InputSurface::InputSurface(const std::shared_ptr<c2_aidl::IInputSurface>& base)
       : Configurable{
-            [base]() -> sp<c2_hidl::IConfigurable> {
-                Return<sp<c2_hidl::IConfigurable>> transResult =
-                        base->getConfigurable();
-                return transResult.isOk() ?
-                        static_cast<sp<c2_hidl::IConfigurable>>(transResult) :
-                        nullptr;
+            [base]() -> std::shared_ptr<c2_aidl::IConfigurable> {
+                std::shared_ptr<c2_aidl::IConfigurable> aidlConfigurable;
+                ::ndk::ScopedAStatus transStatus =
+                    base->getConfigurable(&aidlConfigurable);
+                return transStatus.isOk() ? aidlConfigurable : nullptr;
             }()
         },
-        mBase{base},
-        mGraphicBufferProducer{new
-            H2BGraphicBufferProducer2([base]() -> sp<HGraphicBufferProducer2> {
-                Return<sp<HGraphicBufferProducer2>> transResult =
-                        base->getGraphicBufferProducer();
-                return transResult.isOk() ?
-                        static_cast<sp<HGraphicBufferProducer2>>(transResult) :
-                        nullptr;
-            }())} {
+        mBase{base}, mNativeWindow{nullptr} {
 }
 
-sp<IGraphicBufferProducer>
-        Codec2Client::InputSurface::getGraphicBufferProducer() const {
-    return mGraphicBufferProducer;
+ANativeWindow *Codec2Client::InputSurface::getNativeWindow() {
+    std::call_once(mWindowInitOnce, [this]() {
+        ::aidl::android::view::Surface surface;
+        ::ndk::ScopedAStatus transStatus = mBase->getSurface(&surface);
+        c2_status_t c2Status = GetC2Status(transStatus, "InputSurface::getNativeWindow");
+        if (c2Status != C2_OK) {
+            LOG(ERROR) << "InputSurface::getNativeWindow -- cannot get window: " << c2Status;
+            return;
+        }
+        mNativeWindow = surface.release();
+    });
+    return mNativeWindow;
 }
 
-sp<c2_hidl::IInputSurface> Codec2Client::InputSurface::getHalInterface() const {
-    return mBase;
+::ndk::SpAIBinder Codec2Client::InputSurface::getHalInterface() const {
+    return mBase ? mBase->asBinder() : nullptr;
+}
+
+c2_status_t Codec2Client::InputSurface::connect(
+        const std::shared_ptr<Codec2Client::Component> &comp,
+        std::shared_ptr<Connection> *connection) {
+    if (!comp) {
+        LOG(ERROR) << "InputSurface:connect, component invalid";
+        return C2_BAD_VALUE;
+    }
+    std::shared_ptr<Codec2Client::Component::AidlBase> aidlBase = comp->mAidlBase;
+    if (!aidlBase) {
+        LOG(ERROR) << "InputSurface:connect, component invalid";
+        return C2_BAD_VALUE;
+    }
+    std::shared_ptr<c2_aidl::IInputSink> sink;
+    ::ndk::ScopedAStatus transResult = aidlBase->asInputSink(&sink);
+    if (GetC2Status(transResult, "InputSurface:Component:asInputSink") != C2_OK) {
+        LOG(ERROR) << "InputSurface:connect sink conversion failed";
+        return C2_CORRUPTED;
+    }
+    if (!mBase) {
+        LOG(ERROR) << "InputSurface:connect failed, no valid base";
+        return C2_CORRUPTED;
+    }
+    std::shared_ptr<ConnectionBase> base;
+    transResult = mBase->connect(sink, &base);
+    c2_status_t c2Status = GetC2Status(transResult, "InputSurface:connect");
+    if (c2Status != C2_OK) {
+        LOG(ERROR) << "IInputSurface:connect failed: " << c2Status;
+        return c2Status;
+    }
+    *connection = std::make_shared<Connection>(base);
+    return C2_OK;
 }
 
 // Codec2Client::InputSurfaceConnection
 Codec2Client::InputSurfaceConnection::InputSurfaceConnection(
-        const sp<c2_hidl::IInputSurfaceConnection>& base)
-      : Configurable{
-            [base]() -> sp<c2_hidl::IConfigurable> {
-                Return<sp<c2_hidl::IConfigurable>> transResult =
-                        base->getConfigurable();
-                return transResult.isOk() ?
-                        static_cast<sp<c2_hidl::IConfigurable>>(transResult) :
-                        nullptr;
-            }()
-        },
-        mBase{base} {
+        const std::shared_ptr<c2_aidl::IInputSurfaceConnection>& base) : mBase{base} {
 }
 
 c2_status_t Codec2Client::InputSurfaceConnection::disconnect() {
-    Return<c2_hidl::Status> transResult = mBase->disconnect();
-    return static_cast<c2_status_t>(static_cast<c2_hidl::Status>(transResult));
+    if (!mBase) {
+        LOG(ERROR) << "InputSurfaceConnection:disconnect failed, no valid base";
+        return C2_CORRUPTED;
+    }
+    ::ndk::ScopedAStatus transResult = mBase->disconnect();
+    return GetC2Status(transResult, "InputSurfaceConnection::disconnect");
+}
+
+c2_status_t Codec2Client::InputSurfaceConnection::signalEos() {
+    if (!mBase) {
+        LOG(ERROR) << "InputSurfaceConnection:signalEos failed, no valid base";
+        return C2_CORRUPTED;
+    }
+    ::ndk::ScopedAStatus transResult = mBase->signalEndOfStream();
+    return GetC2Status(transResult, "InputSurfaceConnection::signalEndOfStream");
 }
 
 }  // namespace android

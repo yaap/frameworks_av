@@ -409,7 +409,7 @@ Status AudioPolicyService::getOutputForAttr(const media::audio::common::AudioAtt
                                              aidl2legacy_int32_t_audio_port_handle_t));
 
     audio_io_handle_t output;
-    audio_port_handle_t portId;
+    audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE;
     std::vector<audio_io_handle_t> secondaryOutputs;
 
     if (mAudioPolicyManager == NULL) {
@@ -483,8 +483,6 @@ Status AudioPolicyService::getOutputForAttr(const media::audio::common::AudioAtt
     AudioPolicyInterface::output_type_t outputType;
     bool isSpatialized = false;
     bool isBitPerfect = false;
-    float volume;
-    bool muted;
     status_t result = mAudioPolicyManager->getOutputForAttr(&attr, &output, session,
                                                             &stream,
                                                             attributionSource,
@@ -493,9 +491,7 @@ Status AudioPolicyService::getOutputForAttr(const media::audio::common::AudioAtt
                                                             &secondaryOutputs,
                                                             &outputType,
                                                             &isSpatialized,
-                                                            &isBitPerfect,
-                                                            &volume,
-                                                            &muted);
+                                                            &isBitPerfect);
 
     // FIXME: Introduce a way to check for the the telephony device before opening the output
     if (result == NO_ERROR) {
@@ -563,8 +559,6 @@ Status AudioPolicyService::getOutputForAttr(const media::audio::common::AudioAtt
         _aidl_return->isBitPerfect = isBitPerfect;
         _aidl_return->attr = VALUE_OR_RETURN_BINDER_STATUS(
                 legacy2aidl_audio_attributes_t_AudioAttributes(attr));
-        _aidl_return->volume = volume;
-        _aidl_return->muted = muted;
     } else {
         _aidl_return->configBase.format = VALUE_OR_RETURN_BINDER_STATUS(
                 legacy2aidl_audio_format_t_AudioFormatDescription(config.format));
@@ -591,7 +585,8 @@ void AudioPolicyService::getPlaybackClientAndEffects(audio_port_handle_t portId,
     effects = mAudioPolicyEffects;
 }
 
-Status AudioPolicyService::startOutput(int32_t portIdAidl)
+Status AudioPolicyService::startOutput(
+        int32_t portIdAidl, media::StartOutputResponse* _aidl_return)
 {
     audio_port_handle_t portId = VALUE_OR_RETURN_BINDER_STATUS(
             aidl2legacy_int32_t_audio_port_handle_t(portIdAidl));
@@ -614,7 +609,9 @@ Status AudioPolicyService::startOutput(int32_t portIdAidl)
     }
     audio_utils::lock_guard _l(mMutex);
     AutoCallerClear acc;
-    status_t status = mAudioPolicyManager->startOutput(portId);
+    float volume;
+    bool muted;
+    status_t status = mAudioPolicyManager->startOutput(portId, &volume, &muted);
     if (status == NO_ERROR) {
         //TODO b/257922898: decide if/how we need to handle attributes update when playback starts
         // or during playback
@@ -622,6 +619,8 @@ Status AudioPolicyService::startOutput(int32_t portIdAidl)
                 client->attributes, nullptr /* callback */);
         client->active = true;
         onUpdateActiveSpatializerTracks_l();
+        _aidl_return->volume = volume;
+        _aidl_return->muted = muted;
     }
     return binderStatusFromStatusT(status);
 }
@@ -876,12 +875,14 @@ Status AudioPolicyService::getInputForAttr(const media::audio::common::AudioAttr
 
     //TODO(b/374751406): remove forcing canBypassConcurrentPolicy to canCaptureOutput
     // once all system apps using CAPTURE_AUDIO_OUTPUT to capture during calls
-    // are updated to use the new CONCURRENT_AUDIO_RECORD_BYPASS permission.
+    // are updated to use the new BYPASS_CONCURRENT_RECORD_AUDIO_RESTRICTION permission.
     bool canBypassConcurrentPolicy = audioserver_permissions()
                                 ? CHECK_PERM(CAPTURE_AUDIO_OUTPUT, attributionSource.uid)
                                 : captureAudioOutputAllowed(attributionSource);
     if (concurrent_audio_record_bypass_permission()) {
-        canBypassConcurrentPolicy = audioserver_permissions() ?
+        // TODO(b/374751406): allow either capture output or bypass permission until
+        // all system apps have migrated to new permission.
+        canBypassConcurrentPolicy |= audioserver_permissions() ?
                             CHECK_PERM(BYPASS_CONCURRENT_RECORD_AUDIO_RESTRICTION,
                                        attributionSource.uid)
                             : bypassConcurrentPolicyAllowed(attributionSource);
@@ -1374,6 +1375,96 @@ Status AudioPolicyService::getMaxVolumeIndexForAttributes(
             mAudioPolicyManager->getMaxVolumeIndexForAttributes(attributes, index)));
     *_aidl_return = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int32_t>(index));
     return Status::ok();
+}
+
+Status AudioPolicyService::setVolumeIndexForGroup(int32_t groupIdAidl,
+        const AudioDeviceDescription& deviceAidl, int32_t indexAidl, bool muted) {
+    volume_group_t groupId = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_int32_t_volume_group_t(groupIdAidl));
+    int index = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int>(indexAidl));
+    audio_devices_t device = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_AudioDeviceDescription_audio_devices_t(deviceAidl));
+
+    if (mAudioPolicyManager == NULL) {
+        return binderStatusFromStatusT(NO_INIT);
+    }
+    audio_utils::lock_guard _l(mMutex);
+    AutoCallerClear acc;
+    return binderStatusFromStatusT(
+            mAudioPolicyManager->setVolumeIndexForGroup(groupId, index, muted, device));
+}
+
+Status AudioPolicyService::getVolumeIndexForGroup(
+        int32_t groupIdAidl, const AudioDeviceDescription& deviceAidl, int32_t* _aidl_return) {
+    volume_group_t groupId = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_int32_t_volume_group_t(groupIdAidl));
+    audio_devices_t device = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_AudioDeviceDescription_audio_devices_t(deviceAidl));
+    if (mAudioPolicyManager == NULL) {
+        return binderStatusFromStatusT(NO_INIT);
+    }
+    audio_utils::lock_guard _l(mMutex);
+    AutoCallerClear acc;
+    int index;
+    RETURN_IF_BINDER_ERROR(binderStatusFromStatusT(
+            mAudioPolicyManager->getVolumeIndexForGroup(groupId, index, device)));
+    *_aidl_return = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int32_t>(index));
+    return Status::ok();
+}
+
+Status AudioPolicyService::getMinVolumeIndexForGroup(int32_t groupIdAidl, int32_t* _aidl_return) {
+    volume_group_t groupId = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_int32_t_volume_group_t(groupIdAidl));
+    if (mAudioPolicyManager == NULL) {
+        return binderStatusFromStatusT(NO_INIT);
+    }
+    audio_utils::lock_guard _l(mMutex);
+    AutoCallerClear acc;
+    int index;
+    RETURN_IF_BINDER_ERROR(binderStatusFromStatusT(
+            mAudioPolicyManager->getMinVolumeIndexForGroup(groupId, index)));
+    *_aidl_return = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int32_t>(index));
+    return Status::ok();
+}
+
+
+Status AudioPolicyService::setMinVolumeIndexForGroup(int32_t groupIdAidl, int32_t indexAidl) {
+    if (mAudioPolicyManager == NULL) {
+        return binderStatusFromStatusT(NO_INIT);
+    }
+    volume_group_t groupId = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_int32_t_volume_group_t(groupIdAidl));
+    int index = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int>(indexAidl));
+    audio_utils::lock_guard _l(mMutex);
+    AutoCallerClear acc;
+    return binderStatusFromStatusT(mAudioPolicyManager->setMinVolumeIndexForGroup(groupId, index));
+}
+
+Status AudioPolicyService::getMaxVolumeIndexForGroup(int32_t groupIdAidl, int32_t* _aidl_return) {
+    volume_group_t groupId = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_int32_t_volume_group_t(groupIdAidl));
+    if (mAudioPolicyManager == NULL) {
+        return binderStatusFromStatusT(NO_INIT);
+    }
+    audio_utils::lock_guard _l(mMutex);
+    AutoCallerClear acc;
+    int index;
+    RETURN_IF_BINDER_ERROR(binderStatusFromStatusT(
+            mAudioPolicyManager->getMaxVolumeIndexForGroup(groupId, index)));
+    *_aidl_return = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int32_t>(index));
+    return Status::ok();
+}
+
+Status AudioPolicyService::setMaxVolumeIndexForGroup(int32_t groupIdAidl, int32_t indexAidl) {
+    if (mAudioPolicyManager == NULL) {
+        return binderStatusFromStatusT(NO_INIT);
+    }
+    volume_group_t groupId = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_int32_t_volume_group_t(groupIdAidl));
+    int index = VALUE_OR_RETURN_BINDER_STATUS(convertIntegral<int>(indexAidl));
+    audio_utils::lock_guard _l(mMutex);
+    AutoCallerClear acc;
+    return binderStatusFromStatusT(mAudioPolicyManager->setMaxVolumeIndexForGroup(groupId, index));
 }
 
 Status AudioPolicyService::getStrategyForStream(AudioStreamType streamAidl,

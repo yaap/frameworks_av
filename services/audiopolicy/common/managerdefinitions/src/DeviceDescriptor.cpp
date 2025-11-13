@@ -510,13 +510,10 @@ std::string DeviceVector::toString(bool includeSensitiveInfo) const
 
 DeviceVector DeviceVector::filter(const DeviceVector &devices) const
 {
-    DeviceVector filteredDevices;
-    for (const auto &device : *this) {
-        if (devices.contains(device)) {
-            filteredDevices.add(device);
-        }
-    }
-    return filteredDevices;
+    auto intersects = [&devices](const sp<DeviceDescriptor> &device) {
+        return devices.contains(device);
+    };
+    return filter(intersects);
 }
 
 bool DeviceVector::containsAtLeastOne(const DeviceVector &devices) const

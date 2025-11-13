@@ -478,7 +478,8 @@ bool isStreamUseCaseSupported(int64_t streamUseCase,
 
 binder::Status createConfiguredSurface(
         OutputStreamInfo& streamInfo, bool isStreamInfoValid,
-        sp<Surface>& out_surface, const sp<SurfaceType>& surface,
+        const OutputConfiguration &outputConfiguration,
+        sp<Surface> &out_surface, const sp<SurfaceType>& surface,
         const std::string &logicalCameraId, const CameraMetadata &physicalCameraMetadata,
         const std::vector<int32_t> &sensorPixelModesUsed, int64_t dynamicRangeProfile,
         int64_t streamUseCase, int timestampBase, int mirrorMode,
@@ -519,29 +520,14 @@ binder::Status createConfiguredSurface(
 
     ANativeWindow *anw = out_surface.get();
 
-    int width, height, format;
-    android_dataspace dataSpace;
-    if ((err = anw->query(anw, NATIVE_WINDOW_WIDTH, &width)) != OK) {
-        std::string msg = fmt::sprintf("Camera %s: Failed to query Surface width: %s (%d)",
-                 logicalCameraId.c_str(), strerror(-err), err);
-        ALOGE("%s: %s", __FUNCTION__, msg.c_str());
-        return STATUS_ERROR(CameraService::ERROR_INVALID_OPERATION, msg.c_str());
-    }
-    if ((err = anw->query(anw, NATIVE_WINDOW_HEIGHT, &height)) != OK) {
-        std::string msg = fmt::sprintf("Camera %s: Failed to query Surface height: %s (%d)",
-                logicalCameraId.c_str(), strerror(-err), err);
-        ALOGE("%s: %s", __FUNCTION__, msg.c_str());
-        return STATUS_ERROR(CameraService::ERROR_INVALID_OPERATION, msg.c_str());
-    }
+    int width = outputConfiguration.getWidth();
+    int height = outputConfiguration.getHeight();
+    int format = 0;
+    auto dataSpace = static_cast<android_dataspace>(outputConfiguration.getDataspace());
+
+    // TODO: See if we can query the OutputConfiguration directly : b/417531963
     if ((err = anw->query(anw, NATIVE_WINDOW_FORMAT, &format)) != OK) {
         std::string msg = fmt::sprintf("Camera %s: Failed to query Surface format: %s (%d)",
-                logicalCameraId.c_str(), strerror(-err), err);
-        ALOGE("%s: %s", __FUNCTION__, msg.c_str());
-        return STATUS_ERROR(CameraService::ERROR_INVALID_OPERATION, msg.c_str());
-    }
-    if ((err = anw->query(anw, NATIVE_WINDOW_DEFAULT_DATASPACE,
-            reinterpret_cast<int*>(&dataSpace))) != OK) {
-        std::string msg = fmt::sprintf("Camera %s: Failed to query Surface dataspace: %s (%d)",
                 logicalCameraId.c_str(), strerror(-err), err);
         ALOGE("%s: %s", __FUNCTION__, msg.c_str());
         return STATUS_ERROR(CameraService::ERROR_INVALID_OPERATION, msg.c_str());
@@ -955,9 +941,9 @@ binder::Status convertToHALStreamCombination(
         }
 
         for (auto& surface_type : surfaces) {
-            sp<Surface> surface;
             int mirrorMode = it.getMirrorMode(surface_type);
-            res = createConfiguredSurface(streamInfo, isStreamInfoValid, surface,
+            sp<Surface> surface;
+            res = createConfiguredSurface(streamInfo, isStreamInfoValid, it, surface,
                                     flagtools::convertParcelableSurfaceTypeToSurface(surface_type),
                                     logicalCameraId,  metadataChosen, sensorPixelModesUsed,
                                     dynamicRangeProfile, streamUseCase, timestampBase, mirrorMode,

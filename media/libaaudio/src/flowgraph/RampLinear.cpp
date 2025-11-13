@@ -19,6 +19,7 @@
 #include <utils/Log.h>
 
 #include <algorithm>
+#include <cmath>
 #include <unistd.h>
 #include "FlowGraphNode.h"
 #include "RampLinear.h"

@@ -75,6 +75,7 @@ interface ICameraService
      */
     int getNumberOfCameras(int type, in AttributionSourceState clientAttribution, int devicePolicy);
 
+    // TODO(b/414347702): Revisit data structure.
     /**
      * If changed, reflect in
      * frameworks/base/core/java/android/hardware/camera2/CameraManager.java.
@@ -88,6 +89,7 @@ interface ICameraService
     const int ROTATION_OVERRIDE_NONE = 0;
     const int ROTATION_OVERRIDE_OVERRIDE_TO_PORTRAIT = 1;
     const int ROTATION_OVERRIDE_ROTATION_ONLY = 2;
+    const int ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE = 3;
 
     /**
      * Fetch basic camera information for a camera.

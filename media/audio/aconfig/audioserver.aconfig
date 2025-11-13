@@ -45,37 +45,19 @@ flag {
     bug: "366456949"
 }
 
+flag {
+    name: "enable_strict_port_routing_checks"
+    namespace: "media_audio"
+    description: "Enables strict routing checks on associating ports"
+    bug: "367117623"
+}
+
 # shipped 24Q3
 flag {
     name: "fdtostring_timeout_fix"
     namespace: "media_audio"
     description: "Improve fdtostring implementation to properly handle timing out."
     bug: "306283018"
-}
-
-flag {
-    name: "fix_aaudio_stream_reopen_in_libaudiohal_aidl"
-    namespace: "media_audio"
-    description:
-        "Support reopening of AAudio streams in the libaudiohal@aidl layer"
-    bug: "274456992"
-}
-
-flag {
-    name: "fix_call_audio_patch"
-    namespace: "media_audio"
-    description:
-        "optimize creation and release of audio patches for call routing"
-    bug: "292492229"
-}
-
-flag {
-    name: "fix_concurrent_playback_behavior_with_bit_perfect_client"
-    namespace: "media_audio"
-    description:
-        "Treat playback use cases differently when bit-perfect client is active to improve the "
-        "user experience with bit-perfect playback."
-    bug: "339515899"
 }
 
 flag {
@@ -98,6 +80,14 @@ flag {
 }
 
 flag {
+    name: "mmap_pcm_offload_support"
+    namespace: "media_audio"
+    description:
+        "Add pcm offload support on mmap path."
+    bug: "409798445"
+}
+
+flag {
     name: "portid_volume_management"
     namespace: "media_audio"
     description:
@@ -111,6 +101,13 @@ flag {
     description:
         "Add power stats tracking and management."
     bug: "350114693"
+}
+
+flag {
+    name: "remove_stream_suspend"
+    namespace: "media_audio"
+    description: "Remove the output stream suspend state and control mechanism"
+    bug: "409706525"
 }
 
 flag {

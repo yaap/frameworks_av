@@ -265,7 +265,11 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
             buffer->mRaw = part1 > 0 ?
                     &((char *) mBuffers)[(mIsOut ? rear : front) * mFrameSize] : NULL;
             buffer->mNonContig = avail - part1;
-            mUnreleased = part1;
+            // If two obtainBuffers requests are concurrent (for Java Offload),
+            // take the maximum of the two mUnreleased (consistency check variable)
+            // to avoid triggering an assertion on releaseBuffer.
+            // TODO(b/419572928) improve this logic.
+            mUnreleased.max(part1);
             status = NO_ERROR;
             break;
         }
@@ -395,7 +399,7 @@ void ClientProxy::releaseBuffer(Buffer* buffer)
     LOG_ALWAYS_FATAL_IF(!(stepCount <= mUnreleased && mUnreleased <= mFrameCount),
             "%s: mUnreleased out of range, "
             "!(stepCount:%zu <= mUnreleased:%zu <= mFrameCount:%zu), BufferSizeInFrames:%u",
-            __func__, stepCount, mUnreleased, mFrameCount, getBufferSizeInFrames());
+            __func__, stepCount, mUnreleased.load(), mFrameCount, getBufferSizeInFrames());
     mUnreleased -= stepCount;
     audio_track_cblk_t* cblk = mCblk;
     // Both of these barriers are required
@@ -916,7 +920,7 @@ void ServerProxy::releaseBuffer(Buffer* buffer)
     LOG_ALWAYS_FATAL_IF(!(stepCount <= mUnreleased && mUnreleased <= mFrameCount),
             "%s: mUnreleased out of range, "
             "!(stepCount:%zu <= mUnreleased:%zu <= mFrameCount:%zu)",
-            __func__, stepCount, mUnreleased, mFrameCount);
+            __func__, stepCount, mUnreleased.load(), mFrameCount);
     mUnreleased -= stepCount;
     audio_track_cblk_t* cblk = mCblk;
     if (mIsOut) {
@@ -1229,7 +1233,7 @@ void StaticAudioTrackServerProxy::releaseBuffer(Buffer* buffer)
     LOG_ALWAYS_FATAL_IF(!(stepCount <= mUnreleased),
             "%s: stepCount out of range, "
             "!(stepCount:%zu <= mUnreleased:%zu)",
-            __func__, stepCount, mUnreleased);
+            __func__, stepCount, mUnreleased.load());
     if (stepCount == 0) {
         // prevent accidental re-use of buffer
         buffer->mRaw = NULL;

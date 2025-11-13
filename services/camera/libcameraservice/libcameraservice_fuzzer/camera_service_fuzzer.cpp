@@ -180,6 +180,15 @@ class FuzzerActivityManager : public BnInterface<IActivityManager> {
                                    int32_t /*appPid*/) override {
         return OK;
     }
+    status_t registerProcessObserver(const sp<app::IProcessObserver>&) override {
+        return OK;
+    }
+    status_t unregisterProcessObserver(const sp<app::IProcessObserver>&) override {
+        return OK;
+    }
+    status_t getRunningAppProcesses(::std::vector<app::RunningAppProcessInfo>*) override {
+        return OK;
+    }
 };
 
 class FuzzerSensorPrivacyManager : public BnInterface<hardware::ISensorPrivacyManager> {

@@ -83,6 +83,7 @@ struct AImage {
     media_status_t getPlaneData(int planeIdx,/*out*/uint8_t** data, /*out*/int* dataLength) const;
     media_status_t getHardwareBuffer(/*out*/AHardwareBuffer** buffer) const;
     media_status_t getDataSpace(/*out*/android_dataspace* dataSpace) const;
+    media_status_t getTransform(/*out*/int32_t* transform) const;
 
   private:
     // AImage should be deleted through free() API.

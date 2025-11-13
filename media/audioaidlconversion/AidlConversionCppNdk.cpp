@@ -669,6 +669,8 @@ const detail::AudioFormatPairs& getAudioFormatPairs() {
             {AUDIO_FORMAT_VORBIS,
              make_AudioFormatDescription(::android::MEDIA_MIMETYPE_AUDIO_VORBIS)},
             {AUDIO_FORMAT_OPUS, make_AudioFormatDescription(::android::MEDIA_MIMETYPE_AUDIO_OPUS)},
+            {AUDIO_FORMAT_OPUS_HI_RES, make_AudioFormatDescription(
+                    std::string(::android::MEDIA_MIMETYPE_AUDIO_OPUS) + ".hi_res")},
             {AUDIO_FORMAT_AC3, make_AudioFormatDescription(::android::MEDIA_MIMETYPE_AUDIO_AC3)},
             {AUDIO_FORMAT_E_AC3, make_AudioFormatDescription(::android::MEDIA_MIMETYPE_AUDIO_EAC3)},
             {AUDIO_FORMAT_E_AC3_JOC,

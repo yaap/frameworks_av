@@ -52,8 +52,6 @@
 #include <media/stagefright/aidlpersistentsurface/C2NodeDef.h>
 #include <media/stagefright/aidlpersistentsurface/wrapper/Conversion.h>
 #include <media/stagefright/aidlpersistentsurface/wrapper/WAidlGraphicBufferSource.h>
-#include <media/stagefright/omx/1.0/WGraphicBufferSource.h>
-#include <media/stagefright/omx/OmxGraphicBufferSource.h>
 #include <media/stagefright/CCodec.h>
 #include <media/stagefright/BufferProducerWrapper.h>
 #include <media/stagefright/CCodecResources.h>
@@ -167,8 +165,14 @@ private:
 class C2InputSurfaceWrapper : public InputSurfaceWrapper {
 public:
     explicit C2InputSurfaceWrapper(
-            const std::shared_ptr<Codec2Client::InputSurface> &surface) :
-        mSurface(surface) {
+            const std::shared_ptr<Codec2Client::InputSurface> &surface,
+            uint32_t width,
+            uint32_t height,
+            uint64_t usage)
+        : mSurface(surface), mWidth(width), mHeight(height), mInputDoneCount(0) {
+        // Configurations are not passed until connect().
+        mDataSpace = HAL_DATASPACE_BT709;
+        mConfig.mUsage = usage;
     }
 
     ~C2InputSurfaceWrapper() override = default;
@@ -177,39 +181,228 @@ public:
         if (mConnection != nullptr) {
             return ALREADY_EXISTS;
         }
-        return toStatusT(comp->connectToInputSurface(mSurface, &mConnection));
+        std::vector<std::unique_ptr<C2SettingResult>> failures;
+
+        C2StreamBlockSizeInfo::output blockSize{0u, mWidth, mHeight};
+        C2StreamBlockCountInfo::output blockCount{0u, getInputBufferCount(comp)};
+        C2StreamUsageTuning::output usage{0u, mConfig.mUsage};
+        C2StreamDataSpaceInfo::output dataspace{0u, mDataSpace};
+        c2_status_t err = mSurface->config(
+                {&blockSize, &blockCount, &usage, &dataspace}, C2_MAY_BLOCK, &failures);
+        if (err != C2_OK && err != C2_BAD_INDEX) {
+            ALOGE("InputSurface configuration failure on connect(): %d", err);
+            return UNKNOWN_ERROR;
+        }
+        return mSurface->connect(comp, &mConnection);
     }
 
     void disconnect() override {
-        if (mConnection != nullptr) {
+        if (mConnection) {
             mConnection->disconnect();
-            mConnection = nullptr;
+            mConnection.reset();
         }
+        mInputDoneCount = 0;
+        mInputEmptyCount = 0;
     }
 
     status_t start() override {
-        // InputSurface does not distinguish started state
+        // InputSurface starts when connect().
+        // no-op here.
         return OK;
     }
 
     status_t signalEndOfInputStream() override {
-        C2InputSurfaceEosTuning eos(true);
+        if (mConnection) {
+            if (mConnection->signalEos() != C2_OK) {
+                return UNKNOWN_ERROR;
+            }
+        }
+        return OK;
+    }
+
+    status_t configure(Config &config) {
+        std::vector<C2Param*> params;
         std::vector<std::unique_ptr<C2SettingResult>> failures;
-        c2_status_t err = mSurface->config({&eos}, C2_MAY_BLOCK, &failures);
+
+        std::shared_ptr<C2PortMinFrameRateTuning::output> minFps;
+        std::shared_ptr<C2PortMaxFrameRateTuning::output> maxFps;
+        std::shared_ptr<C2PortCaptureFrameRateTuning::output> captureFps;
+        std::shared_ptr<C2StreamFrameRateInfo::output> codedFps;
+        std::shared_ptr<C2ComponentTimeOffsetTuning> timeOffset;
+        std::shared_ptr<C2PortSuspendTimestampTuning::output> suspended;
+        std::shared_ptr<C2PortResumeTimestampTuning::output> resumed;
+        std::shared_ptr<C2PortStartTimestampTuning::output> started;
+        std::shared_ptr<C2PortStopTimestampTuning::output> stopped;
+        std::shared_ptr<C2PortTimestampGapTuning::output> gap;
+
+        if (config.mMinFps > 0 && config.mMinFps != mConfig.mMinFps) {
+            minFps = std::make_shared<C2PortMinFrameRateTuning::output>(config.mMinFps);
+            params.push_back(minFps.get());
+            mConfig.mMinFps = config.mMinFps;
+        }
+        bool fixedFpsMode = false;
+        if (config.mMinAdjustedFps > 0 || config.mFixedAdjustedFps > 0) {
+            if (config.mMinAdjustedFps > 0) {
+                float minGap = c2_min(INT32_MAX + 0., 1e6 / config.mMinAdjustedFps + 0.5);
+                uint64_t gapUs = int32_t(minGap);
+                gap = std::make_shared<C2PortTimestampGapTuning::output>(
+                        C2TimestampGapAdjustmentStruct::MIN_GAP, gapUs);
+                params.push_back(gap.get());
+                mConfig.mMinAdjustedFps = config.mMinAdjustedFps;
+            } else {
+                bool fixedFpsMode = true;
+                float fixedGap = c2_max(0. - INT32_MAX, -1e6 / config.mFixedAdjustedFps - 0.5);
+                uint64_t gapUs = int32_t(fixedGap);
+                gap = std::make_shared<C2PortTimestampGapTuning::output>(
+                        C2TimestampGapAdjustmentStruct::FIXED_GAP, gapUs);
+                params.push_back(gap.get());
+                mConfig.mFixedAdjustedFps = config.mFixedAdjustedFps;
+            }
+        }
+        if ((config.mMaxFps > 0 || (fixedFpsMode && config.mMaxFps == -1))
+                && config.mMaxFps != mConfig.mMaxFps) {
+            maxFps = std::make_shared<C2PortMaxFrameRateTuning::output>(config.mMaxFps);
+            params.push_back(maxFps.get());
+            mConfig.mMaxFps = config.mMaxFps;
+        }
+        if (config.mTimeOffsetUs != mConfig.mTimeOffsetUs) {
+            timeOffset = std::make_shared<C2ComponentTimeOffsetTuning>(config.mTimeOffsetUs);
+            params.push_back(timeOffset.get());
+            mConfig.mTimeOffsetUs = config.mTimeOffsetUs;
+        }
+        if (config.mCaptureFps != mConfig.mCaptureFps || config.mCodedFps != mConfig.mCodedFps) {
+            captureFps = std::make_shared<C2PortCaptureFrameRateTuning::output>(
+                    config.mCaptureFps);
+            codedFps = std::make_shared<C2StreamFrameRateInfo::output>(0u, config.mCodedFps);
+            params.push_back(captureFps.get());
+            params.push_back(codedFps.get());
+            mConfig.mCaptureFps = config.mCaptureFps;
+            mConfig.mCodedFps = config.mCodedFps;
+        }
+
+        if (config.mStartAtUs != mConfig.mStartAtUs
+                || (config.mStopped != mConfig.mStopped && !config.mStopped)) {
+            started = std::make_shared<C2PortStartTimestampTuning::output>(config.mStartAtUs);
+            stopped = std::make_shared<C2PortStopTimestampTuning::output>();
+            params.push_back(started.get());
+            params.push_back(stopped.get());
+            mConfig.mStartAtUs = config.mStartAtUs;
+            mConfig.mStopped = config.mStopped;
+        }
+        if (config.mSuspended != mConfig.mSuspended) {
+            if (config.mSuspended) {
+                suspended = std::make_shared<C2PortSuspendTimestampTuning::output>(
+                        mConfig.mSuspendAtUs);
+                resumed = std::make_shared<C2PortResumeTimestampTuning::output>();
+            } else {
+                suspended = std::make_shared<C2PortSuspendTimestampTuning::output>();
+                resumed = std::make_shared<C2PortResumeTimestampTuning::output>(
+                        config.mSuspendAtUs);
+            }
+            params.push_back(suspended.get());
+            params.push_back(resumed.get());
+            mConfig.mSuspended = config.mSuspended;
+            mConfig.mSuspendAtUs = config.mSuspendAtUs;
+        }
+        if (config.mStopped != mConfig.mStopped && config.mStopped) {
+            started = std::make_shared<C2PortStartTimestampTuning::output>();
+            stopped = std::make_shared<C2PortStopTimestampTuning::output>(config.mStopAtUs);
+            params.push_back(started.get());
+            params.push_back(stopped.get());
+            mConfig.mStopAtUs = config.mStopAtUs;
+            mConfig.mStopped = config.mStopped;
+        }
+        c2_status_t err = mSurface->config(params, C2_MAY_BLOCK, &failures);
         if (err != C2_OK) {
+            ALOGE("C2InputSurfaceWrapper::config err(%d)", err);
             return UNKNOWN_ERROR;
         }
         return OK;
     }
 
-    status_t configure(Config &config __unused) {
+    // TODO: optimize binder calls of onInputBufferDone()
+    // current: HAL --> client --> HAL
+    void onInputBufferDone(c2_cntr64_t index) override {
+        mInputDoneCount++;
+        C2PortConfigCounterTuning::output inputDone{index.peekull()};
+        C2StreamLayerCountInfo::input inputDoneCount{0u, mInputDoneCount};
+        std::vector<std::unique_ptr<C2SettingResult>> failures;
+
+        c2_status_t err = mSurface->config(
+                {&inputDone, &inputDoneCount}, C2_MAY_BLOCK, &failures);
+
+        if (err != C2_OK) {
+            ALOGE("C2InputSurfaceWrapper::onInputBufferDone err(%d) - %llu",
+                    err, index.peekull());
+        }
+    }
+
+    // TODO: optimize binder calls of onInputBufferEmptied()
+    // current: HAL --> client --> HAL
+    void onInputBufferEmptied() override {
+        mInputEmptyCount++;
+        C2StreamLayerCountInfo::output inputEmptyCount{0u, mInputEmptyCount};
+        std::vector<std::unique_ptr<C2SettingResult>> failures;
+
+        c2_status_t err = mSurface->config({&inputEmptyCount}, C2_MAY_BLOCK, &failures);
+
+        if (err != C2_OK) {
+            ALOGE("C2InputSurfaceWrapper::onInputBufferEmptried err(%d)", err);
+        }
+    }
+
+    android_dataspace getDataspace() override {
         // TODO
-        return OK;
+        return static_cast<android_dataspace>(0);
+    }
+
+    uint32_t getPixelFormat() override {
+        // TODO
+        return 0;
     }
 
 private:
+    int getInputBufferCount(
+            const std::shared_ptr<Codec2Client::Component> &comp) {
+        const static int kDefaultInputBufferCount = 16;
+        const static int kDefaultInputBufferMargin = 4;
+
+        // WORKAROUND: having more slots improve performance while consuming
+        // more memory. This is a temporary workaround to reduce memory for
+        // larger-than-4K scenario.
+        //
+        // NOTE: this optimization may not work on Persistent InputSurface since
+        // AImageReader cannot re-configure buffer count after creation.
+        if (mWidth * mHeight > 4096 * 2340) {
+            C2PortActualDelayTuning::input inputDelay(0);
+            C2ActualPipelineDelayTuning pipelineDelay(0);
+            c2_status_t c2Err = C2_NOT_FOUND;
+            if (comp) {
+                c2Err = comp->query(
+                        {&inputDelay, &pipelineDelay}, {}, C2_DONT_BLOCK, nullptr);
+                if (c2Err == C2_OK || c2Err == C2_BAD_INDEX) {
+                    int bufferCount = kDefaultInputBufferMargin;
+                    if (inputDelay) {
+                        bufferCount += inputDelay.value;
+                    }
+                    if (pipelineDelay) {
+                        bufferCount += pipelineDelay.value;
+                    }
+                    ALOGD("InputSurface InputBuffer Count adjusted to %d", bufferCount);
+                    return bufferCount;
+                }
+            }
+        }
+        return kDefaultInputBufferCount;
+    }
+
     std::shared_ptr<Codec2Client::InputSurface> mSurface;
     std::shared_ptr<Codec2Client::InputSurfaceConnection> mConnection;
+    uint32_t mWidth;
+    uint32_t mHeight;
+    uint32_t mInputDoneCount;
+    uint32_t mInputEmptyCount;
+    Config mConfig;
 };
 
 class HGraphicBufferSourceWrapper : public InputSurfaceWrapper {
@@ -1978,13 +2171,7 @@ void CCodec::createInputSurface() {
         sp<IInputSurface> hidlInputSurface = IInputSurface::castFrom(hidlTarget);
         sp<HGraphicBufferSource> gbs = HGraphicBufferSource::castFrom(hidlTarget);
 
-        if (hidlInputSurface) {
-            std::shared_ptr<Codec2Client::InputSurface> inputSurface =
-                    std::make_shared<Codec2Client::InputSurface>(hidlInputSurface);
-            err = setupInputSurface(std::make_shared<C2InputSurfaceWrapper>(
-                    inputSurface));
-            bufferProducer = inputSurface->getGraphicBufferProducer();
-        } else if (gbs) {
+        if (gbs) {
             int32_t width = 0;
             (void)outputFormat->findInt32("width", &width);
             int32_t height = 0;
@@ -2116,15 +2303,7 @@ void CCodec::setInputSurface(const sp<PersistentSurface> &surface) {
         sp<hidl::base::V1_0::IBase> hidlTarget = surface->getHidlTarget();
         sp<IInputSurface> inputSurface = IInputSurface::castFrom(hidlTarget);
         sp<HGraphicBufferSource> gbs = HGraphicBufferSource::castFrom(hidlTarget);
-        if (inputSurface) {
-            status_t err = setupInputSurface(std::make_shared<C2InputSurfaceWrapper>(
-                    std::make_shared<Codec2Client::InputSurface>(inputSurface)));
-            if (err != OK) {
-                ALOGE("Failed to set up input surface: %d", err);
-                mCallback->onInputSurfaceDeclined(err);
-                return;
-            }
-        } else if (gbs) {
+        if (gbs) {
             int32_t width = 0;
             (void)outputFormat->findInt32("width", &width);
             int32_t height = 0;
@@ -3137,46 +3316,23 @@ void CCodec::initiateReleaseIfStuck() {
 // static
 PersistentSurface *CCodec::CreateInputSurface() {
     using namespace android;
-    using ::android::hardware::media::omx::V1_0::implementation::TWGraphicBufferSource;
-    // Attempt to create a Codec2's input surface.
-    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
-            Codec2Client::CreateInputSurface();
-    if (!inputSurface) {
-        if (property_get_int32("debug.stagefright.c2inputsurface", 0) == -1) {
-            if (Codec2Client::IsAidlSelected()) {
-                sp<IGraphicBufferProducer> gbp;
-                sp<AidlGraphicBufferSource> gbs = new AidlGraphicBufferSource();
-                status_t err = gbs->initCheck();
-                if (err != OK) {
-                    ALOGE("Failed to create persistent input surface: error %d", err);
-                    return nullptr;
-                }
-                ALOGD("aidl based PersistentSurface created");
-                std::shared_ptr<WAidlGraphicBufferSource> wrapper =
-                        ::ndk::SharedRefBase::make<WAidlGraphicBufferSource>(gbs);
-
-                return new PersistentSurface(
-                      gbs->getIGraphicBufferProducer(), wrapper->asBinder());
-            } else {
-                sp<IGraphicBufferProducer> gbp;
-                sp<OmxGraphicBufferSource> gbs = new OmxGraphicBufferSource();
-                status_t err = gbs->initCheck();
-                if (err != OK) {
-                    ALOGE("Failed to create persistent input surface: error %d", err);
-                    return nullptr;
-                }
-                ALOGD("hidl based PersistentSurface created");
-                return new PersistentSurface(
-                        gbs->getIGraphicBufferProducer(), new TWGraphicBufferSource(gbs));
-            }
-        } else {
+    if (property_get_int32("debug.stagefright.c2inputsurface", 0) == -1) {
+        sp<IGraphicBufferProducer> gbp;
+        sp<AidlGraphicBufferSource> gbs = new AidlGraphicBufferSource();
+        status_t err = gbs->initCheck();
+        if (err != OK) {
+            ALOGE("Failed to create persistent input surface: error %d", err);
             return nullptr;
         }
+        ALOGD("aidl based PersistentSurface created");
+        std::shared_ptr<WAidlGraphicBufferSource> wrapper =
+                ::ndk::SharedRefBase::make<WAidlGraphicBufferSource>(gbs);
+
+        return new PersistentSurface(
+              gbs->getIGraphicBufferProducer(), wrapper->asBinder());
+    } else {
+        return nullptr;
     }
-    return new PersistentSurface(
-            inputSurface->getGraphicBufferProducer(),
-            static_cast<sp<android::hidl::base::V1_0::IBase>>(
-            inputSurface->getHalInterface()));
 }
 
 class IntfCache {

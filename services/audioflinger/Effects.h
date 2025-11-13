@@ -499,6 +499,8 @@ public:
             REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
     sp<IAfEffectModule> getEffectFromType_l(const effect_uuid_t* type) const final
             REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
+    sp<IAfEffectModule> getEffectFromUuid_l(const effect_uuid_t* uuid) const final
+            REQUIRES(audio_utils::ThreadBase_Mutex) EXCLUDES_EffectChain_Mutex;
     std::vector<int> getEffectIds_l() const final REQUIRES(audio_utils::ThreadBase_Mutex);
     // FIXME use float to improve the dynamic range
 

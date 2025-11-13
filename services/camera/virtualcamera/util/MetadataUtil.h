@@ -24,6 +24,7 @@
 #include <variant>
 #include <vector>
 
+#include "CameraMetadata.h"
 #include "aidl/android/hardware/camera/device/CameraMetadata.h"
 #include "system/camera_metadata.h"
 #include "util/Util.h"
@@ -492,6 +493,12 @@ std::optional<int32_t> getDeviceId(
 // present (which is equivalent to a orientation of 0).
 std::optional<int32_t> getSensorOrientation(
     const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata);
+
+// Converts a HelperCameraMetadata object to a HAL AidlCameraMetadata.
+std::unique_ptr<aidl::android::hardware::camera::device::CameraMetadata>
+cameraMetadataToHal(
+    const android::hardware::camera::common::helper::CameraMetadata&
+        metadataHelper);
 
 }  // namespace virtualcamera
 }  // namespace companion

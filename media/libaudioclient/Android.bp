@@ -465,6 +465,7 @@ aidl_interface {
         "aidl/android/media/IAudioPolicyService.aidl",
         "aidl/android/media/IAudioPolicyServiceClient.aidl",
         "aidl/android/media/RecordClientInfo.aidl",
+        "aidl/android/media/StartOutputResponse.aidl",
     ],
     defaults: [
         "latest_android_media_audio_common_types_import_interface",

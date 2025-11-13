@@ -25,6 +25,7 @@
 #include <cutils/config_utils.h>
 #include <system/audio.h>
 #include <system/audio_policy.h>
+#include <functional>
 
 namespace android {
 
@@ -214,6 +215,22 @@ public:
      * @return a filtered DeviceVector
      */
     DeviceVector filter(const DeviceVector &devices) const;
+
+    /**
+     * @brief filter the devices supported by this collection with predicate
+     * @param predicate to filter in with
+     * @return a filtered DeviceVector
+     */
+    template <typename UnaryPred>
+    DeviceVector filter(UnaryPred pred) const {
+        DeviceVector filteredDevices;
+        for (const auto &device : *this) {
+            if (pred(device)) {
+                filteredDevices.add(device);
+            }
+        }
+        return filteredDevices;
+    }
 
     /**
      * @brief filter the devices supported by this collection before sending

@@ -679,6 +679,11 @@ status_t FrameDecoder::extractInternalUsingBlockModel() {
     size_t inputSize = mediaBuffer->range_length();
     std::shared_ptr<C2LinearBlock> block =
             MediaCodec::FetchLinearBlock(inputSize, {std::string{mComponentName.c_str()}});
+    if (block == NULL) {
+        ALOGE("Fatal error: FetchLinearBlock returned NULL");
+        mediaBuffer->release();
+        return NO_MEMORY;
+    }
     C2WriteView view{block->map().get()};
     if (view.error() != C2_OK) {
         ALOGE("Fatal error: failed to allocate and map a block");

@@ -31,9 +31,6 @@ using StreamTypeVector = std::vector<audio_stream_type_t>;
 #define AUDIO_ENUM_QUOTE(x) #x
 #define AUDIO_ENUM_STRINGIFY(x) AUDIO_ENUM_QUOTE(x)
 #define AUDIO_DEFINE_ENUM_SYMBOL_V(symbol, value) symbol = value,
-#define AUDIO_DEFINE_STRINGIFY_CASE_V(symbol, _) case symbol: return AUDIO_ENUM_STRINGIFY(symbol);
-#define AUDIO_DEFINE_PARSE_CASE_V(symbol, _) \
-    if (strcmp(s, AUDIO_ENUM_STRINGIFY(symbol)) == 0) { *t = symbol; return true; } else
 #define AUDIO_DEFINE_MAP_ENTRY_V(symbol, _) { AUDIO_ENUM_STRINGIFY(symbol), symbol },
 
 /**
@@ -60,17 +57,6 @@ enum legacy_strategy {
     AUDIO_LEGACY_STRATEGY_LIST_DEF(AUDIO_DEFINE_ENUM_SYMBOL_V)
 };
 
-inline const char* legacy_strategy_to_string(legacy_strategy t) {
-    switch (t) {
-    AUDIO_LEGACY_STRATEGY_LIST_DEF(AUDIO_DEFINE_STRINGIFY_CASE_V)
-    }
-    return "";
-}
-
-inline bool legacy_strategy_from_string(const char* s, legacy_strategy* t) {
-    AUDIO_LEGACY_STRATEGY_LIST_DEF(AUDIO_DEFINE_PARSE_CASE_V)
-    return false;
-}
 
 namespace audio_policy {
 
@@ -87,8 +73,6 @@ inline std::vector<legacy_strategy_map> getLegacyStrategyMap() {
 #undef AUDIO_LEGACY_STRATEGY_LIST_DEF
 
 #undef AUDIO_DEFINE_MAP_ENTRY_V
-#undef AUDIO_DEFINE_PARSE_CASE_V
-#undef AUDIO_DEFINE_STRINGIFY_CASE_V
 #undef AUDIO_DEFINE_ENUM_SYMBOL_V
 #undef AUDIO_ENUM_STRINGIFY
 #undef AUDIO_ENUM_QUOTE

@@ -53,7 +53,9 @@ public:
     sp<DeviceDescriptor> getDevice() const { return mDevice; }
     void setDevice(const sp<DeviceDescriptor> &device) { mDevice = device; }
     DeviceVector supportedDevices() const  {
-        return mProfile != nullptr ? mProfile->getSupportedDevices() :  DeviceVector(); }
+        return mProfile != nullptr ? mProfile->getSupportedDevices() : DeviceVector(); }
+    DeviceVector routableDevices() const  {
+        return mProfile != nullptr ? mProfile->getRoutableDevices() : DeviceVector(); }
 
     void dump(String8 *dst, int spaces, const char* extraInfo) const override;
 

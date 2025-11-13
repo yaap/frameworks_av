@@ -197,7 +197,6 @@ public:
         }
         if (mValid) return mService;
         if (waitMs.count() < 0) waitMs = mWaitMs;
-        auto timepointLimit = std::chrono::steady_clock::now() + waitMs;
         ul.unlock();
 
         // mediautils::getService() installs a persistent new service notification.
@@ -208,7 +207,6 @@ public:
         ul.lock();
         // return the IAudioFlinger interface which is adapted
         // from the media::IAudioFlingerService.
-        mCv.wait_until(ul, timepointLimit, isServiceValid_l);
         return mService;
     }
 
@@ -293,7 +291,6 @@ private:
             mService = service;
             client = mClient;
             mValid = true;
-            mCv.notify_all();
         }
         // TODO(b/375280520) consider registerClient() within mMutex lock.
         const int64_t token = IPCThreadState::self()->clearCallingIdentity();
@@ -308,12 +305,7 @@ private:
         return sp<AudioFlingerClientAdapter>::make(af);
     }
 
-    static bool isServiceValid_l() REQUIRES(mMutex) {
-        return mValid;
-    }
-
     static inline constinit std::mutex mMutex;
-    static inline constinit std::condition_variable mCv;
     static inline constinit sp<AudioSystem::AudioFlingerClient> mClient GUARDED_BY(mMutex);
     static inline constinit sp<IAudioFlinger> mService GUARDED_BY(mMutex);
     static inline constinit std::chrono::milliseconds mWaitMs
@@ -1032,7 +1024,6 @@ public:
             client = mClient;
             mService = aps;
             mValid = true;
-            mCv.notify_all();
         }
         // TODO(b/375280520) consider registerClient() within mMutex lock.
         const int64_t token = IPCThreadState::self()->clearCallingIdentity();
@@ -1093,7 +1084,6 @@ public:
         }
         if (mValid) return mService;
         if (waitMs.count() < 0) waitMs = mWaitMs;
-        auto timepointLimit = std::chrono::steady_clock::now() + waitMs;
         ul.unlock();
 
         auto service = mediautils::getService<
@@ -1104,7 +1094,6 @@ public:
         // (whereupon mService contained the actual local service pointer to use).
         // we should always return mService.
         ul.lock();
-        mCv.wait_until(ul, timepointLimit, isServiceValid_l);
         return mService;
     }
 
@@ -1153,12 +1142,7 @@ public:
     }
 private:
 
-    static bool isServiceValid_l() REQUIRES(mMutex) {
-        return mValid;
-    }
-
     static inline constinit std::mutex mMutex;
-    static inline constinit std::condition_variable mCv;
     static inline constinit sp<AudioSystem::AudioPolicyServiceClient> mClient GUARDED_BY(mMutex);
     static inline constinit sp<IAudioPolicyService> mService GUARDED_BY(mMutex);
     static inline constinit bool mValid GUARDED_BY(mMutex) = false;
@@ -1321,9 +1305,7 @@ status_t AudioSystem::getOutputForAttr(audio_attributes_t* attr,
                                        audio_port_handle_t* portId,
                                        std::vector<audio_io_handle_t>* secondaryOutputs,
                                        bool *isSpatialized,
-                                       bool *isBitPerfect,
-                                       float *volume,
-                                       bool *muted) {
+                                       bool *isBitPerfect) {
     if (attr == nullptr) {
         ALOGE("%s NULL audio attributes", __func__);
         return BAD_VALUE;
@@ -1389,18 +1371,23 @@ status_t AudioSystem::getOutputForAttr(audio_attributes_t* attr,
     *isBitPerfect = responseAidl.isBitPerfect;
     *attr = VALUE_OR_RETURN_STATUS(
             aidl2legacy_AudioAttributes_audio_attributes_t(responseAidl.attr));
-    *volume = responseAidl.volume;
-    *muted = responseAidl.muted;
 
     return OK;
 }
 
-status_t AudioSystem::startOutput(audio_port_handle_t portId) {
+status_t AudioSystem::startOutput(
+        audio_port_handle_t portId, float* volume, bool* muted) {
     const sp<IAudioPolicyService> aps = get_audio_policy_service();
     if (aps == nullptr) return AudioPolicyServiceTraits::getError();
 
     int32_t portIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_audio_port_handle_t_int32_t(portId));
-    return statusTFromBinderStatus(aps->startOutput(portIdAidl));
+    media::StartOutputResponse responseAidl;
+    status_t status = statusTFromBinderStatus(aps->startOutput(portIdAidl, &responseAidl));
+    if (status != NO_ERROR) return status;
+
+    *volume = responseAidl.volume;
+    *muted = responseAidl.muted;
+    return OK;
 }
 
 status_t AudioSystem::stopOutput(audio_port_handle_t portId) {
@@ -1640,6 +1627,78 @@ status_t AudioSystem::getMinVolumeIndexForAttributes(const audio_attributes_t& a
             aps->getMinVolumeIndexForAttributes(attrAidl, &indexAidl)));
     index = VALUE_OR_RETURN_STATUS(convertIntegral<int>(indexAidl));
     return OK;
+}
+
+status_t AudioSystem::setVolumeIndexForGroup(volume_group_t groupId,
+                                                int index, bool muted,
+                                                audio_devices_t device) {
+    const sp<IAudioPolicyService> aps = get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    int32_t groupIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_volume_group_t_int32_t(groupId));
+    int32_t indexAidl = VALUE_OR_RETURN_STATUS(convertIntegral<int32_t>(index));
+    AudioDeviceDescription deviceAidl = VALUE_OR_RETURN_STATUS(
+            legacy2aidl_audio_devices_t_AudioDeviceDescription(device));
+    return statusTFromBinderStatus(
+            aps->setVolumeIndexForGroup(groupIdAidl, deviceAidl, indexAidl, muted));
+}
+
+status_t AudioSystem::getVolumeIndexForGroup(volume_group_t groupId,
+                                                int& index,
+                                                audio_devices_t device) {
+    const sp<IAudioPolicyService> aps = get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    int32_t groupIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_volume_group_t_int32_t(groupId));
+    AudioDeviceDescription deviceAidl = VALUE_OR_RETURN_STATUS(
+            legacy2aidl_audio_devices_t_AudioDeviceDescription(device));
+    int32_t indexAidl;
+    RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(
+            aps->getVolumeIndexForGroup(groupIdAidl, deviceAidl, &indexAidl)));
+    index = VALUE_OR_RETURN_STATUS(convertIntegral<int>(indexAidl));
+    return OK;
+}
+
+status_t AudioSystem::getMaxVolumeIndexForGroup(volume_group_t groupId, int& index) {
+    const sp<IAudioPolicyService> aps = get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    int32_t groupIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_volume_group_t_int32_t(groupId));
+    int32_t indexAidl;
+    RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(
+            aps->getMaxVolumeIndexForGroup(groupIdAidl, &indexAidl)));
+    index = VALUE_OR_RETURN_STATUS(convertIntegral<int>(indexAidl));
+    return OK;
+}
+
+status_t AudioSystem::setMaxVolumeIndexForGroup(volume_group_t groupId, int index) {
+    const sp<IAudioPolicyService> aps = get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    int32_t groupIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_volume_group_t_int32_t(groupId));
+    int32_t indexAidl = VALUE_OR_RETURN_STATUS(convertIntegral<int32_t>(index));
+    return statusTFromBinderStatus(aps->setMaxVolumeIndexForGroup(groupIdAidl, indexAidl));
+}
+
+status_t AudioSystem::getMinVolumeIndexForGroup(volume_group_t groupId, int& index) {
+    const sp<IAudioPolicyService> aps = get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    int32_t groupIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_volume_group_t_int32_t(groupId));
+    int32_t indexAidl;
+    RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(
+            aps->getMinVolumeIndexForGroup(groupIdAidl, &indexAidl)));
+    index = VALUE_OR_RETURN_STATUS(convertIntegral<int>(indexAidl));
+    return OK;
+}
+
+status_t AudioSystem::setMinVolumeIndexForGroup(volume_group_t groupId, int index) {
+    const sp<IAudioPolicyService> aps = get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    int32_t groupIdAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_volume_group_t_int32_t(groupId));
+    int32_t indexAidl = VALUE_OR_RETURN_STATUS(convertIntegral<int32_t>(index));
+    return statusTFromBinderStatus(aps->setMinVolumeIndexForGroup(groupIdAidl, indexAidl));
 }
 
 product_strategy_t AudioSystem::getStrategyForStream(audio_stream_type_t stream) {

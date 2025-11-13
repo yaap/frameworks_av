@@ -120,7 +120,7 @@ aaudio_result_t AudioStreamTrack::open(const AudioStreamBuilder& builder)
     wp<AudioTrack::IAudioTrackCallback> callback;
     // Note that TRANSFER_SYNC does not allow FAST track
     AudioTrack::transfer_type streamTransferType = AudioTrack::transfer_type::TRANSFER_SYNC;
-    if (builder.getDataCallbackProc() != nullptr) {
+    if (builder.isDataCallbackSet()) {
         streamTransferType = AudioTrack::transfer_type::TRANSFER_CALLBACK;
         callback = wp<AudioTrack::IAudioTrackCallback>::fromExisting(this);
 

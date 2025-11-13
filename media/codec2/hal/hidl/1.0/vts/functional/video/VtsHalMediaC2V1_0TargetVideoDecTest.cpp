@@ -32,10 +32,8 @@
 #include <codec2/common/HalSelection.h>
 #include <codec2/hidl/client.h>
 #include <com_android_graphics_libgui_flags.h>
-#include <gui/BufferQueue.h>
-#include <gui/IConsumerListener.h>
-#include <gui/IProducerListener.h>
 #include <system/window.h>
+#include <gui/BufferItemConsumer.h>
 #include <gui/GLConsumer.h>
 #include <gui/Surface.h>
 #include <gui/SurfaceComposerClient.h>
@@ -573,30 +571,10 @@ TEST_P(Codec2VideoDecHidlTest, configureTunnel) {
     using namespace android;
     sp<NativeHandle> nativeHandle = NativeHandle::create(sidebandStream, true);
 
-    sp<IGraphicBufferProducer> producer;
-    sp<IGraphicBufferConsumer> consumer;
-    BufferQueue::createBufferQueue(&producer, &consumer);
+    auto [consumer, surface] = BufferItemConsumer::create(GRALLOC_USAGE_SW_READ_OFTEN);
 
-    class DummyConsumerListener : public IConsumerListener {
-      public:
-        DummyConsumerListener() : IConsumerListener() {}
-        void onFrameAvailable(const BufferItem&) override {}
-        void onBuffersReleased() override {}
-        void onSidebandStreamChanged() override {}
-    };
-    consumer->consumerConnect(new DummyConsumerListener(), false);
-
-    class DummyProducerListener : public BnProducerListener {
-      public:
-        DummyProducerListener() : BnProducerListener() {}
-        virtual void onBufferReleased() override {}
-        virtual bool needsReleaseNotify() override { return false; }
-        virtual void onBuffersDiscarded(const std::vector<int32_t>&) override {}
-    };
-    IGraphicBufferProducer::QueueBufferOutput qbo{};
-    producer->connect(new DummyProducerListener(), NATIVE_WINDOW_API_MEDIA, false, &qbo);
-
-    ASSERT_EQ(producer->setSidebandStream(nativeHandle), NO_ERROR);
+    surface->connect(NATIVE_WINDOW_API_MEDIA, new StubSurfaceListener(), false);
+    surface->setSidebandStream(nativeHandle);
 }
 
 // Config output pixel format

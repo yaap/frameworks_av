@@ -173,7 +173,8 @@ engineConfig::ParsingResult EngineBase::loadAudioPolicyEngineConfig(
                     std::end(result.parsedConfig->volumeGroups),
                     std::begin(gSystemVolumeGroups), std::end(gSystemVolumeGroups));
     }
-    ALOGE_IF(result.nbSkippedElement != 0, "skipped %zu elements", result.nbSkippedElement);
+    ALOGE_IF(result.nbSkippedElement != 0,
+            "%s skipped %zu elements", __func__, result.nbSkippedElement);
     return processParsingResult(std::move(result));
 }
 
@@ -299,8 +300,8 @@ engineConfig::ParsingResult EngineBase::processParsingResult(
 
 StrategyVector EngineBase::getOrderedProductStrategies() const
 {
-    auto findByFlag = [](const auto &productStrategies, auto flag) {
-        return std::find_if(begin(productStrategies), end(productStrategies),
+    auto findByFlag = [](const auto &legacyStrategies, auto flag) {
+        return std::find_if(begin(legacyStrategies), end(legacyStrategies),
                             [&](const auto &strategy) {
             for (const auto &attributes : strategy.second->getAudioAttributes()) {
                 if ((attributes.flags & flag) == flag) {
@@ -310,7 +311,9 @@ StrategyVector EngineBase::getOrderedProductStrategies() const
             return false;
         });
     };
-    auto strategies = mProductStrategies;
+
+    auto strategies = mOrderedStrategyMap;
+
     auto enforcedAudibleStrategyIter = findByFlag(strategies, AUDIO_FLAG_AUDIBILITY_ENFORCED);
 
     if (getForceUse(AUDIO_POLICY_FORCE_FOR_SYSTEM) == AUDIO_POLICY_FORCE_SYSTEM_ENFORCED &&
@@ -319,6 +322,7 @@ StrategyVector EngineBase::getOrderedProductStrategies() const
         strategies.erase(enforcedAudibleStrategyIter);
         strategies.insert(begin(strategies), enforcedAudibleStrategy);
     }
+
     StrategyVector orderedStrategies;
     for (const auto &iter : strategies) {
         if (iter.second->isPatchStrategy()) {
@@ -326,6 +330,7 @@ StrategyVector EngineBase::getOrderedProductStrategies() const
         }
         orderedStrategies.push_back(iter.second->getId());
     }
+
     return orderedStrategies;
 }
 
@@ -391,6 +396,10 @@ status_t EngineBase::restoreOriginVolumeCurve(audio_stream_type_t stream)
     return curves != nullptr ? curves->switchCurvesFrom(*curves) : BAD_VALUE;
 }
 
+bool EngineBase::isValidVolumeGroup(volume_group_t group) const {
+    return mVolumeGroups.find(group) != end(mVolumeGroups);
+}
+
 VolumeGroupVector EngineBase::getVolumeGroups() const
 {
     VolumeGroupVector group;
@@ -404,6 +413,16 @@ volume_group_t EngineBase::getVolumeGroupForAttributes(
         const audio_attributes_t &attr, bool fallbackOnDefault) const
 {
     return mProductStrategies.getVolumeGroupForAttributes(attr, fallbackOnDefault);
+}
+
+audio_attributes_t EngineBase::getAttributesForVolumeGroup(
+        volume_group_t group, bool fallbackOnDefault) const {
+    const auto &iter = mVolumeGroups.find(group);
+    if (iter != std::end(mVolumeGroups)) {
+        return mVolumeGroups.at(group)->getSupportedAttributes().front();
+    }
+    return fallbackOnDefault ?
+            attributes_initializer(AUDIO_USAGE_MEDIA) : AUDIO_ATTRIBUTES_INITIALIZER;
 }
 
 volume_group_t EngineBase::getVolumeGroupForStreamType(
@@ -840,6 +859,34 @@ sp<DeviceDescriptor> EngineBase::getInputDeviceForEchoRef(const audio_attributes
         posBegin = posEnd + 1;
     }
     return nullptr;
+}
+
+void EngineBase::initializeLegacyStrategyMaps() {
+    auto legacyStrategy = getLegacyStrategyMap();
+    for (const auto &strategy : legacyStrategy) {
+        mLegacyStrategyMap[getProductStrategyByName(strategy.name)] = strategy.id;
+    }
+    // this loop must be executed after mLegacyStrategyMap is fully initialized
+    for (const auto &iter : mProductStrategies) {
+        legacy_strategy ls = getLegacyStrategyFromProduct(iter.first);
+        if (ls == STRATEGY_NONE) {
+            // product strategy IDs not matching legacy strategies are guaranteed
+            // to have larger id values than legacy strategies and are ordered by value
+            ls = static_cast<legacy_strategy>(iter.first);
+        }
+        mOrderedStrategyMap[ls] = iter.second;
+    }
+}
+
+product_strategy_t EngineBase::getProductStrategyFromLegacy(legacy_strategy legacyStrategy) const {
+    auto it = mOrderedStrategyMap.find(legacyStrategy);
+    return it != end(mOrderedStrategyMap) ? it->second->getId() : PRODUCT_STRATEGY_NONE;
+}
+
+legacy_strategy EngineBase::getLegacyStrategyFromProduct(
+        product_strategy_t productStrategy) const {
+    auto it = mLegacyStrategyMap.find(productStrategy);
+    return it != end(mLegacyStrategyMap) ? it->second : STRATEGY_NONE;
 }
 
 void EngineBase::dumpCapturePresetDevicesRoleMap(String8 *dst, int spaces) const

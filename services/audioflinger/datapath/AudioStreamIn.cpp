@@ -78,7 +78,8 @@ status_t AudioStreamIn::open(
         const char *address,
         audio_source_t source,
         audio_devices_t outputDevice,
-        const char *outputDeviceAddress)
+        const char *outputDeviceAddress,
+        int32_t mixPortHalId)
 {
     sp<StreamInHalInterface> inStream;
 
@@ -91,7 +92,8 @@ status_t AudioStreamIn::open(
             source,
             outputDevice,
             outputDeviceAddress,
-            &inStream);
+            &inStream,
+            mixPortHalId);
     ALOGV("AudioStreamIn::open(), HAL returned stream %p, sampleRate %d, format %#x,"
             " channelMask %#x, status %d", inStream.get(), config->sample_rate, config->format,
             config->channel_mask, status);

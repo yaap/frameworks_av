@@ -43,7 +43,6 @@ cc_defaults {
         "-Wformat",
         "-Wthread-safety",
     ],
-    cpp_std: "c++20",
 }
 
 cc_library_static {

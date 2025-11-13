@@ -33,4 +33,5 @@ parcelable OpenInputRequest {
     AudioSource source;
     /** Bitmask, indexed by AudioInputFlag. */
     int flags;
+    int mixPortHalId;
 }

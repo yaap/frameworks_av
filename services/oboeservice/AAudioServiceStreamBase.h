@@ -122,6 +122,8 @@ public:
      */
     aaudio_result_t exitStandby(AudioEndpointParcelable *parcelable) EXCLUDES(mLock);
 
+    aaudio_result_t updateTimestamp() EXCLUDES(mLock);
+
     virtual aaudio_result_t startClient(const android::AudioClient& client,
                                         const audio_attributes_t *attr __unused,
                                         audio_port_handle_t *clientHandle __unused) {
@@ -405,6 +407,7 @@ protected:
         EXIT_STANDBY,
         START_CLIENT,
         STOP_CLIENT,
+        UPDATE_TIMESTAMP,
     };
     AAudioThread            mCommandThread;
     std::atomic_bool        mThreadEnabled{false};

@@ -80,4 +80,6 @@ interface IAAudioService {
                               int clientThreadId);
 
     int exitStandby(int streamHandle, out Endpoint endpoint);
+
+    int updateTimestamp(int streamHandle);
 }

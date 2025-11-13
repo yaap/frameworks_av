@@ -79,6 +79,7 @@ const VirtualCameraConfiguration kEmptyVirtualCameraConfiguration;
 
 class MockVirtualCameraCallback : public BnVirtualCameraCallback {
  public:
+  MOCK_METHOD(ndk::ScopedAStatus, onOpenCamera, (), (override));
   MOCK_METHOD(ndk::ScopedAStatus, onStreamConfigured,
               (int32_t, const ::aidl::android::view::Surface&, int, int,
                ::aidl::android::companion::virtualcamera::Format pixelFormat),

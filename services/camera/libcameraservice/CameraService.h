@@ -286,7 +286,7 @@ public:
     void                notifyMonitoredUids(const std::unordered_set<uid_t> &notifyUidSet);
 
     // Stores current open session device info in temp file.
-    void cacheDump();
+    void cacheDump(const std::string& cameraId);
 
     // Register an offline client for a given active camera id
     status_t addOfflineClient(const std::string &cameraId, sp<BasicClient> offlineClient);

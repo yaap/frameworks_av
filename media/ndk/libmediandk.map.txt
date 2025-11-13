@@ -57,6 +57,7 @@ LIBMEDIANDK {
     AImage_getPlanePixelStride; # introduced=24
     AImage_getPlaneRowStride; # introduced=24
     AImage_getTimestamp; # introduced=24
+    AImage_getTransform; # introduced=37
     AImage_getWidth; # introduced=24
     AMEDIACODEC_KEY_HDR10_PLUS_INFO; # var introduced=31
     AMEDIACODEC_KEY_LOW_LATENCY; # var introduced=31

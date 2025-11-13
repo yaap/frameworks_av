@@ -30,6 +30,7 @@
 #include <utils/Log.h>
 #include <utils/StrongPointer.h>
 #include <gui/Surface.h>
+#include <gui/Flags.h>
 
 #include <media/stagefright/foundation/ALooper.h>
 #include <media/stagefright/foundation/ABuffer.h>
@@ -85,9 +86,14 @@ enum {
 struct AMediaCodecPersistentSurface : public Surface {
     sp<PersistentSurface> mPersistentSurface;
     AMediaCodecPersistentSurface(
-            const sp<IGraphicBufferProducer>& igbp,
+            const sp<MediaSurfaceType>& surface,
             const sp<PersistentSurface>& ps)
-            : Surface(igbp) {
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
+            : Surface(surface->getIGraphicBufferProducer()) {
+#else
+            : Surface(surface) {
+#endif
+
         mPersistentSurface = ps;
     }
     virtual ~AMediaCodecPersistentSurface() {
@@ -900,12 +906,12 @@ media_status_t AMediaCodec_createPersistentInputSurface(ANativeWindow **surface)
         return AMEDIA_ERROR_UNKNOWN;
     }
 
-    sp<IGraphicBufferProducer> igbp = ps->getBufferProducer();
-    if (igbp == NULL) {
+    sp<MediaSurfaceType> s = mediaflagtools::igbpToSurfaceType(ps->getBufferProducer());
+    if (s == NULL) {
         return AMEDIA_ERROR_UNKNOWN;
     }
 
-    *surface = new AMediaCodecPersistentSurface(igbp, ps);
+    *surface = new AMediaCodecPersistentSurface(s, ps);
     ANativeWindow_acquire(*surface);
 
     return AMEDIA_OK;

@@ -86,6 +86,8 @@ public:
     binder::Status exitStandby(int32_t streamHandle, ::aaudio::Endpoint* endpoint,
                                int32_t* _aidl_return) override;
 
+    binder::Status updateTimestamp(int32_t streamHandle, int32_t* _aidl_return) override;
+
     aaudio_result_t startClient(aaudio::aaudio_handle_t streamHandle,
                                 const android::AudioClient& client,
                                 const audio_attributes_t *attr,

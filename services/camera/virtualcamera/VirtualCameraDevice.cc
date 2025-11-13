@@ -18,16 +18,18 @@
 #define LOG_TAG "VirtualCameraDevice"
 #include "VirtualCameraDevice.h"
 
+#include <android_companion_virtualdevice_flags.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <iterator>
-#include <numeric>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "CameraMetadata.h"
 #include "VirtualCameraService.h"
 #include "VirtualCameraSession.h"
 #include "aidl/android/companion/virtualcamera/SupportedStreamConfiguration.h"
@@ -37,7 +39,6 @@
 #include "aidl/android/hardware/camera/device/StreamConfiguration.h"
 #include "android/binder_auto_utils.h"
 #include "android/binder_status.h"
-#include "log/log.h"
 #include "system/camera_metadata.h"
 #include "util/MetadataUtil.h"
 #include "util/Util.h"
@@ -52,9 +53,11 @@ using ::aidl::android::companion::virtualcamera::LensFacing;
 using ::aidl::android::companion::virtualcamera::SensorOrientation;
 using ::aidl::android::companion::virtualcamera::SupportedStreamConfiguration;
 using ::aidl::android::companion::virtualcamera::VirtualCameraConfiguration;
+using ::aidl::android::companion::virtualcamera::VirtualCameraMetadata;
 using ::aidl::android::hardware::camera::common::CameraResourceCost;
 using ::aidl::android::hardware::camera::common::Status;
-using ::aidl::android::hardware::camera::device::CameraMetadata;
+using AidlCameraMetadata =
+    ::aidl::android::hardware::camera::device::CameraMetadata;
 using ::aidl::android::hardware::camera::device::ICameraDeviceCallback;
 using ::aidl::android::hardware::camera::device::ICameraDeviceSession;
 using ::aidl::android::hardware::camera::device::ICameraInjectionSession;
@@ -63,6 +66,8 @@ using ::aidl::android::hardware::camera::device::StreamConfiguration;
 using ::aidl::android::hardware::camera::device::StreamRotation;
 using ::aidl::android::hardware::camera::device::StreamType;
 using ::aidl::android::hardware::graphics::common::PixelFormat;
+using HelperCameraMetadata =
+    ::android::hardware::camera::common::helper::CameraMetadata;
 
 namespace {
 
@@ -217,21 +222,10 @@ std::map<Resolution, int> getResolutionToMaxFpsMap(
   return resolutionToMaxFpsMap;
 }
 
-// TODO(b/301023410) - Populate camera characteristics according to camera configuration.
-std::optional<CameraMetadata> initCameraCharacteristics(
+std::unique_ptr<AidlCameraMetadata> createDefaultCameraCharacteristics(
     const std::vector<SupportedStreamConfiguration>& supportedInputConfig,
     const SensorOrientation sensorOrientation, const LensFacing lensFacing,
     const int32_t deviceId) {
-  if (!std::all_of(supportedInputConfig.begin(), supportedInputConfig.end(),
-                   [](const SupportedStreamConfiguration& config) {
-                     return isFormatSupportedForInput(
-                         config.width, config.height, config.pixelFormat,
-                         config.maxFps);
-                   })) {
-    ALOGE("%s: input configuration contains unsupported format", __func__);
-    return std::nullopt;
-  }
-
   MetadataBuilder builder =
       MetadataBuilder()
           .setSupportedHardwareLevel(
@@ -359,7 +353,7 @@ std::optional<CameraMetadata> initCameraCharacteristics(
   std::optional<Resolution> maxResolution =
       getMaxResolution(supportedInputConfig);
   if (!maxResolution.has_value()) {
-    return std::nullopt;
+    return nullptr;
   }
   builder.setSensorActiveArraySize(0, 0, maxResolution->width,
                                    maxResolution->height);
@@ -392,13 +386,51 @@ std::optional<CameraMetadata> initCameraCharacteristics(
   ALOGV("Adding %zu output configurations", outputConfigurations.size());
   builder.setAvailableOutputStreamConfigurations(outputConfigurations);
 
-  auto metadata = builder.setAvailableCharacteristicKeys().build();
-  if (metadata == nullptr) {
-    ALOGE("Failed to build metadata!");
-    return CameraMetadata();
+  return builder.setAvailableCharacteristicKeys().build();
+}
+
+std::optional<AidlCameraMetadata> initCameraCharacteristics(
+    const std::vector<SupportedStreamConfiguration>& supportedInputConfig,
+    const SensorOrientation sensorOrientation, const LensFacing lensFacing,
+    const std::optional<VirtualCameraMetadata>& configCameraCharacteristics,
+    const int32_t deviceId) {
+  if (!std::all_of(supportedInputConfig.begin(), supportedInputConfig.end(),
+                   [](const SupportedStreamConfiguration& config) {
+                     return isFormatSupportedForInput(
+                         config.width, config.height, config.pixelFormat,
+                         config.maxFps);
+                   })) {
+    ALOGE("%s: input configuration contains unsupported format", __func__);
+    return std::nullopt;
   }
 
-  return std::move(*metadata);
+  std::unique_ptr<AidlCameraMetadata> aidlMetadata;
+  // If the camera metadata is set by the VD owner, add the deviceId and pass it as it is
+  if (configCameraCharacteristics.has_value()) {
+    ALOGD("VirtualCameraDevice - using config CameraCharacteristics");
+
+    auto deviceIdVec = std::vector<int32_t>({deviceId});
+    const auto configMetadata = reinterpret_cast<const camera_metadata_t*>(
+        configCameraCharacteristics.value().metadata.data());
+
+    HelperCameraMetadata metadataHelper =
+        HelperCameraMetadata(clone_camera_metadata(configMetadata));
+    metadataHelper.update(ANDROID_INFO_DEVICE_ID, deviceIdVec.data(),
+                          deviceIdVec.size());
+
+    aidlMetadata = cameraMetadataToHal(metadataHelper);
+  } else {
+    ALOGD("VirtualCameraDevice - createDefaultCameraCharacteristics");
+    aidlMetadata = createDefaultCameraCharacteristics(
+        supportedInputConfig, sensorOrientation, lensFacing, deviceId);
+  }
+
+  if (aidlMetadata == nullptr) {
+    ALOGE("Failed to build metadata!");
+    return AidlCameraMetadata();
+  }
+
+  return std::move(*aidlMetadata);
 }
 
 }  // namespace
@@ -408,10 +440,14 @@ VirtualCameraDevice::VirtualCameraDevice(
     const VirtualCameraConfiguration& configuration, int32_t deviceId)
     : mCameraId(cameraId),
       mVirtualCameraClientCallback(configuration.virtualCameraCallback),
-      mSupportedInputConfigurations(configuration.supportedStreamConfigs) {
-  std::optional<CameraMetadata> metadata = initCameraCharacteristics(
+      mSupportedInputConfigurations(configuration.supportedStreamConfigs),
+      mPerFrameCameraMetadataEnabled(
+          configuration.perFrameCameraMetadataEnabled),
+      mConfigCameraCharacteristics(configuration.cameraCharacteristics) {
+  std::optional<AidlCameraMetadata> metadata = initCameraCharacteristics(
       mSupportedInputConfigurations, configuration.sensorOrientation,
-      configuration.lensFacing, deviceId);
+      configuration.lensFacing, mConfigCameraCharacteristics, deviceId);
+
   if (metadata.has_value()) {
     mCameraCharacteristics = *metadata;
   } else {
@@ -423,7 +459,7 @@ VirtualCameraDevice::VirtualCameraDevice(
 }
 
 ndk::ScopedAStatus VirtualCameraDevice::getCameraCharacteristics(
-    CameraMetadata* _aidl_return) {
+    AidlCameraMetadata* _aidl_return) {
   ALOGV("%s", __func__);
   if (_aidl_return == nullptr) {
     return cameraStatus(Status::ILLEGAL_ARGUMENT);
@@ -434,7 +470,7 @@ ndk::ScopedAStatus VirtualCameraDevice::getCameraCharacteristics(
 }
 
 ndk::ScopedAStatus VirtualCameraDevice::getPhysicalCameraCharacteristics(
-    const std::string& in_physicalCameraId, CameraMetadata* _aidl_return) {
+    const std::string& in_physicalCameraId, AidlCameraMetadata* _aidl_return) {
   ALOGV("%s: physicalCameraId %s", __func__, in_physicalCameraId.c_str());
   (void)_aidl_return;
 
@@ -550,6 +586,12 @@ ndk::ScopedAStatus VirtualCameraDevice::open(
 
   *_aidl_return = ndk::SharedRefBase::make<VirtualCameraSession>(
       sharedFromThis(), in_callback, mVirtualCameraClientCallback);
+
+  if (virtualdevice::flags::virtual_camera_on_open()) {
+    if (mVirtualCameraClientCallback != nullptr) {
+      mVirtualCameraClientCallback->onOpenCamera();
+    }
+  }
 
   return ndk::ScopedAStatus::ok();
 };

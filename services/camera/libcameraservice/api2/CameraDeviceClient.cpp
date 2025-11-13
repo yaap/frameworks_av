@@ -43,6 +43,7 @@
 #include "DepthCompositeStream.h"
 #include "HeicCompositeStream.h"
 #include "JpegRCompositeStream.h"
+#include "utils/Utils.h"
 
 // Convenience methods for constructing binder::Status objects for error returns
 constexpr int32_t METADATA_QUEUE_SIZE = 1 << 20;
@@ -212,7 +213,7 @@ status_t CameraDeviceClient::initializeImpl(TProviderPtr providerPtr,
     mDevice->setPrivilegedClient(mPrivilegedClient);
     size_t fmqHalSize = mDevice->getCaptureResultFMQSize();
     size_t resultMQSize =
-            property_get_int32("ro.camera.resultFmqSize", /*default*/0);
+            property_get_int32(FMQ_SIZE_PROP.c_str(), /*default*/0);
     resultMQSize = resultMQSize > 0 ? resultMQSize : fmqHalSize;
     res = CreateMetadataQueue(&mResultMetadataQueue, resultMQSize);
     if (res != OK) {
@@ -1170,7 +1171,7 @@ binder::Status CameraDeviceClient::createStream(
         int mirrorMode = outputConfiguration.getMirrorMode(surface);
         sp<Surface> outSurface;
         res = SessionConfigurationUtils::createConfiguredSurface(streamInfo,
-                isStreamInfoValid, outSurface,
+                isStreamInfoValid, outputConfiguration, outSurface,
                 flagtools::convertParcelableSurfaceTypeToSurface(surface), mCameraIdStr,
                 mDevice->infoPhysical(physicalCameraId), sensorPixelModesUsed, dynamicRangeProfile,
                 streamUseCase, timestampBase, mirrorMode, colorSpace, /*respectSurfaceSize*/false, mPrivilegedClient);
@@ -1440,7 +1441,6 @@ binder::Status CameraDeviceClient::getInputSurface(/*out*/ view::Surface *inputS
     if (!mDevice.get()) {
         return STATUS_ERROR(CameraService::ERROR_DISCONNECTED, "Camera device no longer alive");
     }
-#if WB_CAMERA3_AND_PROCESSORS_WITH_DEPENDENCIES
     sp<Surface> surface;
     status_t err = mDevice->getInputSurface(&surface);
     if (err != OK) {
@@ -1451,18 +1451,6 @@ binder::Status CameraDeviceClient::getInputSurface(/*out*/ view::Surface *inputS
         inputSurface->name = toString16("CameraInput");
         inputSurface->graphicBufferProducer = surface->getIGraphicBufferProducer();
     }
-#else
-    sp<IGraphicBufferProducer> producer;
-    status_t err = mDevice->getInputBufferProducer(&producer);
-    if (err != OK) {
-        res = STATUS_ERROR_FMT(CameraService::ERROR_INVALID_OPERATION,
-                "Camera %s: Error getting input Surface: %s (%d)",
-                mCameraIdStr.c_str(), strerror(-err), err);
-    } else {
-        inputSurface->name = toString16("CameraInput");
-        inputSurface->graphicBufferProducer = producer;
-    }
-#endif
     return res;
 }
 
@@ -1559,8 +1547,7 @@ binder::Status CameraDeviceClient::updateOutputConfiguration(int streamId,
         sp<Surface> outSurface;
         int mirrorMode = outputConfiguration.getMirrorMode(newOutputsMap.valueAt(i));
         res = SessionConfigurationUtils::createConfiguredSurface(
-                outInfo,
-                /*isStreamInfoValid*/ false, outSurface,
+                outInfo, /*isStreamInfoValid*/ false, outputConfiguration, outSurface,
                 flagtools::convertParcelableSurfaceTypeToSurface(newOutputsMap.valueAt(i)),
                 mCameraIdStr, mDevice->infoPhysical(physicalCameraId), sensorPixelModesUsed,
                 dynamicRangeProfile, streamUseCase, timestampBase, mirrorMode, colorSpace,
@@ -1963,10 +1950,11 @@ binder::Status CameraDeviceClient::finalizeOutputConfigurations(int32_t streamId
         sp<Surface> outSurface;
         int mirrorMode = outputConfiguration.getMirrorMode(surface);
         res = SessionConfigurationUtils::createConfiguredSurface(
-                mStreamInfoMap[streamId], true /*isStreamInfoValid*/, outSurface,
-                flagtools::convertParcelableSurfaceTypeToSurface(surface), mCameraIdStr,
-                mDevice->infoPhysical(physicalId), sensorPixelModesUsed, dynamicRangeProfile,
-                streamUseCase, timestampBase, mirrorMode, colorSpace, /*respectSurfaceSize*/ false, mPrivilegedClient);
+                mStreamInfoMap[streamId], true /*isStreamInfoValid*/, outputConfiguration,
+                outSurface, flagtools::convertParcelableSurfaceTypeToSurface(surface),
+                mCameraIdStr, mDevice->infoPhysical(physicalId), sensorPixelModesUsed,
+                dynamicRangeProfile, streamUseCase, timestampBase, mirrorMode,
+                colorSpace, /*respectSurfaceSize*/ false);
 
         if (!res.isOk()) return res;
 
@@ -2574,7 +2562,9 @@ size_t CameraDeviceClient::writeResultMetadataIntoResultQueue(
         return resultSize;
     }
     resultMetadata.unlock(resultMetadataP);
-    ALOGE(" %s couldn't write metadata into result queue ", __FUNCTION__);
+    ALOGE(" %s couldn't write metadata into result queue, result size %zu, "
+        "fmq availableToWrite %zu ", __FUNCTION__, resultSize,
+        mResultMetadataQueue->availableToWrite());
     return 0;
 }
 

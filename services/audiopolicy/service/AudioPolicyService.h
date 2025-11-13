@@ -120,7 +120,7 @@ public:
                                     const AudioConfig& config,
                                     int32_t flags, const std::vector<int32_t>& selectedDeviceIds,
                                     media::GetOutputForAttrResponse* _aidl_return) override;
-    binder::Status startOutput(int32_t portId) override;
+    binder::Status startOutput(int32_t portId, media::StartOutputResponse* _aidl_return) override;
     binder::Status stopOutput(int32_t portId) override;
     binder::Status releaseOutput(int32_t portId) override;
     binder::Status getInputForAttr(const media::audio::common::AudioAttributes& attr, int32_t input,
@@ -153,6 +153,14 @@ public:
                                                   int32_t* _aidl_return) override;
     binder::Status getMinVolumeIndexForAttributes(const media::audio::common::AudioAttributes& attr,
                                                   int32_t* _aidl_return) override;
+    binder::Status setVolumeIndexForGroup(int32_t groupId, const AudioDeviceDescription& device,
+            int32_t index, bool muted) override;
+    binder::Status getVolumeIndexForGroup(int32_t groupId, const AudioDeviceDescription& device,
+        int32_t* _aidl_return) override;
+    binder::Status getMaxVolumeIndexForGroup(int32_t groupId, int32_t* _aidl_return) override;
+    binder::Status setMaxVolumeIndexForGroup(int32_t groupId, int32_t index) override;
+    binder::Status getMinVolumeIndexForGroup(int32_t groupId, int32_t* _aidl_return) override;
+    binder::Status setMinVolumeIndexForGroup(int32_t groupId, int32_t index) override;
     binder::Status getStrategyForStream(AudioStreamType stream,
                                         int32_t* _aidl_return) override;
     binder::Status getDevicesForAttributes(const media::audio::common::AudioAttributes& attr,
@@ -844,7 +852,8 @@ private:
                                     const sp<DeviceDescriptorBase>& device,
                                     uint32_t *latencyMs,
                                     audio_output_flags_t *flags,
-                                    audio_attributes_t attributes);
+                                    audio_attributes_t attributes,
+                                    int32_t mixPortHalId);
         // creates a special output that is duplicated to the two outputs passed as arguments. The duplication is performed by
         // a special mixer thread in the AudioFlinger.
         virtual audio_io_handle_t openDuplicateOutput(audio_io_handle_t output1, audio_io_handle_t output2);
@@ -867,7 +876,8 @@ private:
                                             audio_devices_t *devices,
                                             const String8& address,
                                             audio_source_t source,
-                                            audio_input_flags_t flags);
+                                            audio_input_flags_t flags,
+                                            int32_t mixPortHalId);
         // closes an audio input
         virtual status_t closeInput(audio_io_handle_t input);
         //
@@ -955,7 +965,8 @@ private:
         status_t invalidateTracks(const std::vector<audio_port_handle_t>& portIds) override;
 
         status_t getAudioMixPort(const struct audio_port_v7 *devicePort,
-                                 struct audio_port_v7 *port) override;
+                                 struct audio_port_v7 *port,
+                                 int32_t mixPortHalId) override;
 
         status_t setTracksInternalMute(
                 const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) override;

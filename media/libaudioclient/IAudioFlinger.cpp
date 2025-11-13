@@ -887,7 +887,8 @@ status_t AudioFlingerClientAdapter::getAudioPolicyConfig(media::AudioPolicyConfi
 }
 
 status_t AudioFlingerClientAdapter::getAudioMixPort(const struct audio_port_v7 *devicePort,
-                                                    struct audio_port_v7 *mixPort) const {
+                                                    struct audio_port_v7 *mixPort,
+                                                    int32_t mixPortHalId) const {
     if (devicePort == nullptr || mixPort == nullptr) {
         return BAD_VALUE;
     }
@@ -897,7 +898,7 @@ status_t AudioFlingerClientAdapter::getAudioMixPort(const struct audio_port_v7 *
             legacy2aidl_audio_port_v7_AudioPortFw(*mixPort));
     media::AudioPortFw aidlRet;
     RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(
-            mDelegate->getAudioMixPort(devicePortAidl, mixPortAidl, &aidlRet)));
+            mDelegate->getAudioMixPort(devicePortAidl, mixPortAidl, mixPortHalId, &aidlRet)));
     *mixPort = VALUE_OR_RETURN_STATUS(aidl2legacy_AudioPortFw_audio_port_v7(aidlRet));
     return OK;
 }
@@ -1456,12 +1457,14 @@ Status AudioFlingerServerAdapter::getAudioPolicyConfig(media::AudioPolicyConfig*
 
 Status AudioFlingerServerAdapter::getAudioMixPort(const media::AudioPortFw &devicePort,
                                                   const media::AudioPortFw &mixPort,
+                                                  int32_t mixPortHalId,
                                                   media::AudioPortFw *_aidl_return) {
     audio_port_v7 devicePortLegacy = VALUE_OR_RETURN_BINDER(
             aidl2legacy_AudioPortFw_audio_port_v7(devicePort));
     audio_port_v7 mixPortLegacy = VALUE_OR_RETURN_BINDER(
             aidl2legacy_AudioPortFw_audio_port_v7(mixPort));
-    RETURN_BINDER_IF_ERROR(mDelegate->getAudioMixPort(&devicePortLegacy, &mixPortLegacy));
+    RETURN_BINDER_IF_ERROR(
+            mDelegate->getAudioMixPort(&devicePortLegacy, &mixPortLegacy, mixPortHalId));
     *_aidl_return = VALUE_OR_RETURN_BINDER(legacy2aidl_audio_port_v7_AudioPortFw(mixPortLegacy));
     return Status::ok();
 }

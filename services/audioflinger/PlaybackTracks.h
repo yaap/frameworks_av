@@ -96,9 +96,7 @@ public:
                                 size_t frameCountToBeReady = SIZE_MAX,
                                 float speed = 1.0f,
                                 bool isSpatialized = false,
-                                bool isBitPerfect = false,
-                                float volume = 0.0f,
-                                bool muted = false);
+                                bool isBitPerfect = false);
     ~Track() override;
     status_t initCheck() const final;
     void appendDumpHeader(String8& result) const final;
@@ -314,6 +312,12 @@ protected:
     int8_t& retryCount() final { return mRetryCount; }
     FastTrackUnderruns& fastTrackUnderruns() final { return mObservedUnderruns; }
 
+    void setTeePatchesPlaybackRate_l(const AudioPlaybackRate& playbackRate) override
+            REQUIRES(audio_utils::ThreadBase_Mutex) {
+        forEachTeePatchTrack_l([playbackRate](const auto& patchTrack) {
+            patchTrack->setPlaybackRate(playbackRate);
+        });
+    }
 protected:
     mutable FillingStatus mFillingStatus;
     int8_t              mRetryCount;
@@ -504,9 +508,7 @@ public:
                                                                     *  as soon as possible to have
                                                                     *  the lowest possible latency
                                                                     *  even if it might glitch. */
-                                   float speed = 1.0f,
-                                   float volume = 1.0f,
-                                   bool muted = false);
+                                   float speed = 1.0f);
     ~PatchTrack() override;
 
     size_t framesReady() const final;
@@ -522,6 +524,8 @@ public:
     // PatchProxyBufferProvider interface
     status_t obtainBuffer(Proxy::Buffer* buffer, const struct timespec* timeOut = nullptr) final;
     void releaseBuffer(Proxy::Buffer* buffer) final;
+
+    void setPlaybackRate (const AudioPlaybackRate &playbackRate) override;
 
 private:
     void restartIfDisabled() override;

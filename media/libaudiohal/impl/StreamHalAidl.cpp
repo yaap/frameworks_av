@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <thread>
 
 #include <audio_utils/clock.h>
 #include <media/AidlConversion.h>
@@ -48,6 +49,7 @@ using ::aidl::android::hardware::audio::core::MmapBufferDescriptor;
 using ::aidl::android::hardware::audio::core::StreamDescriptor;
 using ::aidl::android::hardware::audio::core::VendorParameter;
 using ::aidl::android::media::audio::common::MicrophoneDynamicInfo;
+using ::aidl::android::hardware::audio::core::VendorParameter;
 using ::aidl::android::media::audio::IHalAdapterVendorExtension;
 
 /**
@@ -212,7 +214,8 @@ status_t StreamHalAidl::setParameters(const String8& kvPairs) {
                 return statusTFromBinderStatus(
                         serializeCall(mStream, &Stream::updateHwAvSyncId, hwAvSyncId));
             }));
-    return parseAndSetVendorParameters(mVendorExt, mStream, parameters);
+
+    return parseAndSetVendorParameters(parameters);
 }
 
 status_t StreamHalAidl::getParameters(const String8& keys __unused, String8 *values) {
@@ -224,7 +227,7 @@ status_t StreamHalAidl::getParameters(const String8& keys __unused, String8 *val
     }
     AudioParameter parameterKeys(keys), result;
     *values = result.toString();
-    return parseAndGetVendorParameters(mVendorExt, mStream, parameterKeys, values);
+    return parseAndGetVendorParameters(parameterKeys, values);
 }
 
 status_t StreamHalAidl::getFrameSize(size_t *size) {
@@ -313,10 +316,47 @@ status_t StreamHalAidl::standby() {
     }
 }
 
-status_t StreamHalAidl::dump(int fd, const Vector<String16>& args __unused) {
-    AUGMENT_LOG(D);
+// The behavior depends on the interface implementation version:
+//  - if the version < 3, only call `dump` on `IStreamCommon`.
+//  - if the version == 3, call on the concrete stream (`IStreamIn|Out`) first, then if there
+//       was nothing dumped, fallback to the "< 3" behavior.
+//  - if the version > 3, only call `dump` on the concrete stream.
+status_t StreamHalAidl::dumpImpl(int fd, const Vector<String16>& args, ::ndk::ICInterface* stream) {
+    if (!mStream || !stream) return NO_INIT;
+    Vector<String16> newArgs = args;
+    newArgs.push(String16(kDumpFromAudioServerArgument));
+    // Note: do not serialize the dump call with mCallLock.
+    status_t status;
+    if (mAidlInterfaceVersion > kAidlVersion3) {
+        status = stream->dump(fd, Args(newArgs).args(), newArgs.size());
+    } else if (mAidlInterfaceVersion < kAidlVersion3) {
+        status = mStream->dump(fd, Args(newArgs).args(), newArgs.size());
+    } else {  // mAidlInterfaceVersion == 3
+        int pipefd[2];
+        if (pipe(pipefd) == -1) {
+            AUGMENT_LOG(E, "pipe failed: %d", errno);
+            return NO_INIT;
+        }
+        bool hasOutput = false;
+        std::thread reader([&hasOutput](int inFd, int outFd) {
+                std::vector<char> buf(32768);
+                while (true) {
+                    ssize_t r = read(inFd, &buf[0], buf.size());
+                    if (r <= 0) break;
+                    write(outFd, &buf[0], r);
+                    hasOutput = true;
+                }
+        }, pipefd[0], fd);
+        status = stream->dump(pipefd[1], Args(newArgs).args(), newArgs.size());
+        close(pipefd[1]);
+        close(pipefd[0]);
+        reader.join();
+        if (status != OK || !hasOutput) {
+            status = mStream->dump(fd, Args(newArgs).args(), newArgs.size());
+        }
+    }
     mStreamPowerLog.dump(fd);
-    return OK;
+    return status;
 }
 
 status_t StreamHalAidl::start() {
@@ -374,12 +414,36 @@ status_t StreamHalAidl::stop() {
     }
     StreamDescriptor::Reply reply;
     RETURN_STATUS_IF_ERROR(updateCountersIfNeeded(&reply));
-    if (const auto state = reply.state; state == StreamDescriptor::State::ACTIVE) {
-        return drain(false /*earlyNotify*/, nullptr);
-    } else if (state == StreamDescriptor::State::DRAINING) {
-        RETURN_STATUS_IF_ERROR(pause());
-        return flush();
-    } else if (state == StreamDescriptor::State::PAUSED) {
+    const auto state = reply.state;
+    if (mIsInput) {
+        // For input, does not make sense to drain since the framework does not need that data.
+        if (state == StreamDescriptor::State::ACTIVE) {
+            RETURN_STATUS_IF_ERROR(pause());
+            return flush();
+        } else if (state == StreamDescriptor::State::DRAINING) {
+            // Drain until the stream enters standby due to empty buffer.
+            do {
+                if (status_t status = drain(false /*earlyNotify*/, &reply); status != OK) {
+                    if (reply.state == StreamDescriptor::State::STANDBY) break;
+                    AUGMENT_LOG(E, "HAL could not complete drain, left in %s state, status %d",
+                            toString(reply.state).c_str(), status);
+                    return status;
+                }
+            } while (reply.state == StreamDescriptor::State::DRAINING);
+            if (reply.state == StreamDescriptor::State::STANDBY) return OK;
+            AUGMENT_LOG(E, "HAL could not complete drain, left in %s state",
+                    toString(reply.state).c_str());
+            return INVALID_OPERATION;
+        }
+    } else {  // output
+        if (state == StreamDescriptor::State::ACTIVE) {
+            return drain(false /*earlyNotify*/, nullptr);
+        } else if (state == StreamDescriptor::State::DRAINING) {
+            RETURN_STATUS_IF_ERROR(pause());
+            return flush();
+        }
+    }
+    if (state == StreamDescriptor::State::PAUSED) {
         return flush();
     } else if (state != StreamDescriptor::State::IDLE &&
             state != StreamDescriptor::State::STANDBY) {
@@ -428,10 +492,15 @@ status_t StreamHalAidl::getHardwarePosition(int64_t *frames, int64_t *timestamp)
         AUGMENT_LOG(W, "No position was reported by the HAL");
         return INVALID_OPERATION;
     }
-    int64_t mostRecentResetPoint = std::max(statePositions.hardware.framesAtStandby,
-                                            statePositions.hardware.framesAtFlushOrDrain);
-    int64_t aidlFrames = reply.hardware.frames;
-    *frames = aidlFrames <= mostRecentResetPoint ? 0 : aidlFrames - mostRecentResetPoint;
+    if (mSupportsCreateMmapBuffer) {
+        // HAL is required to report continuous position. Reset for compatibility.
+        int64_t mostRecentResetPoint = std::max(statePositions.hardware.framesAtStandby,
+                statePositions.hardware.framesAtFlushOrDrain);
+        int64_t aidlFrames = reply.hardware.frames;
+        *frames = aidlFrames <= mostRecentResetPoint ? 0 : aidlFrames - mostRecentResetPoint;
+    } else {
+        *frames = reply.hardware.frames;
+    }
     *timestamp = reply.hardware.timeNs;
     return OK;
 }
@@ -583,15 +652,16 @@ status_t StreamHalAidl::flush(StreamDescriptor::Reply* reply) {
     TIME_CHECK();
     if (!mStream) return NO_INIT;
 
+    if (const auto state = getState(); isInPlayOrRecordState(state)) {
+        RETURN_STATUS_IF_ERROR(pause(reply));
+    }
+
     if (const auto state = getState(); isInPausedState(state)) {
         return sendCommand(
                 makeHalCommand<HalCommand::Tag::flush>(), reply,
                 true /*safeFromNonWorkerThread*/);  // The workers stops its I/O activity first.
-    } else if (isInPlayOrRecordState(state)) {
-        AUGMENT_LOG(E, "found stream in non-flushable state: %s", toString(state).c_str());
-        return INVALID_OPERATION;
     } else {
-        AUGMENT_LOG(D, "already stream in one of the flushable state: current state: %s",
+        AUGMENT_LOG(D, "already stream in one of the flushed state: current state: %s",
                     toString(state).c_str());
         return OK;
     }
@@ -732,6 +802,39 @@ status_t StreamHalAidl::legacyReleaseAudioPatch() {
     return INVALID_OPERATION;
 }
 
+status_t StreamHalAidl::parseAndGetVendorParameters(const AudioParameter& parameterKeys,
+                                                    String8* values) {
+    std::vector<std::string> vendorParameterIds;
+    RETURN_STATUS_IF_ERROR(
+            fillVendorParameterIds(mVendorExt, IHalAdapterVendorExtension::ParameterScope::STREAM,
+                                   parameterKeys, vendorParameterIds));
+    if (vendorParameterIds.empty()) {
+        return OK;
+    }
+    std::vector<VendorParameter> vendorParameters;
+    RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(serializeCall(
+            mStream, &Stream::getVendorParameters, vendorParameterIds, &vendorParameters)));
+
+    RETURN_STATUS_IF_ERROR(fillKeyValuePairsFromVendorParameters(
+            mVendorExt, IHalAdapterVendorExtension::ParameterScope::STREAM, vendorParameters,
+            values));
+    return OK;
+}
+
+status_t StreamHalAidl::parseAndSetVendorParameters(const AudioParameter& parameters) {
+    std::vector<VendorParameter> syncParameters, asyncParameters;
+    RETURN_STATUS_IF_ERROR(fillVendorParameters(mVendorExt,
+                                                IHalAdapterVendorExtension::ParameterScope::STREAM,
+                                                parameters, syncParameters, asyncParameters));
+    if (!syncParameters.empty())
+        RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(serializeCall(
+                mStream, &Stream::setVendorParameters, syncParameters, false /*async*/)));
+    if (!asyncParameters.empty())
+        RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(serializeCall(
+                mStream, &Stream::setVendorParameters, asyncParameters, true /*async*/)));
+    return OK;
+}
+
 status_t StreamHalAidl::sendCommand(
         const ::aidl::android::hardware::audio::core::StreamDescriptor::Command& command,
         ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply,
@@ -782,13 +885,13 @@ status_t StreamHalAidl::sendCommand(
                     } else if (command.getTag() == StreamDescriptor::Command::flush &&
                             reply->state == StreamDescriptor::State::IDLE) {
                         mStatePositions.observable.framesAtFlushOrDrain = reply->observable.frames;
-                        mStatePositions.hardware.framesAtFlushOrDrain = reply->observable.frames;
+                        mStatePositions.hardware.framesAtFlushOrDrain = reply->hardware.frames;
                     } else if (!mContext.isAsynchronous() &&
                             command.getTag() == StreamDescriptor::Command::drain &&
                             (reply->state == StreamDescriptor::State::IDLE ||
                                     reply->state == StreamDescriptor::State::DRAINING)) {
                         mStatePositions.observable.framesAtFlushOrDrain = reply->observable.frames;
-                        mStatePositions.hardware.framesAtFlushOrDrain = reply->observable.frames;
+                        mStatePositions.hardware.framesAtFlushOrDrain = reply->hardware.frames;
                     } // for asynchronous drain, the frame count is saved in 'onAsyncDrainReady'
                 }
                 if (mContext.isAsynchronous() &&
@@ -1240,13 +1343,7 @@ status_t StreamOutHalAidl::filterAndUpdateOffloadMetadata(AudioParameter &parame
 status_t StreamOutHalAidl::dump(int fd, const Vector<String16>& args) {
     AUGMENT_LOG(D);
     TIME_CHECK();
-    if (!mStream) return NO_INIT;
-    Vector<String16> newArgs = args;
-    newArgs.push(String16(kDumpFromAudioServerArgument));
-    // Do not serialize the dump call with mCallLock
-    status_t status = mStream->dump(fd, Args(newArgs).args(), newArgs.size());
-    StreamHalAidl::dump(fd, args);
-    return status;
+    return dumpImpl(fd, args, mStream.get());
 }
 
 // static
@@ -1368,13 +1465,7 @@ status_t StreamInHalAidl::setPreferredMicrophoneFieldDimension(float zoom) {
 status_t StreamInHalAidl::dump(int fd, const Vector<String16>& args) {
     AUGMENT_LOG(D);
     TIME_CHECK();
-    if (!mStream) return NO_INIT;
-    Vector<String16> newArgs = args;
-    newArgs.push(String16(kDumpFromAudioServerArgument));
-    // Do not serialize the dump call with mCallLock
-    status_t status = mStream->dump(fd, Args(newArgs).args(), newArgs.size());
-    StreamHalAidl::dump(fd, args);
-    return status;
+    return dumpImpl(fd, args, mStream.get());
 }
 
 } // namespace android

@@ -2293,6 +2293,24 @@ sp<IAfEffectModule> EffectChain::getEffectFromType_l(
     return 0;
 }
 
+// getEffectFromUuid_l() must be called with IAfThreadBase::mutex() held
+sp<IAfEffectModule> EffectChain::getEffectFromUuid_l(const effect_uuid_t *uuid) const
+{
+    audio_utils::lock_guard _l(mutex());
+
+    if (!uuid) {
+        return 0;
+    }
+
+    for (auto& effect : mEffects) {
+        if (effect->isEffect(*uuid)) {
+            return effect;
+        }
+    }
+
+    return 0;
+}
+
 std::vector<int> EffectChain::getEffectIds_l() const
 {
     std::vector<int> ids;
@@ -3381,7 +3399,19 @@ void EffectChain::EffectCallback::checkSuspendOnEffectEnabled(const sp<IAfEffect
         return;
     }
     // in EffectChain context, an EffectBase is always from an EffectModule so static cast is safe
-    c->checkSuspendOnEffectEnabled_l(effect->asEffectModule(), enabled);
+    if (!threadLocked) {
+        t->mutex().lock();
+    }
+
+    sp<IAfEffectModule> em = effect->asEffectModule();
+    if (em == nullptr) {
+        return;
+    }
+    c->checkSuspendOnEffectEnabled_l(em, enabled);
+
+    if (!threadLocked) {
+        t->mutex().unlock();
+    }
 }
 
 void EffectChain::EffectCallback::onEffectEnable(const sp<IAfEffectBase>& effect) {
@@ -3400,7 +3430,7 @@ void EffectChain::EffectCallback::onEffectDisable(const sp<IAfEffectBase>& effec
     if (t == nullptr) {
         return;
     }
-    t->onEffectDisable();
+    t->onEffectDisable(effect->asEffectModule());
 }
 
 bool EffectChain::EffectCallback::disconnectEffectHandle(IAfEffectHandle *handle,

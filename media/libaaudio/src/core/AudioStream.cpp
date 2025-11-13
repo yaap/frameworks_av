@@ -19,6 +19,7 @@
 #include <utils/Log.h>
 
 #include <atomic>
+#include <functional>
 #include <stdint.h>
 
 #include <linux/futex.h>
@@ -27,6 +28,7 @@
 
 #include <aaudio/AAudio.h>
 #include <android-base/strings.h>
+#include <com_android_media_audioserver.h>
 
 #include "AudioStreamBuilder.h"
 #include "AudioStream.h"
@@ -114,6 +116,12 @@ aaudio_result_t AudioStream::open(const AudioStreamBuilder& builder)
     // callbacks
     mFramesPerDataCallback = builder.getFramesPerDataCallback();
     mDataCallbackProc = builder.getDataCallbackProc();
+    mPartialDataCallbackProc = builder.getPartialDataCallbackProc();
+    if (mPartialDataCallbackProc != nullptr) {
+        mDataCallbackWrapper = &AudioStream::partialDataCallbackInternal;
+    } else if (mDataCallbackProc != nullptr) {
+        mDataCallbackWrapper = &AudioStream::dataCallbackInternal;
+    }
     mErrorCallbackProc = builder.getErrorCallbackProc();
     mDataCallbackUserData = builder.getDataCallbackUserData();
     mErrorCallbackUserData = builder.getErrorCallbackUserData();
@@ -583,23 +591,16 @@ aaudio_result_t AudioStream::joinThread_l(void** returnArg) {
     return (result != AAUDIO_OK) ? result : mThreadRegistrationResult;
 }
 
-aaudio_data_callback_result_t AudioStream::maybeCallDataCallback(void *audioData,
-                                                                 int32_t numFrames) {
-    aaudio_data_callback_result_t result = AAUDIO_CALLBACK_RESULT_STOP;
-    AAudioStream_dataCallback dataCallback = getDataCallbackProc();
-    if (dataCallback != nullptr) {
-        // Store thread ID of caller to detect stop() and close() calls from callback.
-        pid_t expected = CALLBACK_THREAD_NONE;
-        if (mDataCallbackThread.compare_exchange_strong(expected, gettid())) {
-            result = (*dataCallback)(
-                    (AAudioStream *) this,
-                    getDataCallbackUserData(),
-                    audioData,
-                    numFrames);
-            mDataCallbackThread.store(CALLBACK_THREAD_NONE);
-        } else {
-            ALOGW("%s() data callback already running!", __func__);
-        }
+int32_t AudioStream::maybeCallDataCallback(void *audioData, int32_t numFrames) {
+    int32_t result = -1;
+    auto dataCallback = getDataCallbackWrapper();
+    // Store thread ID of caller to detect stop() and close() calls from callback.
+    pid_t expected = CALLBACK_THREAD_NONE;
+    if (mDataCallbackThread.compare_exchange_strong(expected, gettid())) {
+        result = std::invoke(dataCallback, this, audioData, numFrames);
+        mDataCallbackThread.store(CALLBACK_THREAD_NONE);
+    } else {
+        ALOGW("%s() data callback already running!", __func__);
     }
     return result;
 }
@@ -667,6 +668,50 @@ aaudio_stream_state_t AudioStream::getStateExternal() const {
 
 std::string AudioStream::getTagsAsString() const {
     return android::base::Join(mTags, AUDIO_ATTRIBUTES_TAGS_SEPARATOR);
+}
+
+aaudio_result_t AudioStream::flushFromFrame(AAudio_FlushFromAccuracy accuracy, int64_t* position) {
+    ALOGD("%s(%d, %jd)", __func__, accuracy, *position);
+    if (!com_android_media_audioserver_mmap_pcm_offload_support()) {
+        return AAUDIO_ERROR_UNIMPLEMENTED;
+    }
+    if (getDirection() != AAUDIO_DIRECTION_OUTPUT ||
+        getPerformanceMode() != AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED ||
+        (accuracy != AAUDIO_FLUSH_FROM_ACCURACY_UNDEFINED &&
+                accuracy != AAUDIO_FLUSH_FROM_FRAME_ACCURATE)) {
+        return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    }
+    if (*position < 0) {
+        return AAUDIO_ERROR_OUT_OF_RANGE;
+    }
+    const int64_t requestedPosition = *position;
+    std::lock_guard lock(mStreamLock);
+    const aaudio_result_t result = flushFromFrame_l(accuracy, position);
+    ALOGD("%s(%d, %jd), actual position = %jd, result = %d",
+          __func__, accuracy, requestedPosition, *position, result);
+    return result;
+}
+
+int AudioStream::dataCallbackInternal(void *audioData, int32_t numFrames) {
+    const aaudio_data_callback_result_t result = std::invoke(mDataCallbackProc,
+            (AAudioStream*) this,
+            getDataCallbackUserData(),
+            audioData,
+            numFrames);
+    // Return negative values to indicate STOP
+    return result == AAUDIO_CALLBACK_RESULT_CONTINUE ? numFrames : -1;
+}
+
+int AudioStream::partialDataCallbackInternal(void *audioData, int32_t numFrames) {
+    const int framesProcessed = std::invoke(
+            mPartialDataCallbackProc, (AAudioStream*) this, getDataCallbackUserData(),
+            audioData, numFrames);
+    if (framesProcessed > numFrames) {
+        ALOGE("%s client returned wrong frames processed=%d, provided=%d",
+              __func__, framesProcessed, numFrames);
+        return -1;
+    }
+    return framesProcessed;
 }
 
 void AudioStream::MyPlayerBase::registerWithAudioManager(const android::sp<AudioStream>& parent) {

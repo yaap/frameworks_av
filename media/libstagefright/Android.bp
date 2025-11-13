@@ -241,6 +241,7 @@ cc_library {
         "CameraSource.cpp",
         "CameraSourceTimeLapse.cpp",
         "CodecErrorLog.cpp",
+        "CodecTrace.cpp",
         "CryptoAsync.cpp",
         "FrameDecoder.cpp",
         "HevcUtils.cpp",

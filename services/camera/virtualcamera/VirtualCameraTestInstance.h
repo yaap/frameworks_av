@@ -65,6 +65,8 @@ class VirtualCameraTestInstance
  public:
   explicit VirtualCameraTestInstance(int fps = 30);
 
+  ::ndk::ScopedAStatus onOpenCamera();
+
   ::ndk::ScopedAStatus onStreamConfigured(
       int32_t streamId, const ::aidl::android::view::Surface& surface,
       int32_t width, int32_t height,

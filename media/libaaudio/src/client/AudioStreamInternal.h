@@ -35,8 +35,8 @@ namespace aaudio {
     // These are intended to be outside the range of what is normally encountered.
     // TODO MAXes should probably be much bigger.
     constexpr int32_t MIN_FRAMES_PER_BURST = 16; // arbitrary
-    constexpr int32_t MAX_FRAMES_PER_BURST = 16 * 1024;  // arbitrary
-    constexpr int32_t MAX_BUFFER_CAPACITY_IN_FRAMES = 32 * 1024;  // arbitrary
+    constexpr int32_t MAX_FRAMES_PER_BURST = 16 * 1024 * 1024;  // arbitrary
+    constexpr int32_t MAX_BUFFER_CAPACITY_IN_FRAMES = 32 * 1024 * 1024;  // arbitrary
 
 // A stream that talks to the AAudioService or directly to a HAL.
 class AudioStreamInternal : public AudioStream {
@@ -129,6 +129,8 @@ protected:
 
     virtual void onFlushFromServer() {}
 
+    virtual void wakeupCallbackThread() {}
+
     aaudio_result_t onEventFromServer(AAudioServiceMessage *message);
 
     aaudio_result_t onTimestampService(AAudioServiceMessage *message);
@@ -152,6 +154,8 @@ protected:
      * @return true if the ClockModel is currently determining the FIFO position
      */
     bool isClockModelInControl() const;
+
+    aaudio_result_t startCallback_l() REQUIRES(mStreamLock);
 
     IsochronousClockModel    mClockModel;      // timing model for chasing the HAL
 

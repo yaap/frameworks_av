@@ -134,6 +134,7 @@ def parseAndroidAudioFile(androidaudiobaseheaderFile):
 
     multi_bit_output_device_shift = 32
     input_device_shift = 0
+    output_device_shift = 0
 
     for line_number, line in enumerate(androidaudiobaseheaderFile):
         match = criteria_pattern.match(line)
@@ -164,22 +165,13 @@ def parseAndroidAudioFile(androidaudiobaseheaderFile):
                 if component_type_literal == "default":
                     component_type_literal = "stub"
 
-                string_int = int(component_type_numerical_value, 0)
-                num_bits = bin(string_int).count("1")
-                if num_bits > 1:
-                    logging.info("The value {} is for criterion {} binary rep {} has {} bits sets"
-                        .format(component_type_numerical_value, component_type_name, bin(string_int), num_bits))
-                    string_int = 2**multi_bit_output_device_shift
-                    logging.info("new val assigned is {} {}" .format(string_int, bin(string_int)))
-                    multi_bit_output_device_shift += 1
-                    component_type_numerical_value = str(string_int)
+                component_type_numerical_value = str(2**output_device_shift)
+                output_device_shift += 1
 
             # Remove duplicated numerical values
             if int(component_type_numerical_value, 0) in all_component_types[component_type_name].values():
-                logging.info("The value {}:{} is duplicated for criterion {}, KEEPING LATEST".format(component_type_numerical_value, component_type_literal, component_type_name))
-                for key in list(all_component_types[component_type_name]):
-                    if all_component_types[component_type_name][key] == int(component_type_numerical_value, 0):
-                        del all_component_types[component_type_name][key]
+                logging.error("Duplicated value {}:{} for criterion {}".format(component_type_numerical_value, component_type_literal, component_type_name))
+                sys.exit(main())
 
             all_component_types[component_type_name][component_type_literal] = int(component_type_numerical_value, 0)
 

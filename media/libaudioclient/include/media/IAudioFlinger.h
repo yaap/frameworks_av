@@ -397,7 +397,8 @@ public:
     virtual status_t getAudioPolicyConfig(media::AudioPolicyConfig* output) = 0;
 
     virtual status_t getAudioMixPort(const struct audio_port_v7 *devicePort,
-                                     struct audio_port_v7 *mixPort) const = 0;
+                                     struct audio_port_v7 *mixPort,
+                                     int32_t mixPortHalId) const = 0;
 
     virtual status_t setTracksInternalMute(
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) = 0;
@@ -519,7 +520,8 @@ public:
     status_t invalidateTracks(const std::vector<audio_port_handle_t>& portIds) override;
     status_t getAudioPolicyConfig(media::AudioPolicyConfig* output) override;
     status_t getAudioMixPort(const struct audio_port_v7 *devicePort,
-                             struct audio_port_v7 *mixPort) const override;
+                             struct audio_port_v7 *mixPort,
+                             int32_t mixPortHalId) const override;
     status_t setTracksInternalMute(
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) override;
     status_t resetReferencesForTest() override;
@@ -761,6 +763,7 @@ public:
     Status getAudioPolicyConfig(media::AudioPolicyConfig* _aidl_return) override;
     Status getAudioMixPort(const media::AudioPortFw& devicePort,
                            const media::AudioPortFw& mixPort,
+                           int32_t mixPortHalId,
                            media::AudioPortFw* _aidl_return) override;
     Status setTracksInternalMute(
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) override;

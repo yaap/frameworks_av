@@ -166,4 +166,17 @@ aaudio_result_t AAudioBinderAdapter::exitStandby(const AAudioHandleInfo& streamH
     return result;
 }
 
+aaudio_result_t AAudioBinderAdapter::updateTimestamp(
+        const aaudio::AAudioHandleInfo &streamHandleInfo) {
+    if (streamHandleInfo.getServiceLifetimeId() != mServiceLifetimeId) {
+        return AAUDIO_ERROR_DISCONNECTED;
+    }
+    aaudio_result_t result;
+    Status status = mDelegate->updateTimestamp(streamHandleInfo.getHandle(), &result);
+    if (!status.isOk()) {
+        result = AAudioConvert_androidToAAudioResult(statusTFromBinderStatus(status));
+    }
+    return result;
+}
+
 }  // namespace aaudio

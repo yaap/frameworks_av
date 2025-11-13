@@ -68,6 +68,13 @@ struct FrameDropper;
  */
 class InputSurfaceSource : public ::android::RefBase {
 // TODO: remove RefBase dependency and AHanderReflector.
+
+private:
+    void initLocked();
+
+    void initWithParams(int32_t width, int32_t height, int32_t format,
+                       int32_t maxImages, uint64_t usage);
+
 public:
     // creates an InputSurfaceSource.
     // init() have to be called prior to use the class.
@@ -75,19 +82,25 @@ public:
 
     virtual ~InputSurfaceSource();
 
-    // Initialize with the default parameter. (persistent surface or init params
-    // are not decided yet.)
-    void init();
-
-    // Initialize with the specified parameters. (non-persistent surface)
-    void initWithParams(int32_t width, int32_t height, int32_t format,
-                       int32_t maxImages, uint64_t usage);
-
     // We can't throw an exception if the constructor fails, so we just set
     // this and require that the caller test the value.
     c2_status_t initCheck() const {
         return mInitCheck;
     }
+
+    class EventCallback {
+    public:
+        EventCallback() = default;
+
+        virtual ~EventCallback() = default;
+
+        virtual void onDataspaceChanged(int32_t dataspace, int32_t pixelFormat) = 0;
+
+        virtual void onComponentReleased() = 0;
+    };
+
+    // Sets callback for the specified events.
+    void setEventCallback(std::shared_ptr<EventCallback> callback);
 
     /**
      * Returns the handle of ANativeWindow of the AImageReader.
@@ -214,6 +227,9 @@ private:
     struct ImageReaderListener;
     AImageReader_ImageListener mImageListener;
     AImageReader_BufferRemovedListener mBufferRemovedListener;
+
+    // EventCallback
+    std::shared_ptr<EventCallback> mEventCallback;
 
     // Lock, covers all member variables.
     mutable std::mutex mMutex;
@@ -367,6 +383,7 @@ private:
     // buffers queued by the producer.
     AImageReader *mImageReader;
     ANativeWindow *mImageWindow;
+    uint64_t mCurrentUsage;
 
     // AImageReader creation parameters
     // maxImages cannot be changed after AImageReader is created.

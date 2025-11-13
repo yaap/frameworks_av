@@ -108,6 +108,15 @@ public:
      */
     virtual aaudio_result_t exitStandby(const AAudioHandleInfo& streamHandleInfo,
                                         AudioEndpointParcelable &parcelable) = 0;
+
+    /**
+     * AAudio service will send timestamp periodically. Client call this method to trigger
+     * a timestamp update immediately.
+     *
+     * @param streamHandleInfo the stream handle
+     * @return
+     */
+    virtual aaudio_result_t updateTimestamp(const AAudioHandleInfo& streamHandleInfo) = 0;
 };
 
 } /* namespace aaudio */

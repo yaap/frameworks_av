@@ -104,49 +104,9 @@ flag {
 
 flag {
     namespace: "camera_platform"
-    name: "single_thread_executor_naming"
-    description: "Set the device executor thread name."
-    bug: "359709863"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
-}
-
-flag {
-    namespace: "camera_platform"
     name: "analytics_24q3"
     description: "Miscellaneous camera platform metrics for 24Q3"
     bug: "332557570"
-}
-
-flag {
-    namespace: "camera_platform"
-    name: "multi_res_raw_reprocessing"
-    description: "Allow multi-resolution raw reprocessing without reprocessing capability"
-    bug: "336922859"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
-}
-
-flag {
-    namespace: "camera_platform"
-    name: "api1_release_binderlock_before_cameraservice_disconnect"
-    description: "Drop mSerializationLock in Camera1 client when calling into CameraService"
-    bug: "351778072"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
-}
-
-flag {
-    namespace: "camera_platform"
-    name: "bump_preview_frame_space_priority"
-    description: "Increase the PreviewFrameSpacer thread priority"
-    bug: "355665306"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
 }
 
 flag {
@@ -171,14 +131,6 @@ flag {
     name: "enable_stream_reconfiguration_for_unchanged_streams"
     description: "Enable stream reconfiguration for unchanged streams"
     bug: "341740105"
-}
-
-flag {
-    namespace: "camera_platform"
-    name: "data_delivery_permission_checks"
-    description: "Pass the full AttributionSource chain to PermissionChecker for data delivery"
-    bug: "190657833"
-    is_fixed_read_only: true
 }
 
 flag {
@@ -273,10 +225,16 @@ flag {
 
 flag {
     namespace: "camera_platform"
-    name: "metadata_resize_fix"
-    description: "metadata resize during update needs to consider existing entry"
-    bug: "379388099"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
+    name: "data_delivery_permission_checks"
+    description: "Pass the full AttributionSource chain to PermissionChecker for data delivery"
+    bug: "190657833"
+    is_fixed_read_only: true
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "output_configuration_getter"
+    is_exported: true
+    description: "Unhide the size and format getters in OutputConfiguration class"
+    bug: "383609887"
 }

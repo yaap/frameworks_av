@@ -4579,6 +4579,11 @@ MediaTrackHelper *MPEG4Extractor::getTrack(size_t index) {
         return NULL;
     }
 
+    // Check if the track's timescale is within the valid range of std::int32_t.
+    if (track->timescale >= std::numeric_limits<std::int32_t>::max()) {
+        ALOGE("track->timescale overflow");
+        return NULL;
+    }
 
     Trex *trex = NULL;
     int32_t trackId;

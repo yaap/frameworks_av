@@ -164,9 +164,6 @@ struct AImageReader : public RefBase {
 
     uint64_t mHalUsage;
 
-#if !COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_CONSUMER_BASE_OWNS_BQ)
-    sp<IGraphicBufferProducer> mProducer;
-#endif  // !COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_CONSUMER_BASE_OWNS_BQ)
     sp<Surface>                mSurface;
     sp<BufferItemConsumer>     mBufferItemConsumer;
     sp<ANativeWindow>          mWindow;

@@ -95,6 +95,12 @@ BINDER_METHOD_ENTRY(setVolumeIndexForAttributes) \
 BINDER_METHOD_ENTRY(getVolumeIndexForAttributes) \
 BINDER_METHOD_ENTRY(getMaxVolumeIndexForAttributes) \
 BINDER_METHOD_ENTRY(getMinVolumeIndexForAttributes) \
+BINDER_METHOD_ENTRY(setVolumeIndexForGroup) \
+BINDER_METHOD_ENTRY(getVolumeIndexForGroup) \
+BINDER_METHOD_ENTRY(getMaxVolumeIndexForGroup) \
+BINDER_METHOD_ENTRY(setMaxVolumeIndexForGroup) \
+BINDER_METHOD_ENTRY(getMinVolumeIndexForGroup) \
+BINDER_METHOD_ENTRY(setMinVolumeIndexForGroup) \
 BINDER_METHOD_ENTRY(getStrategyForStream) \
 BINDER_METHOD_ENTRY(getDevicesForAttributes) \
 BINDER_METHOD_ENTRY(getOutputForEffect) \
@@ -892,7 +898,7 @@ void AudioPolicyService::updateUidStates_l()
 //    NOTE: a client can capture calls if it either:
 //       has CAPTURE_AUDIO_OUTPUT privileged permission (temporarily until
 //            all system apps are updated)
-//       or has CONCURRENT_AUDIO_RECORD_BYPASS privileged permission
+//       or has BYPASS_CONCURRENT_RECORD_AUDIO_RESTRICTION privileged permission
 
 
     sp<AudioRecordClient> topActive;
@@ -1354,6 +1360,12 @@ status_t AudioPolicyService::onTransact(
         case TRANSACTION_getVolumeIndexForAttributes:
         case TRANSACTION_getMinVolumeIndexForAttributes:
         case TRANSACTION_getMaxVolumeIndexForAttributes:
+        case TRANSACTION_setVolumeIndexForGroup:
+        case TRANSACTION_getVolumeIndexForGroup:
+        case TRANSACTION_getMinVolumeIndexForGroup:
+        case TRANSACTION_setMinVolumeIndexForGroup:
+        case TRANSACTION_getMaxVolumeIndexForGroup:
+        case TRANSACTION_setMaxVolumeIndexForGroup:
         case TRANSACTION_isStreamActive:
         case TRANSACTION_isStreamActiveRemotely:
         case TRANSACTION_isSourceActive:

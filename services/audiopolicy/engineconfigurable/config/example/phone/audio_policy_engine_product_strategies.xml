@@ -86,6 +86,12 @@
         </AttributesGroup>
     </ProductStrategy>
 
+    <ProductStrategy name="STRATEGY_CALL_ASSISTANT">
+        <AttributesGroup streamType="AUDIO_STREAM_CALL_ASSISTANT" volumeGroup="call_assistant">
+            <Attributes> <Usage value="AUDIO_USAGE_CALL_ASSISTANT"/> </Attributes>
+        </AttributesGroup>
+    </ProductStrategy>
+
     <!-- Used to identify the volume of audio streams exclusively transmitted through the  speaker
          (TTS) of the device -->
     <ProductStrategy name="STRATEGY_TRANSMITTED_THROUGH_SPEAKER">

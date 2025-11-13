@@ -710,6 +710,10 @@ legacy2aidl_audio_port_v7_AudioPortFw(const audio_port_v7& legacy) {
     // These get filled by the call to 'legacy2aidl_AudioPortExt' below.
     aidl.sys.profiles.resize(legacy.num_audio_profiles);
     aidl.sys.gains.resize(legacy.num_gains);
+    for (int i = 0; i < legacy.num_gains; i++) {
+        aidl.sys.gains[i].isInput = isInput;
+        aidl.sys.gains[i].index = i;
+    }
     aidl.sys.activeConfig = VALUE_OR_RETURN(
             legacy2aidl_audio_port_config_AudioPortConfigFw(legacy.active_config, legacy.id));
     aidl.sys.activeConfig.hal.portId = aidl.hal.id;

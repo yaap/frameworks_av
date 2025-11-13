@@ -154,6 +154,10 @@ class VirtualCameraDevice
       aidl::android::companion::virtualcamera::SupportedStreamConfiguration>
       mSupportedInputConfigurations;
 
+  [[maybe_unused]] const bool mPerFrameCameraMetadataEnabled;
+  std::optional<::aidl::android::companion::virtualcamera::VirtualCameraMetadata>
+      mConfigCameraCharacteristics;
+
   std::atomic_int mNextInputStreamId;
 };
 

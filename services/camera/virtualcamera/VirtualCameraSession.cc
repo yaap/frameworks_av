@@ -188,7 +188,8 @@ HalStream getHalStream(const Stream& stream) {
   halStream.producerUsage = static_cast<BufferUsage>(
       static_cast<int64_t>(stream.usage) |
       static_cast<int64_t>(BufferUsage::CAMERA_OUTPUT) |
-      static_cast<int64_t>(BufferUsage::GPU_RENDER_TARGET));
+      static_cast<int64_t>(BufferUsage::GPU_RENDER_TARGET) |
+      static_cast<int64_t>(BufferUsage::CPU_WRITE_OFTEN));
 
   halStream.supportOffline = false;
   return halStream;

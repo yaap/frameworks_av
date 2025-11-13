@@ -246,6 +246,48 @@ TrackClientVector AudioOutputDescriptor::clientsList(bool activeOnly, product_st
     return clients;
 }
 
+sp<TrackClientDescriptor> AudioOutputDescriptor::getHighestPriorityClientForVolumeSource(
+        VolumeSource vs, bool activeOnly) const
+{
+    sp<TrackClientDescriptor> clientForVolume = nullptr;
+    for (const auto &client : getClientIterable()) {
+        if ((!activeOnly || client->active()) && (vs == client->volumeSource())) {
+            // strategies are ordered, the lowest id the highest priority
+            if (clientForVolume == nullptr || clientForVolume->strategy() > client->strategy()) {
+                clientForVolume = client;
+            }
+        }
+    }
+    return clientForVolume;
+}
+
+bool AudioOutputDescriptor::canSetVolumeForVolumeSource(android::VolumeSource vs) const {
+    if (!useHwGain()) {
+        return true;
+    }
+    auto highestPrioActiveClientForVolume =
+            getHighestPriorityClientForVolumeSource(vs, /* active= */ true);
+    if (highestPrioActiveClientForVolume == nullptr) {
+        ALOGV("%s trying to set volume for inactive volume source %d", __func__, vs);
+        return false;
+    }
+    for (const auto &client: clientsList(true /*activeOnly*/)) {
+        bool isHigherPriority = client->strategy() < highestPrioActiveClientForVolume->strategy();
+        if (isHigherPriority && (client->volumeSource() != vs)) {
+            ALOGV("%s: found higher priority client on output with \n"
+                    "Strategy=%d volumeGroup=%d attributes=%s\n"
+                    "(\nrequester:\n strategy=%d volumeGroup=%d attributes=%s)\n"
+                    " on output, bailing out", __func__, client->strategy(),
+                    client->volumeSource(), toString(client->attributes()).c_str(),
+                    highestPrioActiveClientForVolume->strategy(),
+                    highestPrioActiveClientForVolume->volumeSource(),
+                    toString(highestPrioActiveClientForVolume->attributes()).c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t AudioOutputDescriptor::sameExclusivePreferredDevicesCount() const
 {
     audio_port_handle_t deviceId = AUDIO_PORT_HANDLE_NONE;
@@ -377,6 +419,19 @@ bool SwAudioOutputDescriptor::sharesHwModuleWith(
     }
 }
 
+DeviceVector SwAudioOutputDescriptor::routableDevices() const
+{
+    if (isDuplicated()) {
+        DeviceVector routableDevices = mOutput1->routableDevices();
+        routableDevices.merge(mOutput2->routableDevices());
+        return routableDevices;
+    }
+    if (mProfile != nullptr) {
+        return mProfile->getRoutableDevices();
+    }
+    return DeviceVector();
+}
+
 DeviceVector SwAudioOutputDescriptor::supportedDevices() const
 {
     if (isDuplicated()) {
@@ -395,14 +450,29 @@ bool SwAudioOutputDescriptor::supportsDevice(const sp<DeviceDescriptor> &device)
     return supportedDevices().contains(device);
 }
 
+bool SwAudioOutputDescriptor::routesToDevice(const sp<DeviceDescriptor> &device) const
+{
+    return routableDevices().contains(device);
+}
+
 bool SwAudioOutputDescriptor::supportsAllDevices(const DeviceVector &devices) const
 {
     return supportedDevices().containsAllDevices(devices);
 }
 
+bool SwAudioOutputDescriptor::routesToAllDevices(const DeviceVector &devices) const
+{
+    return routableDevices().containsAllDevices(devices);
+}
+
 bool SwAudioOutputDescriptor::supportsAtLeastOne(const DeviceVector &devices) const
 {
     return filterSupportedDevices(devices).size() > 0;
+}
+
+bool SwAudioOutputDescriptor::routesToAtLeastOne(const DeviceVector &devices) const
+{
+    return filterRoutableDevices(devices).size() > 0;
 }
 
 bool SwAudioOutputDescriptor::supportsDevicesForPlayback(const DeviceVector &devices) const
@@ -412,9 +482,20 @@ bool SwAudioOutputDescriptor::supportsDevicesForPlayback(const DeviceVector &dev
     return !isDuplicated() && supportsAllDevices(devices);
 }
 
+bool SwAudioOutputDescriptor::routesToDevicesForPlayback(const DeviceVector &devices) const
+{
+    return !isDuplicated() && routesToAllDevices(devices);
+}
+
 DeviceVector SwAudioOutputDescriptor::filterSupportedDevices(const DeviceVector &devices) const
 {
     DeviceVector filteredDevices = supportedDevices();
+    return filteredDevices.filter(devices);
+}
+
+DeviceVector SwAudioOutputDescriptor::filterRoutableDevices(const DeviceVector &devices) const
+{
+    DeviceVector filteredDevices = routableDevices();
     return filteredDevices.filter(devices);
 }
 
@@ -548,7 +629,8 @@ bool SwAudioOutputDescriptor::setVolume(float volumeDb, bool mutedByGroup,
     StreamTypeVector streams = streamTypes;
     if (!AudioOutputDescriptor::setVolume(
             volumeDb, mutedByGroup, vs, streamTypes, deviceTypes, delayMs, force, isVoiceVolSrc)) {
-        if (hasStream(streamTypes, AUDIO_STREAM_BLUETOOTH_SCO)) {
+        if (hasStream(streamTypes, AUDIO_STREAM_BLUETOOTH_SCO) &&
+                !com_android_media_audio_replace_stream_bt_sco()) {
             VolumeSource callVolSrc = getVoiceSource();
             const bool mutedChanged =
                     com_android_media_audio_ring_my_car() && hasVolumeSource(callVolSrc) &&
@@ -620,7 +702,8 @@ bool SwAudioOutputDescriptor::setVolume(float volumeDb, bool mutedByGroup,
     }
     // Force VOICE_CALL to track BLUETOOTH_SCO stream volume when bluetooth audio is enabled
     float volumeAmpl = Volume::DbToAmpl(getCurVolume(vs));
-    if (hasStream(streams, AUDIO_STREAM_BLUETOOTH_SCO)) {
+    if (hasStream(streams, AUDIO_STREAM_BLUETOOTH_SCO) &&
+            !com_android_media_audio_replace_stream_bt_sco()) {
         VolumeSource callVolSrc = getVoiceSource();
         if (audioserver_flags::portid_volume_management()) {
             if (callVolSrc != VOLUME_SOURCE_NONE) {
@@ -734,7 +817,8 @@ status_t SwAudioOutputDescriptor::open(const audio_config_t *halConfig,
                                                    device,
                                                    &mLatency,
                                                    &mFlags,
-                                                   attributes);
+                                                   attributes,
+                                                   mProfile->getHalId());
     *flags = mFlags;
 
     if (status == NO_ERROR) {

@@ -374,6 +374,7 @@ InputSurfaceSource::InputSurfaceSource() :
     mLastFrameTimestampUs(-1),
     mImageReader(nullptr),
     mImageWindow(nullptr),
+    mCurrentUsage(0ULL),
     mStopTimeUs(-1),
     mLastActionTimeUs(-1LL),
     mSkipFramesBeforeNs(-1LL),
@@ -406,15 +407,16 @@ InputSurfaceSource::InputSurfaceSource() :
 void InputSurfaceSource::initWithParams(
         int32_t width, int32_t height, int32_t format,
         int32_t maxImages, uint64_t usage) {
+    std::lock_guard<std::mutex> autoLock(mMutex);
     mImageReaderConfig.width = width;
     mImageReaderConfig.height = height;
     mImageReaderConfig.format = format;
     mImageReaderConfig.maxImages = maxImages;
     mImageReaderConfig.usage = (AHARDWAREBUFFER_USAGE_VIDEO_ENCODE | usage);
-    init();
+    initLocked();
 }
 
-void InputSurfaceSource::init() {
+void InputSurfaceSource::initLocked() {
     if (mInitCheck != C2_NO_INIT) {
         return;
     }
@@ -422,8 +424,8 @@ void InputSurfaceSource::init() {
             mImageReaderConfig.width,
             mImageReaderConfig.height,
             mImageReaderConfig.format,
-            mImageReaderConfig.maxImages,
-            mImageReaderConfig.usage, &mImageReader);
+            mImageReaderConfig.usage,
+            mImageReaderConfig.maxImages, &mImageReader);
     if (err != AMEDIA_OK) {
         if (err == AMEDIA_ERROR_INVALID_PARAMETER) {
             mInitCheck = C2_BAD_VALUE;
@@ -433,6 +435,7 @@ void InputSurfaceSource::init() {
         ALOGE("Error constructing AImageReader: %d", err);
         return;
     }
+    mCurrentUsage = mImageReaderConfig.usage;
     createImageListeners();
     (void)AImageReader_setImageListener(mImageReader, &mImageListener);
     (void)AImageReader_setBufferRemovedListener(mImageReader, &mBufferRemovedListener);
@@ -443,6 +446,10 @@ void InputSurfaceSource::init() {
         ALOGE("Error getting window from AImageReader: %d", err);
         mInitCheck = C2_CORRUPTED;
     }
+}
+
+void InputSurfaceSource::setEventCallback(std::shared_ptr<EventCallback> callback) {
+    mEventCallback = callback;
 }
 
 InputSurfaceSource::~InputSurfaceSource() {
@@ -486,6 +493,8 @@ void InputSurfaceSource::createImageListeners() {
 }
 
 ANativeWindow *InputSurfaceSource::getNativeWindow() {
+    std::lock_guard<std::mutex> autoLock(mMutex);
+    initLocked();
     return mImageWindow;
 }
 
@@ -582,6 +591,9 @@ c2_status_t InputSurfaceSource::release(){
     if (looper != NULL) {
         looper->stop();
     }
+    if (mEventCallback) {
+        mEventCallback->onComponentReleased();
+    }
     return C2_OK;
 }
 
@@ -676,6 +688,10 @@ void InputSurfaceSource::onDataspaceChanged_l(
     if (ColorUtils::convertDataSpaceToV0(dataspace)) {
         mComponent->dispatchDataSpaceChanged(
                 mLastDataspace, mDefaultColorAspectsPacked, pixelFormat);
+        if (mEventCallback) {
+            // This will allow the client to query the changed dataspace.
+            mEventCallback->onDataspaceChanged(dataspace, pixelFormat);
+        }
     }
 }
 
@@ -1250,6 +1266,8 @@ c2_status_t InputSurfaceSource::configure(
         uint32_t frameWidth,
         uint32_t frameHeight,
         uint64_t consumerUsage) {
+    initWithParams(frameWidth, frameHeight,
+            HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, bufferCount, consumerUsage);
     if (mInitCheck != C2_OK) {
         ALOGE("configure() was called without initialization");
         return C2_CORRUPTED;
@@ -1277,7 +1295,7 @@ c2_status_t InputSurfaceSource::configure(
         }
 
         consumerUsage |= AHARDWAREBUFFER_USAGE_VIDEO_ENCODE;
-        if (consumerUsage != mImageReaderConfig.usage) {
+        if (consumerUsage != mCurrentUsage) {
             if (__builtin_available(android 36, *)) {
                 media_status_t err = AImageReader_setUsage(mImageReader, consumerUsage);
                 if (err != AMEDIA_OK) {
@@ -1287,8 +1305,9 @@ c2_status_t InputSurfaceSource::configure(
                     return C2_BAD_VALUE;
                 }
             }
-            mImageReaderConfig.usage = consumerUsage;
+            mCurrentUsage = consumerUsage;
         }
+        mImageReaderConfig.usage = consumerUsage;
 
         // Set impl. defined format as default. Depending on the usage flags
         // the device-specific implementation will derive the exact format.

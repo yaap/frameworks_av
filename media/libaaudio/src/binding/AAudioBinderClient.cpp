@@ -206,3 +206,10 @@ aaudio_result_t AAudioBinderClient::exitStandby(const AAudioHandleInfo& streamHa
 
     return service->exitStandby(streamHandleInfo, endpointOut);
 }
+
+aaudio_result_t AAudioBinderClient::updateTimestamp(const AAudioHandleInfo& streamHandleInfo) {
+    std::shared_ptr<AAudioServiceInterface> service = getAAudioService();
+    if (service.get() == nullptr) return AAUDIO_ERROR_NO_SERVICE;
+
+    return service->updateTimestamp(streamHandleInfo);
+}

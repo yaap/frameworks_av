@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <android/media/audio/common/AudioHalEngineConfig.h>
+#include <media/AidlConversionUtil.h>
 #include <system/audio.h>
 #include <utils/Errors.h>
 
@@ -121,6 +122,9 @@ android::status_t parseLegacyVolumes(VolumeGroups &volumeGroups);
 ParsingResult convert(const ::android::media::audio::common::AudioHalEngineConfig& aidlConfig);
 // Exposed for testing.
 android::status_t parseLegacyVolumeFile(const char* path, VolumeGroups &volumeGroups);
+
+ConversionResult<std::string> aidlAudioHalProductStrategyIdToName(int id);
+ConversionResult<int> aidlAudioHalProductStrategyNameToId(const std::string& name);
 
 } // namespace engineConfig
 } // namespace android

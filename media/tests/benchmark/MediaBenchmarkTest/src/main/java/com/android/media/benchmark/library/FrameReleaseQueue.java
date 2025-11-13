@@ -72,10 +72,11 @@ public class FrameReleaseQueue {
     }
 
     private static class FrameInfo {
-        private int number;
+        private int number = 0;
         private int bufferId;
         private int displayTime;
         private int bytes;
+        private MediaCodec.OutputFrame mOutputFrame = null;
         public FrameInfo(int frameNumber, int frameBufferId, int frameDisplayTime) {
             this.number = frameNumber;
             this.bufferId = frameBufferId;
@@ -84,6 +85,9 @@ public class FrameReleaseQueue {
         public FrameInfo(int frameBufferId, int bytes) {
             this.bufferId = frameBufferId;
             this.bytes = bytes;
+        }
+        public void setOutputFrame(MediaCodec.OutputFrame frame) {
+            mOutputFrame = frame;
         }
     }
 
@@ -205,7 +209,17 @@ public class FrameReleaseQueue {
             }
             if (mCurrentFrameInfo != null) {
                 try {
-                    mCodec.releaseOutputBuffer(mCurrentFrameInfo.bufferId, mRender);
+                    if (mCurrentFrameInfo.mOutputFrame != null) {
+                        try {
+                            if (mCurrentFrameInfo.mOutputFrame.getLinearBlock() != null) {
+                                mCurrentFrameInfo.mOutputFrame.getLinearBlock().recycle();
+                            }
+                        } catch (IllegalStateException e) {
+                            Log.d(TAG, "Block model buffer recycle error " + e.toString());
+                            e.printStackTrace();
+                        }
+                    }
+                    mCodec.releaseOutputBuffer(mCurrentFrameInfo.bufferId, false);
                 } catch (IllegalStateException e) {
                     doFrameRelease.set(false);
                     Log.e(TAG, "Threw InterruptedException on releaseOutputBuffer");
@@ -276,6 +290,22 @@ public class FrameReleaseQueue {
         }
         return true;
     }
+
+    // For Block_Model (audio)
+    public boolean pushFrame(int frameBufferId, MediaCodec.OutputFrame outFrame, int bytes) {
+        FrameInfo info = new FrameInfo(frameBufferId, bytes);
+        info.setOutputFrame(outFrame);
+        boolean pushSuccess = mFrameInfoQueue.offer(info);
+        if (!pushSuccess) {
+            Log.e(TAG, "Failed to push frame with buffer id " + info.bufferId);
+            return false;
+        }
+        if (!mReleaseJobStarted.get()) {
+            mScheduler.execute(mReleaseThread);
+            mReleaseJobStarted.set(true);
+        }
+        return true;
+    }
     public boolean pushFrame(int frameNumber, int frameBufferId, long frameDisplayTime) {
         int frameDisplayTimeMs = (int)(frameDisplayTime/1000);
         FrameInfo curFrameInfo = new FrameInfo(frameNumber, frameBufferId, frameDisplayTimeMs);
@@ -305,6 +335,15 @@ public class FrameReleaseQueue {
 
             CompletableFuture.runAsync(() -> {
                 try {
+                    if (curFrameInfo.mOutputFrame != null) {
+                        try {
+                            if (curFrameInfo.mOutputFrame.getLinearBlock() != null) {
+                                curFrameInfo.mOutputFrame.getLinearBlock().recycle();
+                            }
+                        } catch (IllegalStateException e) {
+                            // nothing to do
+                        }
+                    }
                     mCodec.releaseOutputBuffer(curFrameInfo.bufferId, actualRender);
                 } catch (IllegalStateException e) {
                     throw(e);

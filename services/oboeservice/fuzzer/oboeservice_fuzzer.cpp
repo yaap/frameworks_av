@@ -189,6 +189,8 @@ class FuzzAAudioClient : public virtual RefBase, public AAudioServiceInterface {
         return AAUDIO_ERROR_UNAVAILABLE;
     }
 
+    aaudio_result_t updateTimestamp(const AAudioHandleInfo& streamHandleInfo) override;
+
     void onStreamChange(aaudio_handle_t handle, int32_t opcode, int32_t value) {}
 
     int getDeathCount() { return mDeathCount; }
@@ -338,6 +340,14 @@ aaudio_result_t FuzzAAudioClient::unregisterAudioThread(const AAudioHandleInfo& 
     return service->unregisterAudioThread(streamHandleInfo, clientThreadId);
 }
 
+aaudio_result_t FuzzAAudioClient::updateTimestamp(const AAudioHandleInfo& streamHandleInfo) {
+    AAudioServiceInterface *service = getAAudioService();
+    if (!service) {
+        return AAUDIO_ERROR_NO_SERVICE;
+    }
+    return service->updateTimestamp(streamHandleInfo);
+}
+
 class OboeserviceFuzzer {
    public:
     OboeserviceFuzzer();
@@ -411,7 +421,7 @@ void OboeserviceFuzzer::process(const uint8_t *data, size_t size) {
     }
     while (fdp.remaining_bytes()) {
         AudioEndpointParcelable audioEndpointParcelable;
-        int action = fdp.ConsumeIntegralInRange<int32_t>(0, 4);
+        int action = fdp.ConsumeIntegralInRange<int32_t>(0, 5);
         switch (action) {
             case 0:
                 mClient->getStreamDescription(streamHandleInfo, audioEndpointParcelable);
@@ -427,6 +437,9 @@ void OboeserviceFuzzer::process(const uint8_t *data, size_t size) {
                 break;
             case 4:
                 mClient->flushStream(streamHandleInfo);
+                break;
+            case 5:
+                mClient->updateTimestamp(streamHandleInfo);
                 break;
         }
     }

@@ -690,31 +690,33 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
                     auto deviceInfo = states.physicalDeviceInfoMap.find(physicalId);
                     if (deviceInfo != states.physicalDeviceInfoMap.end()) {
                         auto orientation = deviceInfo->second.find(ANDROID_SENSOR_ORIENTATION);
-                        if (orientation.count > 0) {
-                            int32_t transform;
-                            ret = CameraUtils::getRotationTransform(deviceInfo->second,
-                                    OutputConfiguration::MIRROR_MODE_AUTO,
-                                            /*transformInverseDisplay*/true, &transform);
-                            if (ret == OK) {
-                                // It is possible for camera providers to return the capture
-                                // results after the processed frames. In such scenario, we will
-                                // not be able to set the output transformation before the frames
-                                // return back to the consumer for the current capture request
-                                // but we could still try and configure it for any future requests
-                                // that are still in flight. The assumption is that the physical
-                                // device id remains the same for the duration of the pending queue.
-                                for (size_t i = 0; i < states.inflightMap.size(); i++) {
-                                    auto &r = states.inflightMap.editValueAt(i);
-                                    if (r.requestTimeNs >= request.requestTimeNs) {
-                                        r.transform = transform;
+                        size_t i = 0;
+                        // It is possible for camera providers to return the capture
+                        // results after the processed frames. In such scenario, we will
+                        // not be able to set the output transformation before the frames
+                        // return back to the consumer for the current capture request
+                        // but we could still try and configure it for any future requests
+                        // that are still in flight. The assumption is that the physical
+                        // device id remains the same for the duration of the pending queue.
+                        for (; i < states.inflightMap.size() && (orientation.count > 0); i++) {
+                            auto &r = states.inflightMap.editValueAt(i);
+                            if (r.requestTimeNs >= request.requestTimeNs) {
+                                auto it = r.transform.begin();
+                                while (it != r.transform.end()) {
+                                    int32_t transform;
+                                    auto ret = CameraUtils::getRotationTransform(deviceInfo->second,
+                                            it->second.mirrorMode, /*transformInverseDisplay*/true,
+                                            &transform);
+                                    if (ret == OK) {
+                                        it->second.transform = transform;
+                                    } else {
+                                        ALOGE("%s: Failed to calculate current stream "
+                                                "transformation: %s (%d)", __FUNCTION__,
+                                                strerror(-ret), ret);
                                     }
+                                    it++;
                                 }
-                            } else {
-                                ALOGE("%s: Failed to calculate current stream transformation: %s "
-                                        "(%d)", __FUNCTION__, strerror(-ret), ret);
                             }
-                        } else {
-                            ALOGE("%s: Physical device orientation absent!", __FUNCTION__);
                         }
                     } else {
                         ALOGE("%s: Physical device not found in device info map found!",
@@ -883,7 +885,7 @@ void collectReturnableOutputBuffers(
         /*out*/ std::vector<BufferToReturn> *returnableBuffers,
         bool timestampIncreasing, const SurfaceMap& outputSurfaces,
         const CaptureResultExtras &resultExtras,
-        ERROR_BUF_STRATEGY errorBufStrategy, int32_t transform) {
+        ERROR_BUF_STRATEGY errorBufStrategy, const TransformationMap &transform) {
     for (size_t i = 0; i < numBuffers; i++)
     {
         Camera3StreamInterface *stream = Camera3Stream::cast(outputBuffers[i].stream);
@@ -916,6 +918,10 @@ void collectReturnableOutputBuffers(
             continue;
         }
 
+        const auto& transformIt = transform.find(streamId);
+        int32_t transformValue = (transformIt != transform.end()) ?
+            transformIt->second.transform : -1;
+
         const auto& it = outputSurfaces.find(streamId);
 
         // Do not return the buffer if the buffer status is error, and the error
@@ -926,12 +932,12 @@ void collectReturnableOutputBuffers(
                 returnableBuffers->emplace_back(stream,
                         outputBuffers[i], timestamp, readoutTimestamp, timestampIncreasing,
                         it->second, resultExtras,
-                        transform, requested ? requestTimeNs : 0);
+                        transformValue, requested ? requestTimeNs : 0);
             } else {
                 returnableBuffers->emplace_back(stream,
                         outputBuffers[i], timestamp, readoutTimestamp, timestampIncreasing,
                         std::vector<size_t> (), resultExtras,
-                        transform, requested ? requestTimeNs : 0 );
+                        transformValue, requested ? requestTimeNs : 0 );
             }
         }
     }
@@ -1292,7 +1298,7 @@ void flushInflightRequests(FlushInflightReqStates& states) {
                 /*requested*/true, request.requestTimeNs, states.sessionStatsBuilder,
                 /*out*/ &returnableBuffers,
                 /*timestampIncreasing*/true, request.outputSurfaces, request.resultExtras,
-                request.errorBufStrategy);
+                request.errorBufStrategy, request.transform);
             if (!flags::return_buffers_outside_locks()) {
                 finishReturningOutputBuffers(returnableBuffers,
                         states.listener, states.sessionStatsBuilder);

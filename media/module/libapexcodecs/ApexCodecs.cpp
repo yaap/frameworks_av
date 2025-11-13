@@ -22,7 +22,9 @@
 #include <map>
 #include <vector>
 
+#include <C2Param.h>
 #include <C2ParamInternal.h>
+#include <C2Work.h>
 #include <android_media_swcodec_flags.h>
 
 #include <android-base/no_destructor.h>
@@ -36,11 +38,90 @@
 
 using ::android::apexcodecs::ApexComponentIntf;
 using ::android::apexcodecs::ApexComponentStoreIntf;
+using ::android::apexcodecs::ApexConfigurableIntf;
 using ::android::base::ERROR;
 
+struct ApexCodec_Configurable {
+    ApexCodec_Configurable(
+            std::unique_ptr<ApexConfigurableIntf> &&configurable,
+            const std::shared_ptr<C2ParamReflector> &reflector)
+        : mConfigurable(std::move(configurable)),
+          mReflector(reflector) {
+    }
+
+    ApexCodec_Status config(
+            ApexCodec_LinearBuffer *params,
+            ApexCodec_SettingResults **results);
+
+    ApexCodec_Status query(
+            uint32_t indices[],
+            size_t numIndices,
+            ApexCodec_LinearBuffer *config,
+            size_t *writtenOrRequired);
+
+    ApexCodec_Status querySupportedParams(
+            ApexCodec_ParamDescriptors **descriptors);
+
+    ApexCodec_Status querySupportedValues(
+            ApexCodec_SupportedValuesQuery *queries,
+            size_t numQueries);
+
+private:
+    std::unique_ptr<ApexConfigurableIntf> mConfigurable;
+    std::shared_ptr<C2ParamReflector> mReflector;
+
+    uint32_t findSize(C2Param::Index index, uint32_t offset) {
+        // NOTE: we probably could cache the (index, offset) -> size mapping
+        if (mReflector == nullptr) {
+            return 0;
+        }
+        std::shared_ptr<C2StructDescriptor> structDesc = mReflector->describe(index);
+        if (structDesc == nullptr) {
+            return 0;
+        }
+        for (const C2FieldDescriptor &fieldDesc : *structDesc) {
+            if (_C2ParamInspector::GetOffset(fieldDesc) == offset) {
+                return _C2ParamInspector::GetSize(fieldDesc);
+            }
+        }
+        return 0;
+    }
+};
+
+struct ApexCodec_ParamDescriptors {
+public:
+    explicit ApexCodec_ParamDescriptors(
+            const std::vector<std::shared_ptr<C2ParamDescriptor>> &paramDescriptors);
+
+    ~ApexCodec_ParamDescriptors() = default;
+
+    ApexCodec_Status getIndices(uint32_t **indices, size_t *numIndices);
+
+    ApexCodec_Status getDescriptor(
+            uint32_t index,
+            ApexCodec_ParamAttribute *attr,
+            const char **name,
+            uint32_t **dependencies,
+            size_t *numDependencies);
+
+private:
+    struct Entry {
+        uint32_t index;
+        ApexCodec_ParamAttribute attr;
+        C2String name;
+        std::vector<uint32_t> dependencies;
+    };
+    std::map<uint32_t, Entry> mDescriptors;
+    std::vector<uint32_t> mIndices;
+};
+
 struct ApexCodec_Component {
-    explicit ApexCodec_Component(std::unique_ptr<ApexComponentIntf> &&comp)
+    ApexCodec_Component(
+            std::unique_ptr<ApexComponentIntf> &&comp,
+            const std::shared_ptr<C2ParamReflector> &reflector)
         : mComponent(std::move(comp)) {
+        mConfigurable.reset(new ApexCodec_Configurable(
+                mComponent->getConfigurable(), reflector));
     }
 
     ApexCodec_Status start() {
@@ -55,8 +136,25 @@ struct ApexCodec_Component {
         return mComponent->reset();
     }
 
+    ApexCodec_Configurable *getConfigurable() {
+        return mConfigurable.get();
+    }
+
+    ApexCodec_Status process(
+            const ApexCodec_Buffer *input,
+            ApexCodec_Buffer *output,
+            size_t *consumed,
+            size_t *produced) {
+        if (input == nullptr || output == nullptr || consumed == nullptr || produced == nullptr) {
+            return APEXCODEC_STATUS_BAD_VALUE;
+        }
+        return mComponent->process(input, output, consumed, produced);
+    }
+
+
 private:
     std::unique_ptr<ApexComponentIntf> mComponent;
+    std::unique_ptr<ApexCodec_Configurable> mConfigurable;
 };
 
 struct ApexCodec_ComponentStore {
@@ -93,6 +191,14 @@ struct ApexCodec_ComponentStore {
         }
         return mStore->createComponent(name);
     }
+
+    std::shared_ptr<C2ParamReflector> getParamReflector() const {
+        if (mStore == nullptr) {
+            return nullptr;
+        }
+        return mStore->getParamReflector();
+    }
+
 private:
     ApexComponentStoreIntf *mStore;
     std::vector<std::shared_ptr<const C2Component::Traits>> mC2Traits;
@@ -100,7 +206,7 @@ private:
 };
 
 ApexCodec_ComponentStore *ApexCodec_GetComponentStore() {
-    ::android::base::NoDestructor<ApexCodec_ComponentStore> store;
+    static ::android::base::NoDestructor<ApexCodec_ComponentStore> store;
     return store.get();
 }
 
@@ -134,7 +240,7 @@ ApexCodec_Status ApexCodec_Component_create(
     if (compIntf == nullptr) {
         return APEXCODEC_STATUS_NOT_FOUND;
     }
-    *comp = new ApexCodec_Component(std::move(compIntf));
+    *comp = new ApexCodec_Component(std::move(compIntf), store->getParamReflector());
     return APEXCODEC_STATUS_OK;
 }
 
@@ -165,7 +271,10 @@ ApexCodec_Status ApexCodec_Component_reset(ApexCodec_Component *comp) {
 
 ApexCodec_Configurable *ApexCodec_Component_getConfigurable(
         ApexCodec_Component *comp) {
-    return nullptr;
+    if (comp == nullptr) {
+        return nullptr;
+    }
+    return comp->getConfigurable();
 }
 
 struct ApexCodec_Buffer {
@@ -546,24 +655,24 @@ struct ApexCodec_SettingResults {
 public:
     explicit ApexCodec_SettingResults(
             const std::shared_ptr<C2ParamReflector> &reflector,
-            const std::vector<C2SettingResult> &results) : mReflector(reflector) {
-        for (const C2SettingResult &c2Result : results) {
+            const std::vector<std::unique_ptr<C2SettingResult>> &results) : mReflector(reflector) {
+        for (const std::unique_ptr<C2SettingResult> &c2Result : results) {
             mResults.emplace_back();
             Entry &entry = mResults.back();
-            entry.failure = (ApexCodec_SettingResultFailure)c2Result.failure;
-            entry.field.index = _C2ParamInspector::GetIndex(c2Result.field.paramOrField);
-            entry.field.offset = _C2ParamInspector::GetOffset(c2Result.field.paramOrField);
-            entry.field.size = _C2ParamInspector::GetSize(c2Result.field.paramOrField);
-            if (c2Result.field.values) {
+            entry.failure = (ApexCodec_SettingResultFailure)c2Result->failure;
+            entry.field.index = _C2ParamInspector::GetIndex(c2Result->field.paramOrField);
+            entry.field.offset = _C2ParamInspector::GetOffset(c2Result->field.paramOrField);
+            entry.field.size = _C2ParamInspector::GetSize(c2Result->field.paramOrField);
+            if (c2Result->field.values) {
                 entry.fieldValues = std::make_unique<ApexCodec_SupportedValues>(
-                        *c2Result.field.values,
+                        *c2Result->field.values,
                         ApexCodec_SupportedValues::GetFieldType(mReflector,
-                                                                c2Result.field.paramOrField));
+                                                                c2Result->field.paramOrField));
                 entry.field.values = entry.fieldValues.get();
             } else {
                 entry.field.values = nullptr;
             }
-            for (const C2ParamFieldValues &c2Conflict : c2Result.conflicts) {
+            for (const C2ParamFieldValues &c2Conflict : c2Result->conflicts) {
                 entry.conflicts.emplace_back();
                 ApexCodec_ParamFieldValues &conflict = entry.conflicts.back();
                 conflict.index = _C2ParamInspector::GetIndex(c2Conflict.paramOrField);
@@ -647,14 +756,125 @@ ApexCodec_Status ApexCodec_Component_process(
         ApexCodec_Buffer *output,
         size_t *consumed,
         size_t *produced) {
-    return APEXCODEC_STATUS_OMITTED;
+    if (comp == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    return comp->process(input, output, consumed, produced);
+}
+
+ApexCodec_Status ApexCodec_Configurable::config(
+        ApexCodec_LinearBuffer *params,
+        ApexCodec_SettingResults **results) {
+    if (results == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    *results = nullptr;
+    std::vector<C2Param *> c2Params;
+    uint8_t *data = params->data;
+    size_t size = params->size;
+    while (size > 0) {
+        size_t paramSize = ((C2Param *)data)->size();
+        if (paramSize > size || paramSize == 0) {
+            return APEXCODEC_STATUS_BAD_VALUE;
+        }
+        c2Params.emplace_back(C2Param::From(data, paramSize));
+        data += paramSize;
+        size -= paramSize;
+    }
+    std::vector<std::unique_ptr<C2SettingResult>> c2Results;
+    ApexCodec_Status status = mConfigurable->config(c2Params, &c2Results);
+    if (status != APEXCODEC_STATUS_OK) {
+        return status;
+    }
+    *results = new ApexCodec_SettingResults(mReflector, c2Results);
+    return APEXCODEC_STATUS_OK;
+}
+
+ApexCodec_Status ApexCodec_Configurable::query(
+        uint32_t indices[],
+        size_t numIndices,
+        ApexCodec_LinearBuffer *config,
+        size_t *writtenOrRequired) {
+    if (config == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    if (writtenOrRequired == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    *writtenOrRequired = 0;
+    std::vector<C2Param::Index> heapParamIndices;
+    for (size_t i = 0; i < numIndices; ++i) {
+        heapParamIndices.push_back(indices[i]);
+    }
+    std::vector<std::unique_ptr<C2Param>> params;
+    ApexCodec_Status status = mConfigurable->query(heapParamIndices, &params);
+    if (status != APEXCODEC_STATUS_OK) {
+        return status;
+    }
+    for (const std::unique_ptr<C2Param> &param : params) {
+        *writtenOrRequired += param->size();
+    }
+    if (*writtenOrRequired > config->size) {
+        return APEXCODEC_STATUS_NO_MEMORY;
+    }
+    size_t offset = 0;
+    for (const std::unique_ptr<C2Param> &param : params) {
+        memcpy(config->data + offset, param.get(), param->size());
+        offset += param->size();
+    }
+    return APEXCODEC_STATUS_OK;
+}
+
+ApexCodec_Status ApexCodec_Configurable::querySupportedParams(
+        ApexCodec_ParamDescriptors **descriptors) {
+    if (descriptors == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    *descriptors = nullptr;
+    std::vector<std::shared_ptr<C2ParamDescriptor>> c2Descs;
+    mConfigurable->querySupportedParams(&c2Descs);
+    *descriptors = new ApexCodec_ParamDescriptors(c2Descs);
+    return APEXCODEC_STATUS_OK;
+}
+
+ApexCodec_Status ApexCodec_Configurable::querySupportedValues(
+        ApexCodec_SupportedValuesQuery *queries,
+        size_t numQueries) {
+    if (queries == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    if (mReflector == nullptr) {
+        return APEXCODEC_STATUS_BAD_STATE;
+    }
+    std::vector<C2FieldSupportedValuesQuery> c2Queries;
+    std::vector<C2ParamField> c2Fields;
+    c2Queries.reserve(numQueries);
+    for (size_t i = 0; i < numQueries; ++i) {
+        C2Param::Index index = queries[i].index;
+        uint32_t offset = queries[i].offset;
+        uint32_t size = findSize(index, offset);
+        c2Fields.push_back(_C2ParamInspector::CreateParamField(index, offset, size));
+        c2Queries.emplace_back(c2Fields.back(),
+                               (C2FieldSupportedValuesQuery::type_t)queries[i].type);
+    }
+    mConfigurable->querySupportedValues(c2Queries);
+    for (size_t i = 0; i < numQueries; ++i) {
+        queries[i].status = (ApexCodec_Status)c2Queries[i].status;
+        queries[i].values = new ApexCodec_SupportedValues(
+                c2Queries[i].values,
+                ApexCodec_SupportedValues::GetFieldType(mReflector, c2Fields[i]));
+    }
+    return APEXCODEC_STATUS_OK;
 }
 
 ApexCodec_Status ApexCodec_Configurable_config(
         ApexCodec_Configurable *comp,
-        ApexCodec_LinearBuffer *config,
+        ApexCodec_LinearBuffer *params,
         ApexCodec_SettingResults **results) {
-    return APEXCODEC_STATUS_OMITTED;
+    if (comp == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    return comp->config(params, results);
 }
 
 ApexCodec_Status ApexCodec_Configurable_query(
@@ -663,84 +883,71 @@ ApexCodec_Status ApexCodec_Configurable_query(
         size_t numIndices,
         ApexCodec_LinearBuffer *config,
         size_t *writtenOrRequired) {
-    return APEXCODEC_STATUS_OMITTED;
+    if (comp == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    return comp->query(indices, numIndices, config, writtenOrRequired);
 }
 
-struct ApexCodec_ParamDescriptors {
-public:
-    explicit ApexCodec_ParamDescriptors(
-            const std::vector<std::shared_ptr<C2ParamDescriptor>> &paramDescriptors) {
-        for (const std::shared_ptr<C2ParamDescriptor> &c2Descriptor : paramDescriptors) {
-            if (!c2Descriptor) {
-                continue;
-            }
-            uint32_t index = c2Descriptor->index();
-            Entry &entry = mDescriptors[index];
-            entry.index = index;
-            entry.attr = (ApexCodec_ParamAttribute)_C2ParamInspector::GetAttrib(*c2Descriptor);
-            entry.name = c2Descriptor->name();
-            for (const C2Param::Index &dependency : c2Descriptor->dependencies()) {
-                entry.dependencies.emplace_back((uint32_t)dependency);
-            }
-            mIndices.push_back(entry.index);
+ApexCodec_ParamDescriptors::ApexCodec_ParamDescriptors(
+        const std::vector<std::shared_ptr<C2ParamDescriptor>> &paramDescriptors) {
+    for (const std::shared_ptr<C2ParamDescriptor> &c2Descriptor : paramDescriptors) {
+        if (!c2Descriptor) {
+            continue;
         }
+        uint32_t index = c2Descriptor->index();
+        Entry &entry = mDescriptors[index];
+        entry.index = index;
+        entry.attr = (ApexCodec_ParamAttribute)_C2ParamInspector::GetAttrib(*c2Descriptor);
+        entry.name = c2Descriptor->name();
+        for (const C2Param::Index &dependency : c2Descriptor->dependencies()) {
+            entry.dependencies.emplace_back((uint32_t)dependency);
+        }
+        mIndices.push_back(entry.index);
     }
+}
 
-    ~ApexCodec_ParamDescriptors() {
+ApexCodec_Status ApexCodec_ParamDescriptors::getIndices(uint32_t **indices, size_t *numIndices) {
+    if (indices == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
     }
-
-    ApexCodec_Status getIndices(uint32_t **indices, size_t *numIndices) {
-        if (indices == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        if (numIndices == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        *indices = mIndices.data();
-        *numIndices = mIndices.size();
-        return APEXCODEC_STATUS_OK;
+    if (numIndices == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
     }
+    *indices = mIndices.data();
+    *numIndices = mIndices.size();
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_Status getDescriptor(
-            uint32_t index,
-            ApexCodec_ParamAttribute *attr,
-            const char **name,
-            uint32_t **dependencies,
-            size_t *numDependencies) {
-        if (attr == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        if (name == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        if (dependencies == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        if (numDependencies == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        auto it = mDescriptors.find(index);
-        if (it == mDescriptors.end()) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        const Entry &entry = it->second;
-        *attr = entry.attr;
-        *name = entry.name.c_str();
-        *dependencies = const_cast<uint32_t *>(entry.dependencies.data());
-        *numDependencies = entry.dependencies.size();
-        return APEXCODEC_STATUS_OK;
+ApexCodec_Status ApexCodec_ParamDescriptors::getDescriptor(
+        uint32_t index,
+        ApexCodec_ParamAttribute *attr,
+        const char **name,
+        uint32_t **dependencies,
+        size_t *numDependencies) {
+    if (attr == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
     }
-
-private:
-    struct Entry {
-        uint32_t index;
-        ApexCodec_ParamAttribute attr;
-        C2String name;
-        std::vector<uint32_t> dependencies;
-    };
-    std::map<uint32_t, Entry> mDescriptors;
-    std::vector<uint32_t> mIndices;
-};
+    if (name == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    if (dependencies == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    if (numDependencies == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    auto it = mDescriptors.find(index);
+    if (it == mDescriptors.end()) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    const Entry &entry = it->second;
+    *attr = entry.attr;
+    *name = entry.name.c_str();
+    *dependencies = const_cast<uint32_t *>(entry.dependencies.data());
+    *numDependencies = entry.dependencies.size();
+    return APEXCODEC_STATUS_OK;
+}
 
 ApexCodec_Status ApexCodec_ParamDescriptors_getIndices(
         ApexCodec_ParamDescriptors *descriptors,
@@ -772,14 +979,20 @@ void ApexCodec_ParamDescriptors_destroy(ApexCodec_ParamDescriptors *descriptors)
 ApexCodec_Status ApexCodec_Configurable_querySupportedParams(
         ApexCodec_Configurable *comp,
         ApexCodec_ParamDescriptors **descriptors) {
-    return APEXCODEC_STATUS_OMITTED;
+    if (comp == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    return comp->querySupportedParams(descriptors);
 }
 
 ApexCodec_Status ApexCodec_Configurable_querySupportedValues(
         ApexCodec_Configurable *comp,
         ApexCodec_SupportedValuesQuery *queries,
         size_t numQueries) {
-    return APEXCODEC_STATUS_OMITTED;
+    if (comp == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
+    }
+    return comp->querySupportedValues(queries, numQueries);
 }
 
 #pragma clang diagnostic pop

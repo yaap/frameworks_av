@@ -17,8 +17,13 @@
 #ifndef ANDROID_AAUDIO_AUDIO_STREAM_INTERNAL_PLAY_H
 #define ANDROID_AAUDIO_AUDIO_STREAM_INTERNAL_PLAY_H
 
+#include <condition_variable>
+#include <mutex>
 #include <stdint.h>
+#include <thread>
+
 #include <aaudio/AAudio.h>
+#include <mediautils/SingleThreadExecutor.h>
 
 #include "binding/AAudioServiceInterface.h"
 #include "client/AudioStreamInternal.h"
@@ -62,6 +67,16 @@ public:
         return AAUDIO_DIRECTION_OUTPUT;
     }
 
+    aaudio_result_t setOffloadEndOfStream() EXCLUDES(mStreamLock) final;
+
+    void setPresentationEndCallbackProc(AAudioStream_presentationEndCallback proc) final {
+        mPresentationEndCallbackProc = proc;
+    }
+
+    void setPresentationEndCallbackUserData(void *userData) final {
+        mPresentationEndCallbackUserData = userData;
+    }
+
 protected:
 
     void prepareBuffersForStart() override;
@@ -85,6 +100,12 @@ protected:
                              int32_t numFrames,
                              int64_t currentTimeNanos,
                              int64_t *wakeTimePtr) override;
+
+    aaudio_result_t requestStop_l() REQUIRES(mStreamLock) final;
+
+    void wakeupCallbackThread() final;
+    aaudio_result_t flushFromFrame_l(AAudio_FlushFromAccuracy accuracy, int64_t* position)
+            REQUIRES(mStreamLock) final;
 private:
     /*
      * Asynchronous write with data conversion.
@@ -95,6 +116,27 @@ private:
     aaudio_result_t writeNowWithConversion(const void *buffer,
                                            int32_t numFrames);
 
+    bool shouldStopStream();
+    void maybeCallPresentationEndCallback();
+    void dropPresentationEndCallback();
+
+    android::sp<AudioStreamInternalPlay> getPtr() { return this; }
+
+    bool mOffloadEosPending GUARDED_BY(mStreamEndMutex){false};
+    std::mutex mStreamEndMutex;
+    std::condition_variable mStreamEndCV;
+    std::optional<android::mediautils::SingleThreadExecutor> mStreamEndExecutor;
+    AAudioStream_presentationEndCallback mPresentationEndCallbackProc = nullptr;
+    void                                *mPresentationEndCallbackUserData = nullptr;
+    std::atomic<pid_t>                   mPresentationEndCallbackThread{CALLBACK_THREAD_NONE};
+
+    static constexpr int32_t kOffloadSafeMarginMs = 100;
+    int32_t mOffloadSafeMarginInFrames = 0;
+    std::mutex mCallbackMutex;
+    std::condition_variable mCallbackCV;
+    bool mSuspendCallback GUARDED_BY(mCallbackMutex){false};
+
+    std::mutex mEndpointMutex;
 };
 
 } /* namespace aaudio */

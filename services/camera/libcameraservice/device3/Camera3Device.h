@@ -253,12 +253,7 @@ class Camera3Device :
     status_t configureStreams(const CameraMetadata& sessionParams,
             int operatingMode =
             camera_stream_configuration_mode_t::CAMERA_STREAM_CONFIGURATION_NORMAL_MODE) override;
-#if WB_CAMERA3_AND_PROCESSORS_WITH_DEPENDENCIES
     status_t getInputSurface(sp<Surface> *surface) override;
-#else
-    status_t getInputBufferProducer(
-            sp<IGraphicBufferProducer> *producer) override;
-#endif
 
     void getOfflineStreamIds(std::vector<int> *offlineStreamIds) override;
 
@@ -1363,7 +1358,8 @@ class Camera3Device :
             bool isFixedFps, const std::set<std::set<std::string>>& physicalCameraIds,
             bool isStillCapture, bool isZslCapture, bool rotateAndCropAuto, bool autoframingAuto,
             const std::set<std::string>& cameraIdsWithZoom, bool useZoomRatio,
-            const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs);
+            const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs,
+            const TransformationMap& transform);
 
     /**
      * Tracking for idle detection

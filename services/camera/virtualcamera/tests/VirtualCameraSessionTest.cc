@@ -100,6 +100,7 @@ class MockCameraDeviceCallback : public BnCameraDeviceCallback {
 
 class MockVirtualCameraCallback : public BnVirtualCameraCallback {
  public:
+  MOCK_METHOD(ndk::ScopedAStatus, onOpenCamera, (), (override));
   MOCK_METHOD(ndk::ScopedAStatus, onStreamConfigured,
               (int, const Surface&, int32_t, int32_t, Format), (override));
   MOCK_METHOD(ndk::ScopedAStatus, onProcessCaptureRequest, (int, int),

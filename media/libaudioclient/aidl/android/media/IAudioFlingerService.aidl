@@ -298,8 +298,12 @@ interface IAudioFlingerService {
 
     /**
      * Get the attributes of the mix port when connecting to the given device port.
+     * If `mixPortHalId` is not `AUDIO_PORT_HANDLE_NONE`, it will be used to determine
+     * the mix port. Otherwise, `mixPort.ext.mix.handle` will be used.
      */
-    AudioPortFw getAudioMixPort(in AudioPortFw devicePort, in AudioPortFw mixPort);
+    AudioPortFw getAudioMixPort(in AudioPortFw devicePort,
+                                in AudioPortFw mixPort,
+                                int mixPortHalId);
 
     /**
      * Set internal mute for a list of tracks.

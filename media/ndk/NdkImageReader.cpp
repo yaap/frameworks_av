@@ -304,9 +304,6 @@ AImageReader::init() {
         return AMEDIA_ERROR_UNKNOWN;
     }
 
-#if !COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_CONSUMER_BASE_OWNS_BQ)
-    mProducer = mSurface->getIGraphicBufferProducer();
-#endif
     mBufferItemConsumer->setName(consumerName);
     mBufferItemConsumer->setFrameAvailableListener(mFrameListener);
     mBufferItemConsumer->setBufferFreedListener(mBufferRemovedListener);
@@ -577,13 +574,8 @@ media_status_t AImageReader::getWindowNativeHandle(native_handle **handle) {
         *handle = mWindowHandle;
         return AMEDIA_OK;
     }
-#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_CONSUMER_BASE_OWNS_BQ)
     sp<HGraphicBufferProducer> hgbp = new TWGraphicBufferProducer<HGraphicBufferProducer>(
             mSurface->getIGraphicBufferProducer());
-#else
-    sp<HGraphicBufferProducer> hgbp =
-        new TWGraphicBufferProducer<HGraphicBufferProducer>(mProducer);
-#endif  // COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_CONSUMER_BASE_OWNS_BQ)
     HalToken halToken;
     if (!createHalToken(hgbp, &halToken)) {
         return AMEDIA_ERROR_UNKNOWN;

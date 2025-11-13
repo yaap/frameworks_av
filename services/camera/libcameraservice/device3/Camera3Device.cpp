@@ -1339,7 +1339,7 @@ status_t Camera3Device::setStreamTransform(int id,
         CLOGE("Stream %d does not exist", id);
         return BAD_VALUE;
     }
-    return stream->setTransform(transform, false /*mayChangeMirror*/);
+    return stream->setTransform(transform);
 }
 
 status_t Camera3Device::deleteStream(int id) {
@@ -1468,7 +1468,6 @@ status_t Camera3Device::filterParamsAndConfigureLocked(const CameraMetadata& par
     return configureStreamsLocked(operatingMode, filteredParams);
 }
 
-#if WB_CAMERA3_AND_PROCESSORS_WITH_DEPENDENCIES
 status_t Camera3Device::getInputSurface(sp<Surface> *surface) {
     ATRACE_CALL();
     Mutex::Autolock il(mInterfaceLock);
@@ -1482,22 +1481,6 @@ status_t Camera3Device::getInputSurface(sp<Surface> *surface) {
 
     return mInputStream->getInputSurface(surface);
 }
-#else
-status_t Camera3Device::getInputBufferProducer(
-        sp<IGraphicBufferProducer> *producer) {
-    ATRACE_CALL();
-    Mutex::Autolock il(mInterfaceLock);
-    Mutex::Autolock l(mLock);
-
-    if (producer == NULL) {
-        return BAD_VALUE;
-    } else if (mInputStream == NULL) {
-        return INVALID_OPERATION;
-    }
-
-    return mInputStream->getInputBufferProducer(producer);
-}
-#endif
 
 status_t Camera3Device::createDefaultRequest(camera_request_template_t templateId,
         CameraMetadata *request) {
@@ -2930,7 +2913,8 @@ status_t Camera3Device::registerInFlight(uint32_t frameNumber,
         bool isFixedFps, const std::set<std::set<std::string>>& physicalCameraIds,
         bool isStillCapture, bool isZslCapture, bool rotateAndCropAuto, bool autoframingAuto,
         const std::set<std::string>& cameraIdsWithZoom, bool useZoomRatio,
-        const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs) {
+        const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs,
+        const TransformationMap &transform) {
     ATRACE_CALL();
     std::lock_guard<std::mutex> l(mInFlightLock);
 
@@ -2938,7 +2922,7 @@ status_t Camera3Device::registerInFlight(uint32_t frameNumber,
     res = mInFlightMap.add(frameNumber, InFlightRequest(numBuffers, resultExtras, hasInput,
             hasAppCallback, minExpectedDuration, maxExpectedDuration, isFixedFps, physicalCameraIds,
             isStillCapture, isZslCapture, rotateAndCropAuto, autoframingAuto, cameraIdsWithZoom,
-            requestTimeNs, useZoomRatio, outputSurfaces));
+            requestTimeNs, useZoomRatio, outputSurfaces, transform));
     if (res < 0) return res;
 
     if (mInFlightMap.size() == 1) {
@@ -4136,6 +4120,7 @@ status_t Camera3Device::RequestThread::prepareHalRequests() {
         nsecs_t waitDuration = kBaseGetBufferWait + parent->getExpectedInFlightDuration();
 
         SurfaceMap uniqueSurfaceIdMap;
+        TransformationMap transformMap;
         bool containsHalBufferManagedStream = false;
         for (size_t j = 0; j < captureRequest->mOutputStreams.size(); j++) {
             sp<Camera3OutputStreamInterface> outputStream =
@@ -4161,6 +4146,8 @@ status_t Camera3Device::RequestThread::prepareHalRequests() {
                     outputStream->cancelPrepare();
                 }
             }
+
+            transformMap.insert({streamId, {outputStream->getMirrorMode(), -1}});
 
             std::vector<size_t> uniqueSurfaceIds;
             res = outputStream->getUniqueSurfaceIds(
@@ -4290,7 +4277,7 @@ status_t Camera3Device::RequestThread::prepareHalRequests() {
                 captureRequest->mRotateAndCropAuto, captureRequest->mAutoframingAuto,
                 mPrevCameraIdsWithZoom, useZoomRatio,
                 passSurfaceMap ? uniqueSurfaceIdMap :
-                                      SurfaceMap{}, captureRequest->mRequestTimeNs);
+                                      SurfaceMap{}, captureRequest->mRequestTimeNs, transformMap);
         ALOGVV("%s: registered in flight requestId = %" PRId32 ", frameNumber = %" PRId64
                ", burstId = %" PRId32 ".",
                 __FUNCTION__,
@@ -5941,15 +5928,20 @@ status_t Camera3Device::deriveAndSetTransformLocked(
     int transform = -1;
     bool enableTransformInverseDisplay = true;
     using hardware::ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY;
+    using hardware::ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE;
+    bool rotationOnlyOverride = mRotationOverride == ROTATION_OVERRIDE_ROTATION_ONLY;
+    bool reverseRotationOnlyOverride =
+            wm_flags::enable_camera_compat_check_device_rotation_bugfix() &&
+                    mRotationOverride == ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE;
     if (wm_flags::enable_camera_compat_for_desktop_windowing()) {
-        enableTransformInverseDisplay = (mRotationOverride != ROTATION_OVERRIDE_ROTATION_ONLY);
+        enableTransformInverseDisplay = !rotationOnlyOverride && !reverseRotationOnlyOverride;
     }
     int res = CameraUtils::getRotationTransform(mDeviceInfo, mirrorMode,
             enableTransformInverseDisplay, &transform);
     if (res != OK) {
         return res;
     }
-    stream.setTransform(transform, false /*mayChangeMirror*/, surfaceId);
+    stream.setTransform(transform, surfaceId);
     return OK;
 }
 

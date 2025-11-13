@@ -269,7 +269,8 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
                                                             outputDevice,
                                                             outputDeviceAddress,
                                                             &flags,
-                                                            attributes);
+                                                            attributes,
+                                                            0 /*mixPortHalId*/);
                     ALOGV("mAfPatchPanelCallback->openOutput_l() returned %p", thread.get());
                     if (thread == 0) {
                         status = NO_MEMORY;
@@ -317,7 +318,8 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
                                                                     source,
                                                                     flags,
                                                                     outputDevice,
-                                                                    outputDeviceAddress);
+                                                                    outputDeviceAddress,
+                                                                    0 /*mixPortHalId*/);
                 ALOGV("mAfPatchPanelCallback->openInput_l() returned %p inChannelMask %08x",
                       thread.get(), config.channel_mask);
                 if (thread == 0) {
@@ -484,7 +486,8 @@ exit:
 }
 
 status_t PatchPanel::getAudioMixPort_l(const audio_port_v7 *devicePort,
-                                       audio_port_v7 *mixPort) {
+                                       audio_port_v7 *mixPort,
+                                       int32_t mixPortHalId) {
     if (devicePort->type != AUDIO_PORT_TYPE_DEVICE) {
         ALOGE("%s the type of given device port is not DEVICE", __func__);
         return INVALID_OPERATION;
@@ -498,7 +501,7 @@ status_t PatchPanel::getAudioMixPort_l(const audio_port_v7 *devicePort,
         ALOGW("%s cannot find hw module %d", __func__, devicePort->ext.device.hw_module);
         return BAD_VALUE;
     }
-    return hwDevice->getAudioMixPort(devicePort, mixPort);
+    return hwDevice->getAudioMixPort(devicePort, mixPort, mixPortHalId);
 }
 
 PatchPanel::Patch::~Patch()
@@ -649,9 +652,7 @@ status_t PatchPanel::Patch::createConnections_l(const sp<IAfPatchPanel>& panel)
                                            outputFlags,
                                            {} /*timeout*/,
                                            frameCountToBeReady,
-                                           1.0f /*speed*/,
-                                           1.0f /*volume*/,
-                                           false /*muted*/);
+                                           1.0f /*speed*/);
     status = mPlayback.checkTrack(tempPatchTrack.get());
     if (status != NO_ERROR) {
         return status;

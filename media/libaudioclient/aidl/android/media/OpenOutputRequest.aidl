@@ -34,4 +34,5 @@ parcelable OpenOutputRequest {
     /** Bitmask, indexed by AudioOutputFlag. */
     int flags;
     AudioAttributes attributes;
+    int mixPortHalId;
 }

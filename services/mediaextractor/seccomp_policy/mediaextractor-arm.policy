@@ -48,6 +48,16 @@ timer_delete: 1
 # for dynamically loading extractors
 pread64: 1
 
+# Required by MemoryHeapBase for shared memory allocations when libcutils uses
+# memfd.
+#
+# memfd_create() is used for allocating a memfd, ftruncate() is used to specify
+# its size, and fcntl() is used to set file seals on the memfd, such as seals
+# to prevent the file from changing in size and from being written to.
+memfd_create: 1
+ftruncate64: 1
+fcntl64: 1
+
 # mremap: Ensure |flags| are (MREMAP_MAYMOVE | MREMAP_FIXED) TODO: Once minijail
 # parser support for '<' is in this needs to be modified to also prevent
 # |old_address| and |new_address| from touching the exception vector page, which

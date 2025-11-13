@@ -42,7 +42,10 @@ namespace virtualcamera {
 
 namespace {
 
-using ::android::hardware::camera::common::helper::CameraMetadata;
+using AidlCameraMetadata =
+    ::aidl::android::hardware::camera::device::CameraMetadata;
+using HelperCameraMetadata =
+    ::android::hardware::camera::common::helper::CameraMetadata;
 
 template <typename To, typename From>
 std::vector<To> convertTo(const std::vector<From>& from) {
@@ -731,8 +734,7 @@ MetadataBuilder& MetadataBuilder::setAvailableCharacteristicKeys() {
   return *this;
 }
 
-std::unique_ptr<aidl::android::hardware::camera::device::CameraMetadata>
-MetadataBuilder::build() {
+std::unique_ptr<AidlCameraMetadata> MetadataBuilder::build() {
   if (mExtendWithAvailableCharacteristicsKeys) {
     std::vector<camera_metadata_tag_t> availableKeys;
     availableKeys.reserve(mEntryMap.size());
@@ -744,7 +746,7 @@ MetadataBuilder::build() {
     setAvailableCharacteristicKeys(availableKeys);
   }
 
-  CameraMetadata metadataHelper;
+  HelperCameraMetadata metadataHelper;
   for (const auto& entry : mEntryMap) {
     status_t ret = std::visit(
         [&](auto&& arg) {
@@ -759,26 +761,10 @@ MetadataBuilder::build() {
     }
   }
 
-  const camera_metadata_t* metadata = metadataHelper.getAndLock();
-  if (metadata == nullptr) {
-    ALOGE(
-        "Failure when constructing metadata -> CameraMetadata helper returned "
-        "nullptr");
-    return nullptr;
-  }
-
-  auto aidlMetadata =
-      std::make_unique<aidl::android::hardware::camera::device::CameraMetadata>();
-  const uint8_t* data_ptr = reinterpret_cast<const uint8_t*>(metadata);
-  aidlMetadata->metadata.assign(data_ptr,
-                                data_ptr + get_camera_metadata_size(metadata));
-  metadataHelper.unlock(metadata);
-
-  return aidlMetadata;
+  return cameraMetadataToHal(metadataHelper);
 }
 
-std::optional<int32_t> getJpegQuality(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+std::optional<int32_t> getJpegQuality(const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -791,8 +777,7 @@ std::optional<int32_t> getJpegQuality(
   return *entry.data.i32;
 }
 
-int32_t getJpegOrientation(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+int32_t getJpegOrientation(const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -806,7 +791,7 @@ int32_t getJpegOrientation(
 }
 
 std::optional<Resolution> getJpegThumbnailSize(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+    const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -820,7 +805,7 @@ std::optional<Resolution> getJpegThumbnailSize(
 }
 
 std::optional<int32_t> getJpegThumbnailQuality(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+    const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -834,7 +819,7 @@ std::optional<int32_t> getJpegThumbnailQuality(
 }
 
 std::vector<Resolution> getJpegAvailableThumbnailSizes(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+    const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -852,8 +837,7 @@ std::vector<Resolution> getJpegAvailableThumbnailSizes(
   return thumbnailSizes;
 }
 
-std::optional<FpsRange> getFpsRange(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+std::optional<FpsRange> getFpsRange(const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -869,8 +853,7 @@ std::optional<FpsRange> getFpsRange(
 }
 
 std::optional<camera_metadata_enum_android_control_capture_intent>
-getCaptureIntent(const aidl::android::hardware::camera::device::CameraMetadata&
-                     cameraMetadata) {
+getCaptureIntent(const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -885,7 +868,7 @@ getCaptureIntent(const aidl::android::hardware::camera::device::CameraMetadata&
 }
 
 std::optional<GpsCoordinates> getGpsCoordinates(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+    const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -918,7 +901,7 @@ std::optional<GpsCoordinates> getGpsCoordinates(
 }
 
 std::optional<camera_metadata_enum_android_lens_facing> getLensFacing(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+    const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -932,8 +915,7 @@ std::optional<camera_metadata_enum_android_lens_facing> getLensFacing(
 }
 
 std::optional<camera_metadata_enum_android_control_ae_precapture_trigger>
-getPrecaptureTrigger(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+getPrecaptureTrigger(const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -947,8 +929,7 @@ getPrecaptureTrigger(
       entry.data.u8[0]);
 }
 
-std::optional<int32_t> getDeviceId(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+std::optional<int32_t> getDeviceId(const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -962,7 +943,7 @@ std::optional<int32_t> getDeviceId(
 }
 
 std::optional<int32_t> getSensorOrientation(
-    const aidl::android::hardware::camera::device::CameraMetadata& cameraMetadata) {
+    const AidlCameraMetadata& cameraMetadata) {
   auto metadata =
       reinterpret_cast<const camera_metadata_t*>(cameraMetadata.metadata.data());
 
@@ -973,6 +954,25 @@ std::optional<int32_t> getSensorOrientation(
   }
 
   return static_cast<int32_t>(entry.data.i32[0]);
+}
+
+std::unique_ptr<AidlCameraMetadata> cameraMetadataToHal(
+    const HelperCameraMetadata& metadataHelper) {
+  const camera_metadata_t* metadata = metadataHelper.getAndLock();
+  if (metadata == nullptr) {
+    ALOGE(
+        "Failure when constructing metadata -> CameraMetadata helper returned "
+        "nullptr");
+    return nullptr;
+  }
+
+  auto aidlMetadata = std::make_unique<AidlCameraMetadata>();
+  const uint8_t* data_ptr = reinterpret_cast<const uint8_t*>(metadata);
+  aidlMetadata->metadata.assign(data_ptr,
+                                data_ptr + get_camera_metadata_size(metadata));
+  metadataHelper.unlock(metadata);
+
+  return aidlMetadata;
 }
 
 }  // namespace virtualcamera

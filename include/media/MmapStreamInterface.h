@@ -61,6 +61,7 @@ class MmapStreamInterface : public virtual RefBase
      *                       Actual as output
      * \param[in] callback the MmapStreamCallback interface used by AudioFlinger to notify
      *                     condition changes affecting the stream operation
+     * \param[in] offloadInfo additional information for offload playback
      * \param[out] interface the MmapStreamInterface interface controlling the created stream
      * \param[out] same unique handle as the one used for the first client stream started.
      * \return OK if the stream was successfully created.
@@ -69,14 +70,15 @@ class MmapStreamInterface : public virtual RefBase
      *         INVALID_OPERATION if the stream cannot be opened because of platform limitations
      */
     static status_t openMmapStream(stream_direction_t direction,
-                                           const audio_attributes_t *attr,
-                                           audio_config_base_t *config,
-                                           const AudioClient& client,
-                                           DeviceIdVector *deviceIds,
-                                           audio_session_t *sessionId,
-                                           const sp<MmapStreamCallback>& callback,
-                                           sp<MmapStreamInterface>& interface,
-                                           audio_port_handle_t *handle);
+                                   const audio_attributes_t *attr,
+                                   audio_config_base_t *config,
+                                   const AudioClient& client,
+                                   DeviceIdVector *deviceIds,
+                                   audio_session_t *sessionId,
+                                   const sp<MmapStreamCallback>& callback,
+                                   const audio_offload_info_t* offloadInfo,
+                                   sp<MmapStreamInterface>& interface,
+                                   audio_port_handle_t *handle);
 
     /**
      * Retrieve information on the mmap buffer used for audio samples transfer.

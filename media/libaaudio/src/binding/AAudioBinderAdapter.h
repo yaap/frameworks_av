@@ -60,6 +60,8 @@ public:
     aaudio_result_t exitStandby(const AAudioHandleInfo& streamHandleInfo,
                                 AudioEndpointParcelable &parcelable) override;
 
+    aaudio_result_t updateTimestamp(const AAudioHandleInfo& streamHandleInfo) override;
+
 private:
     IAAudioService* const mDelegate;
     // A unique id to recognize the service that the adapter connected to.

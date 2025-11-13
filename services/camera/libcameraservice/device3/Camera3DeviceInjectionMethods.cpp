@@ -127,6 +127,13 @@ status_t Camera3Device::Camera3DeviceInjectionMethods::stopInjection() {
         wasActive = true;
     }
 
+    res = parent->mRequestThread->setHalInterface(mBackupHalInterface);
+    if (res != OK) {
+        ALOGE("%s: Failed to restore the HalInterface in RequestThread!", __FUNCTION__);
+        injectionDisconnectImpl();
+        return res;
+    }
+
     res = replaceHalInterface(mBackupHalInterface, false);
     if (res != OK) {
         ALOGE("%s: Failed to restore the backup HalInterface!", __FUNCTION__);

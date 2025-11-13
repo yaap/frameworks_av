@@ -44,9 +44,11 @@ HwModule::~HwModule()
 {
     for (size_t i = 0; i < mOutputProfiles.size(); i++) {
         mOutputProfiles[i]->clearSupportedDevices();
+        mOutputProfiles[i]->clearRoutableDevices();
     }
     for (size_t i = 0; i < mInputProfiles.size(); i++) {
         mInputProfiles[i]->clearSupportedDevices();
+        mInputProfiles[i]->clearRoutableDevices();
     }
 }
 
@@ -72,7 +74,7 @@ status_t HwModule::addOutputProfile(const std::string& name, const audio_config_
     addDynamicDevice(devDesc);
     // Reciprocally attach the device to the module
     devDesc->attach(this);
-    profile->addSupportedDevice(devDesc);
+    profile->addSupportedRoutableDevice(devDesc);
 
     return addOutputProfile(profile);
 }
@@ -142,7 +144,7 @@ status_t HwModule::addInputProfile(const std::string& name, const audio_config_t
     addDynamicDevice(devDesc);
     // Reciprocally attach the device to the module
     devDesc->attach(this);
-    profile->addSupportedDevice(devDesc);
+    profile->addSupportedRoutableDevice(devDesc);
 
     ALOGV("addInputProfile() name %s rate %d mask 0x%08x",
           name.c_str(), config->sample_rate, config->channel_mask);
@@ -223,6 +225,7 @@ void HwModule::refreshSupportedDevices()
             continue;
         }
         stream->setSupportedDevices(sourceDevices);
+        stream->setRoutableDevices(sourceDevices);
     }
     for (const auto& stream : mOutputProfiles) {
         DeviceVector sinkDevices;
@@ -240,6 +243,7 @@ void HwModule::refreshSupportedDevices()
             sinkDevices.add(sinkDevice);
         }
         stream->setSupportedDevices(sinkDevices);
+        stream->setRoutableDevices(sinkDevices);
     }
 }
 
@@ -478,6 +482,10 @@ void HwModuleCollection::cleanUpForDevice(const sp<DeviceDescriptor> &device)
         const IOProfileCollection &profiles = audio_is_output_device(device->type()) ?
                     hwModule->getOutputProfiles() : hwModule->getInputProfiles();
         for (const auto &profile : profiles) {
+            if (profile->routesToDevice(device)) {
+                profile->removeRoutableDevice(device);
+            }
+
             // For cleanup, strong match is required
             if (profile->supportsDevice(device, true /*matchAdress*/)) {
                 ALOGV("%s: removing device %s from profile %s", __FUNCTION__,

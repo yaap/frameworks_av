@@ -5220,15 +5220,10 @@ void MPEG4Writer::Track::writeEdtsBox() {
             } else if (editDurationTicks < 0) {
                 // Only video tracks with B Frames would hit this case.
                 ALOGV("Edit list entry to negate start offset by B frames in other tracks");
-                if (com::android::media::editing::flags::
-                        stagefrightrecorder_enable_b_frames()) {
-                    int32_t mediaTimeTicks =
-                            ((trackStartOffsetUs + movieStartOffsetBFramesUs +
-                              trackStartOffsetBFramesUs) * mTimeScale - 5E5) / 1E6;
-                    addOneElstTableEntry(tkhdDurationTicks, std::abs(mediaTimeTicks), 1, 0);
-                } else {
-                    addOneElstTableEntry(tkhdDurationTicks, std::abs(editDurationTicks), 1, 0);
-                }
+                int32_t mediaTimeTicks =
+                        ((trackStartOffsetUs + movieStartOffsetBFramesUs +
+                            trackStartOffsetBFramesUs) * mTimeScale - 5E5) / 1E6;
+                addOneElstTableEntry(tkhdDurationTicks, std::abs(mediaTimeTicks), 1, 0);
             } else {
                 ALOGV("No edit list entry needed for this track");
             }

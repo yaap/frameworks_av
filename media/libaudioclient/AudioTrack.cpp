@@ -1534,7 +1534,7 @@ status_t AudioTrack::getPosition(uint32_t *position)
     // for compressed/synced data; however, we use proxy position for pure linear pcm data
     // as we do not know the capability of the HAL for pcm position support and standby.
     // There may be some latency differences between the HAL position and the proxy position.
-    if (isOffloadedOrDirect_l() && !isPurePcmData_l()) {
+    if (isOffloaded_l() || (isDirect_l() && !isPurePcmData_l())) {
         if (isOffloaded_l() && ((mState == STATE_PAUSED) || (mState == STATE_PAUSED_STOPPING))) {
             ALOGV("%s(%d): called in paused state, return cached position %u",
                 __func__, mPortId, mPausedPosition);
@@ -2616,6 +2616,10 @@ nsecs_t AudioTrack::processAudioBuffer()
         if (err != NO_ERROR) {
             if (err == TIMED_OUT || err == WOULD_BLOCK || err == -EINTR ||
                     (isOffloaded && (err == DEAD_OBJECT))) {
+                if (writtenFrames > 0) {
+                    AutoMutex lock(mLock);
+                    mFramesWritten += writtenFrames;
+                }
                 // FIXME bug 25195759
                 return 1000000;
             }

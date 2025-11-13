@@ -36,9 +36,7 @@ public:
                             bool isOut,
                             const android::content::AttributionSourceState& attributionSource,
                             pid_t creatorPid,
-                            audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE,
-                            float volume = 0.0f,
-                            bool muted = false);
+                            audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE);
     ~MmapTrack() override;
 
     status_t initCheck() const final;

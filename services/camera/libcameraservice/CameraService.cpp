@@ -38,6 +38,7 @@
 #include <aidl/AidlCameraService.h>
 #include <android-base/macros.h>
 #include <android-base/parseint.h>
+#include <android_companion_virtualdevice_flags.h>
 #include <android/companion/virtualnative/IVirtualDeviceManagerNative.h>
 #include <binder/ActivityManager.h>
 #include <binder/AppOpsManager.h>
@@ -129,6 +130,7 @@ using hardware::camera2::utils::CameraIdAndSessionConfiguration;
 using hardware::camera2::utils::ConcurrentCameraIdCombination;
 
 namespace flags = com::android::internal::camera::flags;
+namespace vd_flags = android::companion::virtualdevice::flags;
 
 // ----------------------------------------------------------------------------
 // Logging support -- this is for debugging only
@@ -2338,10 +2340,6 @@ Status CameraService::connectDeviceImpl(
 
     bool isNonSystemNdk = clientPackageNameMaybe.size() == 0;
 
-    if (!flags::data_delivery_permission_checks()) {
-        resolvedClientAttribution.pid = USE_CALLING_PID;
-    }
-
     ret = resolveAttributionSource(resolvedClientAttribution, __FUNCTION__, cameraId);
     if (!ret.isOk()) {
         logRejected(cameraId, getCallingPid(), clientAttribution.packageName.value_or(""),
@@ -4382,33 +4380,6 @@ status_t CameraService::BasicClient::handleAppOpMode(int32_t mode) {
 status_t CameraService::BasicClient::notifyCameraOpening() {
     ATRACE_CALL();
 
-    // Don't start watching until we're streaming when using permissionChecker for data delivery
-    if (!flags::data_delivery_permission_checks()) {
-        ALOGD("%s: Start camera ops, package name = %s, client UID = %d", __FUNCTION__,
-              getPackageName().c_str(), getClientUid());
-
-        if (mAppOpsManager != nullptr) {
-            // Notify app ops that the camera is not available
-            mOpsCallback = new OpsCallback(this);
-
-            mAppOpsManager->startWatchingMode(
-                    AppOpsManager::OP_CAMERA, toString16(getPackageName()),
-                    AppOpsManager::WATCH_FOREGROUND_CHANGES, mOpsCallback);
-
-            // Just check for camera access here on open - delay startOp until
-            // camera frames start streaming in startCameraStreamingOps
-            int32_t mode = mAppOpsManager->checkOp(AppOpsManager::OP_CAMERA, getClientUid(),
-                                                   toString16(getPackageName()));
-            status_t res = handleAppOpMode(mode);
-            if (res != OK) {
-                return res;
-            }
-        }
-    } else {
-        // TODO: Remove when removing the data_delivery_permission_checks flag
-        ALOGD("%s: Bypassing checkOp for uid %d", __FUNCTION__, getClientUid());
-    }
-
     mCameraOpen = true;
 
     // Transition device availability listeners from PRESENT -> NOT_AVAILABLE
@@ -4444,35 +4415,23 @@ status_t CameraService::BasicClient::startCameraStreamingOps() {
           getPackageName().c_str(), getClientUid());
 
     if (mAppOpsManager != nullptr) {
-        if (flags::data_delivery_permission_checks()) {
-            ALOGD("%s: Start data delivery for uid %d", __FUNCTION__, getClientUid());
+        ALOGD("%s: Start data delivery for uid %d", __FUNCTION__, getClientUid());
 
-            const PermissionChecker::PermissionResult result =
-                    checkPermissionsForCameraForStartDataDelivery(mCameraIdStr, mClientAttribution);
-            status_t res = handlePermissionResult(result);
-            if (res != OK) {
-                return res;
-            }
-
-            mOpsCallback = new OpsCallback(this);
-            std::for_each(AttrSourceItr{mClientAttribution}, AttrSourceItr::end(),
-                      [&](const auto& attr) {
-                          mAppOpsManager->startWatchingMode(
-                                  AppOpsManager::OP_CAMERA,
-                                  toString16(attr.packageName.value_or("")),
-                                  AppOpsManager::WATCH_FOREGROUND_CHANGES, mOpsCallback);
-                      });
-        } else {
-            ALOGD("%s: startOp for uid %d", __FUNCTION__, getClientUid());
-            int32_t mode = mAppOpsManager->startOpNoThrow(
-                    AppOpsManager::OP_CAMERA, getClientUid(), toString16(getPackageName()),
-                    /*startIfModeDefault*/ false, toString16(getClientAttributionTag()),
-                    toString16("start camera ") + toString16(mCameraIdStr));
-            status_t res = handleAppOpMode(mode);
-            if (res != OK) {
-                return res;
-            }
+        const PermissionChecker::PermissionResult result =
+                checkPermissionsForCameraForStartDataDelivery(mCameraIdStr, mClientAttribution);
+        status_t res = handlePermissionResult(result);
+        if (res != OK) {
+            return res;
         }
+
+        mOpsCallback = new OpsCallback(this);
+        std::for_each(AttrSourceItr{mClientAttribution}, AttrSourceItr::end(),
+                    [&](const auto& attr) {
+                        mAppOpsManager->startWatchingMode(
+                                AppOpsManager::OP_CAMERA,
+                                toString16(attr.packageName.value_or("")),
+                                AppOpsManager::WATCH_FOREGROUND_CHANGES, mOpsCallback);
+                    });
     }
 
     mCameraStreaming = true;
@@ -4486,23 +4445,9 @@ status_t CameraService::BasicClient::noteAppOp() {
     ALOGV("%s: Start camera noteAppOp, package name = %s, client UID = %d", __FUNCTION__,
           getPackageName().c_str(), getClientUid());
 
-    // noteAppOp is only used for when camera mute is not supported, in order
-    // to trigger the sensor privacy "Unblock" dialog
-    if (flags::data_delivery_permission_checks()) {
-        // Ignore the result, since we're only triggering the dialog
-        ALOGD("%s: Check data delivery permissions for uid %d", __FUNCTION__, getClientUid());
-        hasPermissionsForCameraForDataDelivery(std::string(), mClientAttribution);
-    } else if (mAppOpsManager != nullptr) {
-        ALOGD("%s: noteOp for uid %d", __FUNCTION__, getClientUid());
-        int32_t mode = mAppOpsManager->noteOp(
-                AppOpsManager::OP_CAMERA, getClientUid(), toString16(getPackageName()),
-                toString16(getClientAttributionTag()),
-                toString16("start camera ") + toString16(mCameraIdStr));
-        status_t res = handleAppOpMode(mode);
-        if (res != OK) {
-            return res;
-        }
-    }
+    // Ignore the result, since we're only triggering the dialog
+    ALOGD("%s: Check data delivery permissions for uid %d", __FUNCTION__, getClientUid());
+    hasPermissionsForCameraForDataDelivery(std::string(), mClientAttribution);
 
     return OK;
 }
@@ -4520,20 +4465,13 @@ status_t CameraService::BasicClient::finishCameraStreamingOps() {
     }
 
     if (mAppOpsManager != nullptr) {
-        if (flags::data_delivery_permission_checks()) {
-            ALOGD("%s: finishDataDelivery for uid %d", __FUNCTION__, getClientUid());
-            finishDataDelivery(mClientAttribution);
+        ALOGD("%s: finishDataDelivery for uid %d", __FUNCTION__, getClientUid());
+        finishDataDelivery(mClientAttribution);
 
-            // Stop watching app op changes after stop streaming
-            if (mOpsCallback != nullptr) {
-                mAppOpsManager->stopWatchingMode(mOpsCallback);
-                mOpsCallback.clear();
-            }
-        } else {
-            ALOGD("%s: finishOp for uid %d", __FUNCTION__, getClientUid());
-            mAppOpsManager->finishOp(AppOpsManager::OP_CAMERA, getClientUid(),
-                                     toString16(getPackageName()),
-                                     toString16(getClientAttributionTag()));
+        // Stop watching app op changes after stop streaming
+        if (mOpsCallback != nullptr) {
+            mAppOpsManager->stopWatchingMode(mOpsCallback);
+            mOpsCallback.clear();
         }
         mCameraStreaming = false;
     }
@@ -4565,15 +4503,6 @@ status_t CameraService::BasicClient::notifyCameraClosing() {
             sCameraService->updateStatus(StatusInternal::PRESENT,
                     mCameraIdStr, rejected);
         }
-    }
-
-    // When using the data delivery permission checks, the open state does not involve AppOps
-    if (!flags::data_delivery_permission_checks()) {
-        // Always stop watching, even if no camera op is active
-        if (mOpsCallback != nullptr && mAppOpsManager != nullptr) {
-            mAppOpsManager->stopWatchingMode(mOpsCallback);
-        }
-        mOpsCallback.clear();
     }
 
     sCameraService->mUidPolicy->unregisterMonitorUid(getClientUid(), /*closeCamera*/ true);
@@ -4612,30 +4541,19 @@ void CameraService::BasicClient::opChanged(int32_t op, const String16&) {
     }
 
     PermissionChecker::PermissionResult res;
-    if (flags::data_delivery_permission_checks()) {
-        int32_t appOpMode = AppOpsManager::MODE_ALLOWED;
-        std::for_each(AttrSourceItr{mClientAttribution}, AttrSourceItr::end(),
-                [&](const auto& attr) {
-                    appOpMode = std::max(appOpMode, mAppOpsManager->checkOp(
-                            AppOpsManager::OP_CAMERA, attr.uid,
-                            toString16(attr.packageName.value_or(""))));
-                });
-        res = appOpModeToPermissionResult(appOpMode);
-        ALOGV("checkOp returns: %d, %s ", appOpMode,
-              appOpMode == AppOpsManager::MODE_ALLOWED   ? "ALLOWED"
-              : appOpMode == AppOpsManager::MODE_IGNORED ? "IGNORED"
-              : appOpMode == AppOpsManager::MODE_ERRORED ? "ERRORED"
-                                                         : "UNKNOWN");
-    } else {
-        int32_t appOpMode = mAppOpsManager->checkOp(AppOpsManager::OP_CAMERA, getClientUid(),
-                                                    toString16(getPackageName()));
-        res = appOpModeToPermissionResult(appOpMode);
-        ALOGV("checkOp returns: %d, %s ", appOpMode,
-              appOpMode == AppOpsManager::MODE_ALLOWED   ? "ALLOWED"
-              : appOpMode == AppOpsManager::MODE_IGNORED ? "IGNORED"
-              : appOpMode == AppOpsManager::MODE_ERRORED ? "ERRORED"
-                                                         : "UNKNOWN");
-    }
+    int32_t appOpMode = AppOpsManager::MODE_ALLOWED;
+    std::for_each(AttrSourceItr{mClientAttribution}, AttrSourceItr::end(),
+            [&](const auto& attr) {
+                appOpMode = std::max(appOpMode, mAppOpsManager->checkOp(
+                        AppOpsManager::OP_CAMERA, attr.uid,
+                        toString16(attr.packageName.value_or(""))));
+            });
+    res = appOpModeToPermissionResult(appOpMode);
+    ALOGV("checkOp returns: %d, %s ", appOpMode,
+            appOpMode == AppOpsManager::MODE_ALLOWED   ? "ALLOWED"
+            : appOpMode == AppOpsManager::MODE_IGNORED ? "IGNORED"
+            : appOpMode == AppOpsManager::MODE_ERRORED ? "ERRORED"
+                                                        : "UNKNOWN");
 
     if (res == PermissionChecker::PERMISSION_HARD_DENIED) {
         ALOGI("Camera %s: Access for \"%s\" revoked", mCameraIdStr.c_str(),
@@ -4648,18 +4566,15 @@ void CameraService::BasicClient::opChanged(int32_t op, const String16&) {
         // Uid may be active, but not visible to the user (e.g. PROCESS_STATE_FOREGROUND_SERVICE).
         // If not visible, but still active, then we want to block instead of muting the camera.
         int32_t procState = ActivityManager::PROCESS_STATE_NONEXISTENT;
-        if (flags::data_delivery_permission_checks()) {
-            // Use the proc state of the last uid in the chain (ultimately receiving the data)
-            // when determining whether to mute or block
-            int32_t uid = -1;
-            std::for_each(AttrSourceItr{mClientAttribution}, AttrSourceItr::end(),
-                      [&](const auto& attr) {
-                          uid = static_cast<uid_t>(attr.uid);
-                      });
-            procState = getUidProcessState(uid);
-        } else {
-            procState = sCameraService->mUidPolicy->getProcState(getClientUid());
-        }
+
+        // Use the proc state of the last uid in the chain (ultimately receiving the data)
+        // when determining whether to mute or block
+        int32_t uid = -1;
+        std::for_each(AttrSourceItr{mClientAttribution}, AttrSourceItr::end(),
+                    [&](const auto& attr) {
+                        uid = static_cast<uid_t>(attr.uid);
+                    });
+        procState = getUidProcessState(uid);
         bool isUidVisible = (procState <= ActivityManager::PROCESS_STATE_BOUND_TOP);
 
         bool isCameraPrivacyEnabled;
@@ -5632,7 +5547,7 @@ static bool tryLock(Mutex& mutex)
     return locked;
 }
 
-void CameraService::cacheDump() {
+void CameraService::cacheDump(const std::string& cameraId) {
     if (mMemFd != -1) {
         const Vector<String16> args;
         ATRACE_CALL();
@@ -5640,16 +5555,12 @@ void CameraService::cacheDump() {
         // cacheDump will not be called during the second disconnect.
         Mutex::Autolock lock(mServiceLock);
 
-        Mutex::Autolock l(mCameraStatesLock);
-        // Start collecting the info for open sessions and store it in temp file.
-        for (const auto& state : mCameraStates) {
-            std::string cameraId = state.first;
-            auto clientDescriptor = mActiveClientManager.get(cameraId);
-            if (clientDescriptor != nullptr) {
-                dprintf(mMemFd, "== Camera device %s dynamic info: ==\n", cameraId.c_str());
-                // Log the current open session info before device is disconnected.
-                dumpOpenSessionClientLogs(mMemFd, args, cameraId);
-            }
+        // Start collecting the info for calling camera Id and store it in temp file.
+        auto clientDescriptor = mActiveClientManager.get(cameraId);
+        if (clientDescriptor != nullptr) {
+            dprintf(mMemFd, "== Camera device %s dynamic info: ==\n", cameraId.c_str());
+            // Log the current open session info before device is disconnected.
+            dumpOpenSessionClientLogs(mMemFd, args, cameraId);
         }
     }
 }
@@ -5967,8 +5878,13 @@ void CameraService::updateStatus(StatusInternal status, const std::string& camer
                     mappedCameraId = kVirtualDeviceBackCameraId;
                 } else if (androidLensFacing == ANDROID_LENS_FACING_FRONT) {
                     mappedCameraId = kVirtualDeviceFrontCameraId;
+                } else if (vd_flags::external_virtual_cameras() &&
+                           androidLensFacing == ANDROID_LENS_FACING_EXTERNAL) {
+                    // For virtual external cameras we expose to apps the non numerical cameraId
+                    // as generated by the HAL (e.g. "v12_345")
+                    mappedCameraId = cameraId;
                 } else {
-                    ALOGD("%s: Not adding entry for an external camera of a virtual device",
+                    ALOGE("%s: Not adding entry for an unknown camera of a virtual device",
                           __func__);
                 }
                 if (!mappedCameraId.empty()) {

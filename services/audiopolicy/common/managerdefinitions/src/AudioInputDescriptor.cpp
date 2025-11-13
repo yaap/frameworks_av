@@ -237,7 +237,8 @@ status_t AudioInputDescriptor::open(const audio_config_t *config,
                                                   String8(mDevice->address().c_str()),
                                                   source,
                                                   static_cast<audio_input_flags_t>(
-                                                          flags & mProfile->getFlags()));
+                                                          flags & mProfile->getFlags()),
+                                                  mProfile->getHalId());
     LOG_ALWAYS_FATAL_IF(mDevice->type() != deviceType,
                         "%s openInput returned device %08x when given device %08x",
                         __FUNCTION__, mDevice->type(), deviceType);

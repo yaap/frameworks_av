@@ -3204,8 +3204,14 @@ status_t CameraProviderManager::ProviderInfo::DeviceInfo3::getCameraInfo(
         return NAME_NOT_FOUND;
     }
 
-    if (rotationOverride == hardware::ICameraService::ROTATION_OVERRIDE_OVERRIDE_TO_PORTRAIT
-            && (info->orientation == 0 || info->orientation == 180)) {
+    bool rotationAndSensorOverride = rotationOverride ==
+            hardware::ICameraService::ROTATION_OVERRIDE_OVERRIDE_TO_PORTRAIT;
+    bool rotationOnlyOverride = rotationOverride ==
+            hardware::ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY;
+    bool reverseRotationOnlyOverride =
+            wm_flags::enable_camera_compat_check_device_rotation_bugfix() && rotationOverride ==
+                    hardware::ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY_REVERSE;
+    if (rotationAndSensorOverride && (info->orientation == 0 || info->orientation == 180)) {
         *portraitRotation = 90;
         if (info->facing == hardware::CAMERA_FACING_FRONT) {
             info->orientation = (360 + info->orientation - 90) % 360;
@@ -3213,9 +3219,15 @@ status_t CameraProviderManager::ProviderInfo::DeviceInfo3::getCameraInfo(
             info->orientation = (360 + info->orientation + 90) % 360;
         }
     } else if (freeform_compat_enabled &&
-            rotationOverride == hardware::ICameraService::ROTATION_OVERRIDE_ROTATION_ONLY
-            && (info->orientation == 90 || info->orientation == 270)) {
-        *portraitRotation = info->facing == hardware::CAMERA_FACING_BACK ? 90 : 270;
+            (rotationOnlyOverride || reverseRotationOnlyOverride) &&
+                    (info->orientation == 90 || info->orientation == 270)) {
+        // Check device rotation: display rotation will be sandboxed, therefore rotate-and-crop
+        // needs to take display rotation into account.
+        if (rotationOnlyOverride) {
+            *portraitRotation = info->facing == hardware::CAMERA_FACING_BACK ? 90 : 270;
+        } else {
+            *portraitRotation = info->facing == hardware::CAMERA_FACING_BACK ? 270 : 90;
+        }
     } else {
         *portraitRotation = 0;
     }
