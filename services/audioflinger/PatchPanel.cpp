@@ -27,7 +27,6 @@
 #include <media/AudioValidator.h>
 #include <media/DeviceDescriptorBase.h>
 #include <media/PatchBuilder.h>
-#include <mediautils/ServiceUtilities.h>
 #include <utils/Log.h>
 
 // ----------------------------------------------------------------------------
@@ -362,7 +361,7 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
                         }
                     }
                 } else {
-                    sp<DeviceHalInterface> hwDevice = audioHwDevice->hwDevice();
+                    const sp<DeviceHalInterface>& hwDevice = audioHwDevice->hwDevice();
                     status = hwDevice->createAudioPatch(patch->num_sources,
                                                         patch->sources,
                                                         patch->num_sinks,
@@ -374,8 +373,9 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
         } break;
         case AUDIO_PORT_TYPE_MIX: {
             audio_module_handle_t srcModule =  patch->sources[0].ext.mix.hw_module;
-            ssize_t index = mAfPatchPanelCallback->getAudioHwDevs_l().indexOfKey(srcModule);
-            if (index < 0) {
+            const auto& hwDevs = mAfPatchPanelCallback->getAudioHwDevs_l();
+            auto it = hwDevs.find(srcModule);
+            if (it == hwDevs.end()) {
                 ALOGW("%s() bad src hw module %d", __func__, srcModule);
                 status = BAD_VALUE;
                 goto exit;
@@ -937,12 +937,14 @@ void PatchPanel::notifyStreamClosed(audio_io_handle_t stream)
 AudioHwDevice* PatchPanel::findAudioHwDeviceByModule_l(audio_module_handle_t module)
 {
     if (module == AUDIO_MODULE_HANDLE_NONE) return nullptr;
-    ssize_t index = mAfPatchPanelCallback->getAudioHwDevs_l().indexOfKey(module);
-    if (index < 0) {
+    const auto& hwDevs = mAfPatchPanelCallback->getAudioHwDevs_l();
+    if (auto it = hwDevs.find(module);
+            it != hwDevs.end()) {
+        return it->second;
+    } else {
         ALOGW("%s() bad hw module %d", __func__, module);
         return nullptr;
     }
-    return mAfPatchPanelCallback->getAudioHwDevs_l().valueAt(index);
 }
 
 sp<DeviceHalInterface> PatchPanel::findHwDeviceByModule_l(audio_module_handle_t module)

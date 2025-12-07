@@ -35,9 +35,9 @@ AudioStreamOut::AudioStreamOut(AudioHwDevice *dev)
 {
 }
 
-// This must be defined here together with the HAL includes above and
-// not solely in the header.
-AudioStreamOut::~AudioStreamOut() = default;
+AudioStreamOut::~AudioStreamOut() {
+    if (stream != nullptr) stream->close();
+}
 
 sp<DeviceHalInterface> AudioStreamOut::hwDev() const
 {

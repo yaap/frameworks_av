@@ -43,10 +43,14 @@ namespace android {
 
 RingBufferConsumer::RingBufferConsumer(uint64_t consumerUsage, int bufferCount)
     :
-    ConsumerBase(), mBufferCount(bufferCount), mLatestTimestamp(0) {
-    mConsumer->setConsumerUsageBits(consumerUsage);
-    mConsumer->setMaxAcquiredBufferCount(bufferCount);
+    ConsumerBase(), mConsumerUsage(consumerUsage), mBufferCount(bufferCount), mLatestTimestamp(0) {
     assert(bufferCount > 0);
+}
+
+void RingBufferConsumer::onFirstRef() {
+    ConsumerBase::onFirstRef();
+    mConsumer->setConsumerUsageBits(mConsumerUsage);
+    mConsumer->setMaxAcquiredBufferCount(mBufferCount);
 }
 
 RingBufferConsumer::~RingBufferConsumer() {

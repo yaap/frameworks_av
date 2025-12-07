@@ -865,7 +865,7 @@ media_status_t AImage_getDataSpace(const AImage* _Nonnull image,
  * for more details. This transform is necessary to compensate for transforms
  * that the stream content producer may implicitly apply to the content. By
  * forcing users of an AImage to apply this transform we avoid performing an
- * extracopy of the data that would be needed to hide the transform from the user.</p>
+ * extra copy of the data that would be needed to hide the transform from the user.</p>
  *
  * Available since API level 37.
  *

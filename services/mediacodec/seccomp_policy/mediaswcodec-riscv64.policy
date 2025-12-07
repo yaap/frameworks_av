@@ -48,6 +48,7 @@ nanosleep: 1
 sched_setscheduler: 1
 uname: 1
 memfd_create: 1
+fsetxattr: 1
 ftruncate: 1
 getdents64: 1
 ppoll: 1

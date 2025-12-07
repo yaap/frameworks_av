@@ -204,12 +204,12 @@ public class Decoder implements IBufferXfer.IProducer {
     }
 
     public void setupDecoder(Surface surface, boolean render,
-            boolean useFrameReleaseQueue, int frameRate) {
+            boolean useFrameReleaseQueue, double frameRate) {
         setupDecoder(surface, render, useFrameReleaseQueue, frameRate, -1);
     }
 
     public void setupDecoder(Surface surface, boolean render,
-            boolean useFrameReleaseQueue, int frameRate, int numInFramesRequired) {
+            boolean useFrameReleaseQueue, double frameRate, int numInFramesRequired) {
         mSignalledError = false;
         mOutputStream = null;
         mSurface = surface;
@@ -589,8 +589,12 @@ public class Decoder implements IBufferXfer.IProducer {
                     Log.d(TAG, "Error in getting MediaCodec buffer" + e.toString());
                 }
             } else {
-                mFrameReleaseQueue.pushFrame(mNumOutputFrame, outputBufferId,
+                if ((outputBufferInfo.flags & (MediaCodec.BUFFER_FLAG_CODEC_CONFIG)) == 0) {
+                    mFrameReleaseQueue.pushFrame(mNumOutputFrame, outputBufferId,
                                                 outputBufferInfo.presentationTimeUs);
+                } else {
+                    mediaCodec.releaseOutputBuffer(outputBufferId, mRender);
+                }
             }
         } else if (mConsumer != null && mSurface == null) {
             ArrayDeque<MediaCodec.BufferInfo> infos = new ArrayDeque<>();

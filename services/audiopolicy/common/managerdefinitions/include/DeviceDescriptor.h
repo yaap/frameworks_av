@@ -94,7 +94,7 @@ public:
 
     void setEncapsulationInfoFromHal(AudioPolicyClientInterface *clientInterface);
 
-    void setPreferredConfig(const audio_config_base_t * preferredConfig);
+    bool setPreferredConfig(const audio_config_base_t * preferredConfig);
 
     void dump(String8 *dst, int spaces, bool verbose = true) const;
 
@@ -111,6 +111,7 @@ private:
     bool                mIsDynamic = false;
     std::string         mDeclaredAddress; // Original device address
     std::optional<audio_config_base_t> mPreferredConfig;
+    int mPreferredConfigUsedCount = 0;
 };
 
 class DeviceVector : public SortedVector<sp<DeviceDescriptor> >

@@ -306,11 +306,11 @@ class CameraDeviceBase : public virtual FrameProducer {
     virtual status_t beginConfigure() = 0;
 
     /**
-     * In shared session mode, this function retrieves the stream ID associated with a specific
+     * In shared session mode, this function retrieves the stream IDs associated with a specific
      * output configuration.
      */
-    virtual status_t getSharedStreamId(const android::camera3::OutputStreamInfo &config,
-            int *streamId) = 0;
+    virtual status_t getSharedStreamIds(const android::camera3::OutputStreamInfo &config,
+            std::vector<int>& streamIds) = 0;
 
     /**
      * In shared session mode, this function add surfaces to an existing shared stream ID.

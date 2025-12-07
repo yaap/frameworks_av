@@ -41,10 +41,6 @@ void RampLinear::setTarget(float target) {
         return;
     }
     mTarget.store(target);
-    // If the ramp has not been used then start immediately at this level.
-    if (mLastCallCount == kInitialCallCount) {
-        forceCurrent(target);
-    }
 }
 
 float RampLinear::interpolateCurrent() {

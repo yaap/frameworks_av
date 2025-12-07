@@ -910,29 +910,36 @@ status_t Camera3OutputStream::disconnectLocked() {
               "(error %d %s)",
               __FUNCTION__, mId, res, strerror(-res));
         mState = STATE_ERROR;
-        return res;
     }
 
+    status_t bufferRes = OK;
     // Since device is already idle, there is no getBuffer call to buffer manager, unregister the
     // stream at this point should be safe.
     if (mUseBufferManager) {
-        res = mBufferManager->unregisterStream(getId(), getStreamSetId(), isMultiResolution());
-        if (res != OK) {
+        bufferRes = mBufferManager->unregisterStream(
+            getId(), getStreamSetId(), isMultiResolution());
+        if (bufferRes != OK) {
             ALOGE("%s: Unable to unregister stream %d from buffer manager "
-                    "(error %d %s)", __FUNCTION__, mId, res, strerror(-res));
+                    "(error %d %s)", __FUNCTION__, mId, bufferRes, strerror(-bufferRes));
             mState = STATE_ERROR;
-            return res;
         }
         // Note that, to make prepare/teardown case work, we must not mBufferManager.clear(), as
         // the stream is still in usable state after this call.
         mUseBufferManager = false;
     }
 
-    mState = (mState == STATE_IN_RECONFIG) ? STATE_IN_CONFIG
-                                           : STATE_CONSTRUCTED;
-
     mDequeueBufferLatency.log("Stream %d dequeueBuffer latency histogram", mId);
     mDequeueBufferLatency.reset();
+
+    if (mState == STATE_ERROR) {
+        if (bufferRes == OK) {
+            return res;
+        }
+        return bufferRes;
+    }
+
+    mState = (mState == STATE_IN_RECONFIG) ? STATE_IN_CONFIG
+                                           : STATE_CONSTRUCTED;
     return OK;
 }
 

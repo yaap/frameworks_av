@@ -72,12 +72,14 @@ public:
                                               int32_t numFrames) {
         // Just handle PCM_16 and PCM_FLOAT for testing
         if (!fillData(stream, audioData, numFrames)) {
+            printf("Failed to fill data, stop the stream\n");
             return AAUDIO_CALLBACK_RESULT_STOP;
         }
         mFramesWritten += numFrames;
         if (mStreamFrames > 0 && mFramesWritten >= mStreamFrames) {
             if (auto result = setOffloadEndOfStream(); result != AAUDIO_OK) {
-                printf("Failed to set offload end of stream, stopping the stream now");
+                printf("Failed to set offload end of stream, error=%d, stopping the stream now\n",
+                       result);
                 return AAUDIO_CALLBACK_RESULT_STOP;
             }
             (void) setOffloadDelayPadding(mDelay, mPadding);
@@ -163,6 +165,7 @@ private:
                 }
             } break;
             default:
+                printf("Unknown format=%d", AAudioStream_getFormat(stream));
                 return false;
         }
         return true;
@@ -263,7 +266,7 @@ int main(int argc, char **argv) {
     (void) player.setOffloadDelayPadding(delay, padding);
 
     if (auto result = player.start(); result != AAUDIO_OK) {
-        printf("Failed to start stream, error=%d", result);
+        printf("Failed to start stream, error=%d\n", result);
         exit(EXIT_FAILURE);
     } else if (!useDataCallback) {
         player.writeData();

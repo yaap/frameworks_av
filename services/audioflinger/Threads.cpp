@@ -28,9 +28,9 @@
 #include "ResamplerBufferProvider.h"
 
 #include <afutils/FallibleLockGuard.h>
-#include <afutils/Permission.h>
 #include <afutils/TypedLogger.h>
 #include <afutils/Vibrator.h>
+#include <android/media/BnMmapStream.h>
 #include <audio_utils/MelProcessor.h>
 #include <audio_utils/Metadata.h>
 #include <audio_utils/Trace.h>
@@ -89,6 +89,7 @@
 #include <utils/Log.h>
 #include <utils/Trace.h>
 
+#include <algorithm>
 #include <fcntl.h>
 #include <linux/futex.h>
 #include <math.h>
@@ -114,16 +115,6 @@
 #define ALOGVV(a...) do { } while(0)
 #endif
 
-// TODO: Move these macro/inlines to a header file.
-#define max(a, b) ((a) > (b) ? (a) : (b))
-
-template <typename T>
-static inline T min(const T& a, const T& b)
-{
-    return a < b ? a : b;
-}
-
-using com::android::media::audio::audioserver_permissions;
 using com::android::media::permission::PermissionEnum::CAPTURE_AUDIO_HOTWORD;
 using com::android::media::permission::ValidatedAttributionSourceState;
 namespace audioserver_flags = com::android::media::audioserver;
@@ -661,7 +652,9 @@ ThreadBase::ThreadBase(const sp<IAfThreadCallback>& afThreadCallback, audio_io_h
         mSystemReady(systemReady),
         mSignalPending(false),
         mInput(input),
-        mOutput(output)
+        mOutput(output),
+        mIsOffload(output != nullptr &&
+                (output->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) != 0)
 {
     mThreadMetrics.logConstructor(getpid(), threadTypeToString(type), id);
     memset(&mPatch, 0, sizeof(struct audio_patch));
@@ -731,17 +724,17 @@ status_t ThreadBase::setParameters(const String8& keyValuePairs)
 
 // sendConfigEvent_l() must be called with ThreadBase::mLock held
 // Can temporarily release the lock if waiting for a reply from processConfigEvents_l().
-status_t ThreadBase::sendConfigEvent_l(sp<ConfigEvent>& event)
+status_t ThreadBase::sendConfigEvent_l(const sp<ConfigEvent>& event)
 NO_THREAD_SAFETY_ANALYSIS  // condition variable
 {
     status_t status = NO_ERROR;
 
     if (event->mRequiresSystemReady && !mSystemReady) {
         event->mWaitStatus = false;
-        mPendingConfigEvents.add(event);
+        mPendingConfigEvents.push_back(event);
         return status;
     }
-    mConfigEvents.add(event);
+    mConfigEvents.push_back(event);
     ALOGV("sendConfigEvent_l() num events %zu event %d", mConfigEvents.size(), event->mType);
     mWaitWorkCV.notify_one();
     mutex().unlock();
@@ -888,10 +881,10 @@ void ThreadBase::processConfigEvents_l()
 {
     bool configChanged = false;
 
-    while (!mConfigEvents.isEmpty()) {
+    while (!mConfigEvents.empty()) {
         ALOGV("processConfigEvents_l() remaining events %zu", mConfigEvents.size());
-        sp<ConfigEvent> event = mConfigEvents[0];
-        mConfigEvents.removeAt(0);
+        sp<ConfigEvent> event = mConfigEvents.front();
+        mConfigEvents.pop_front();
         switch (event->mType) {
         case CFG_EVENT_PRIO: {
             PrioConfigEventData *data = (PrioConfigEventData *)event->mData.get();
@@ -967,7 +960,7 @@ void ThreadBase::processConfigEvents_l()
                 event->mCondition.notify_one();
             }
         }
-        ALOGV_IF(mConfigEvents.isEmpty(), "processConfigEvents_l() DONE thread %p", this);
+        ALOGV_IF(mConfigEvents.empty(), "processConfigEvents_l() DONE thread %p", this);
     }
 
     if (configChanged) {
@@ -1207,6 +1200,8 @@ String16 ThreadBase::getWakeLockTag()
         return String16("AudioSpatial");
     case BIT_PERFECT:
         return String16("AudioBitPerfect");
+    case DIRECT_RECORD:
+        return String16("AudioDirectIn");
     default:
         ALOG_ASSERT(false);
         return String16("AudioUnknown");
@@ -1227,10 +1222,8 @@ void ThreadBase::acquireWakeLock_l()
                     {} /* historyTag */);
         if (status.isOk()) {
             mWakeLockToken = binder;
-            if (media::psh_utils::AudioPowerManager::enabled()) {
-                mThreadToken = media::psh_utils::createAudioThreadToken(
-                        getTid(), String8(getWakeLockTag()).c_str());
-            }
+            mThreadToken = media::psh_utils::createAudioThreadToken(
+                    getTid(), String8(getWakeLockTag()).c_str());
         }
         ALOGV("acquireWakeLock_l() %s status %d", mThreadName, status.exceptionCode());
     }
@@ -1344,18 +1337,16 @@ void ThreadBase::setEffectSuspended_l(
 
 void ThreadBase::checkSuspendOnAddEffectChain_l(const sp<IAfEffectChain>& chain)
 {
-    ssize_t index = mSuspendedSessions.indexOfKey(chain->sessionId());
-    if (index < 0) {
+    auto it = mSuspendedSessions.find(chain->sessionId());
+    if (it == mSuspendedSessions.end()) {
         return;
     }
 
-    const KeyedVector <int, sp<SuspendedSessionDesc> >& sessionEffects =
-            mSuspendedSessions.valueAt(index);
+    const std::map<int, sp<SuspendedSessionDesc>>& sessionEffects = it->second;
 
-    for (size_t i = 0; i < sessionEffects.size(); i++) {
-        const sp<SuspendedSessionDesc>& desc = sessionEffects.valueAt(i);
+    for (const auto& [key, desc] : sessionEffects) {
         for (int j = 0; j < desc->mRefCount; j++) {
-            if (sessionEffects.keyAt(i) == IAfEffectChain::kKeyForSuspendAll) {
+            if (key == IAfEffectChain::kKeyForSuspendAll) {
                 chain->setEffectSuspendedAll_l(true);
             } else {
                 ALOGV("checkSuspendOnAddEffectChain_l() suspending effects %08x",
@@ -1370,21 +1361,21 @@ void ThreadBase::updateSuspendedSessions_l(const effect_uuid_t* type,
                                                          bool suspend,
                                                          audio_session_t sessionId)
 {
-    ssize_t index = mSuspendedSessions.indexOfKey(sessionId);
-
-    KeyedVector <int, sp<SuspendedSessionDesc> > sessionEffects;
+    const auto it = mSuspendedSessions.find(sessionId);
+    std::map<int, sp<SuspendedSessionDesc>> sessionEffects;
 
     if (suspend) {
-        if (index >= 0) {
-            sessionEffects = mSuspendedSessions.valueAt(index);
+        if (it != mSuspendedSessions.end()) {
+            sessionEffects = it->second;
         } else {
-            mSuspendedSessions.add(sessionId, sessionEffects);
+            // empty effects map to be filled in below as needed.
+            mSuspendedSessions[sessionId] = sessionEffects;
         }
     } else {
-        if (index < 0) {
+        if (it == mSuspendedSessions.end()) {
             return;
         }
-        sessionEffects = mSuspendedSessions.valueAt(index);
+        sessionEffects = it->second;
     }
 
 
@@ -1392,38 +1383,38 @@ void ThreadBase::updateSuspendedSessions_l(const effect_uuid_t* type,
     if (type != NULL) {
         key = type->timeLow;
     }
-    index = sessionEffects.indexOfKey(key);
+    const auto it2 = sessionEffects.find(key);
 
     sp<SuspendedSessionDesc> desc;
     if (suspend) {
-        if (index >= 0) {
-            desc = sessionEffects.valueAt(index);
+        if (it2 != sessionEffects.end()) {
+            desc = it2->second;
         } else {
             desc = new SuspendedSessionDesc();
             if (type != NULL) {
                 desc->mType = *type;
             }
-            sessionEffects.add(key, desc);
+            sessionEffects[key] = desc;
             ALOGV("updateSuspendedSessions_l() suspend adding effect %08x", key);
         }
         desc->mRefCount++;
     } else {
-        if (index < 0) {
+        if (it2 == sessionEffects.end()) {
             return;
         }
-        desc = sessionEffects.valueAt(index);
+        desc = it2->second;
         if (--desc->mRefCount == 0) {
             ALOGV("updateSuspendedSessions_l() restore removing effect %08x", key);
-            sessionEffects.removeItemsAt(index);
-            if (sessionEffects.isEmpty()) {
+            sessionEffects.erase(it2);
+            if (sessionEffects.empty()) {
                 ALOGV("updateSuspendedSessions_l() restore removing session %d",
                                  sessionId);
-                mSuspendedSessions.removeItem(sessionId);
+                mSuspendedSessions.erase(it);
             }
         }
     }
-    if (!sessionEffects.isEmpty()) {
-        mSuspendedSessions.replaceValueFor(sessionId, sessionEffects);
+    if (!sessionEffects.empty()) {
+        mSuspendedSessions[sessionId] = sessionEffects;
     }
 }
 
@@ -1453,21 +1444,31 @@ NO_THREAD_SAFETY_ANALYSIS  // manual locking
 }
 
 // checkEffectCompatibility_l() must be called with ThreadBase::mutex() held
-status_t RecordThread::checkEffectCompatibility_l(
+status_t ThreadBase::checkEffectCompatibility_l(
         const effect_descriptor_t *desc, audio_session_t sessionId)
 {
-    // No global output effect sessions on record threads
-    if (sessionId == AUDIO_SESSION_OUTPUT_MIX
+    if (isOutput()) {
+        // no preprocessing on playback threads
+        if ((desc->flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_PRE_PROC) {
+            ALOGW("%s: pre processing effect %s created on playback thread %s",
+                __func__, desc->name, mThreadName);
+            return BAD_VALUE;
+        }
+    } else {
+        // No global output effect sessions on record threads
+        if (sessionId == AUDIO_SESSION_OUTPUT_MIX
             || sessionId == AUDIO_SESSION_OUTPUT_STAGE) {
-        ALOGW("checkEffectCompatibility_l(): global effect %s on record thread %s",
-                desc->name, mThreadName);
-        return BAD_VALUE;
-    }
-    // only pre processing effects on record thread
-    if ((desc->flags & EFFECT_FLAG_TYPE_MASK) != EFFECT_FLAG_TYPE_PRE_PROC) {
-        ALOGW("checkEffectCompatibility_l(): non pre processing effect %s on record thread %s",
-                desc->name, mThreadName);
-        return BAD_VALUE;
+            ALOGW("%s: global effect (session %d) %s on record thread %s",
+                  __func__, sessionId, desc->name, mThreadName);
+            return BAD_VALUE;
+        }
+
+        // only preprocessing effects on record threads for now.
+        if ((desc->flags & EFFECT_FLAG_TYPE_MASK) != EFFECT_FLAG_TYPE_PRE_PROC) {
+            ALOGW("%s: non pre processing effect %s on record thread %s",
+                  __func__, desc->name, mThreadName);
+            return BAD_VALUE;
+        }
     }
 
     // always allow effects without processing load or latency
@@ -1475,43 +1476,7 @@ status_t RecordThread::checkEffectCompatibility_l(
         return NO_ERROR;
     }
 
-    audio_input_flags_t flags = mInput->flags;
-    if (hasFastCapture() || (flags & AUDIO_INPUT_FLAG_FAST)) {
-        if (flags & AUDIO_INPUT_FLAG_RAW) {
-            ALOGW("checkEffectCompatibility_l(): effect %s on record thread %s in raw mode",
-                  desc->name, mThreadName);
-            return BAD_VALUE;
-        }
-        if ((desc->flags & EFFECT_FLAG_HW_ACC_TUNNEL) == 0) {
-            ALOGW("checkEffectCompatibility_l(): non HW effect %s on record thread %s in fast mode",
-                  desc->name, mThreadName);
-            return BAD_VALUE;
-        }
-    }
-
-    if (IAfEffectModule::isHapticGenerator(&desc->type)) {
-        ALOGE("%s(): HapticGenerator is not supported in RecordThread", __func__);
-        return BAD_VALUE;
-    }
-    return NO_ERROR;
-}
-
-// checkEffectCompatibility_l() must be called with ThreadBase::mutex() held
-status_t PlaybackThread::checkEffectCompatibility_l(
-        const effect_descriptor_t *desc, audio_session_t sessionId)
-{
-    // no preprocessing on playback threads
-    if ((desc->flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_PRE_PROC) {
-        ALOGW("%s: pre processing effect %s created on playback"
-                " thread %s", __func__, desc->name, mThreadName);
-        return BAD_VALUE;
-    }
-
-    // always allow effects without processing load or latency
-    if ((desc->flags & EFFECT_FLAG_NO_PROCESS_MASK) == EFFECT_FLAG_NO_PROCESS) {
-        return NO_ERROR;
-    }
-
+    // Note mHapticChannelCount == 0 for Record threads.
     if (IAfEffectModule::isHapticGenerator(&desc->type) && mHapticChannelCount == 0) {
         ALOGW("%s: thread (%s) doesn't support haptic playback while the effect is HapticGenerator",
               __func__, threadTypeToString(mType));
@@ -1520,8 +1485,8 @@ status_t PlaybackThread::checkEffectCompatibility_l(
 
     if (IAfEffectModule::isSpatializer(&desc->type)
             && mType != SPATIALIZER) {
-        ALOGW("%s: attempt to create a spatializer effect on a thread of type %d",
-                __func__, mType);
+        ALOGW("%s: attempt to create a spatializer effect on a thread %s",
+                __func__, threadTypeToString(mType));
         return BAD_VALUE;
     }
 
@@ -1566,12 +1531,6 @@ status_t PlaybackThread::checkEffectCompatibility_l(
             }
         }
     } break;
-    case OFFLOAD:
-        // nothing actionable on offload threads, if the effect:
-        //   - is offloadable: the effect can be created
-        //   - is NOT offloadable: the effect should still be created, but EffectHandle::enable()
-        //     will take care of invalidating the tracks of the thread
-        break;
     case DIRECT:
         // Reject any effect on Direct output threads for now, since the format of
         // mSinkBuffer is not guaranteed to be compatible with effect processing (PCM 16 stereo).
@@ -1641,6 +1600,48 @@ status_t PlaybackThread::checkEffectCompatibility_l(
             ALOGW("%s: effect %s not supported as there is a bit-perfect track with session as %d",
                   __func__, desc->name, sessionId);
             return BAD_VALUE;
+        }
+        break;
+    case DIRECT_RECORD:
+    case RECORD: {
+            const audio_input_flags_t flags = mInput->flags;
+            if (hasFastCapture() || (flags & AUDIO_INPUT_FLAG_FAST)) {
+                if (flags & AUDIO_INPUT_FLAG_RAW) {
+                    ALOGW("%s: effect %s on record thread %s in raw mode",
+                          __func__, desc->name, mThreadName);
+                    return BAD_VALUE;
+                }
+                if ((desc->flags & EFFECT_FLAG_HW_ACC_TUNNEL) == 0) {
+                    ALOGW("%s: non HW effect %s on record thread %s in fast mode",
+                          __func__, desc->name, mThreadName);
+                    return BAD_VALUE;
+                }
+            }
+        }
+        break;
+    case MMAP_CAPTURE:
+    case MMAP_PLAYBACK:
+        if (!mOffloadInfo.has_value()) {
+            ALOGW("%s: cannot use effect %s session id %d on MMap thread %s",
+                    __func__, desc->name, sessionId, mThreadName);
+            return BAD_VALUE;
+        }
+    FALLTHROUGH_INTENDED;
+    case OFFLOAD:
+        // nothing actionable on offload threads, if the effect:
+        //   - is offloadable: the effect can be created
+        //   - is NOT offloadable: the effect should still be created,
+        //     but EffectHandle::enable() and ThreadBase::onEffectEnable()
+        //     will take care of invalidating the tracks of the thread.
+        //     Also APM::openDirectOutput will prevent opening if there is a
+        //     non-offloadable effect.
+
+        if ((desc->flags & EFFECT_FLAG_OFFLOAD_MASK) == EFFECT_FLAG_OFFLOAD_SUPPORTED) {
+            ALOGV("%s: offload effect %s accepted", __func__, desc->name);
+        } else {
+            // actual invalidation is logged on enable.
+            ALOGV("%s: offload not compatible with effect %s, will invalidate if enabled",
+                    __func__, desc->name);
         }
         break;
     default:
@@ -1793,9 +1794,10 @@ void ThreadBase::onEffectEnable(const sp<IAfEffectModule>& effect) {
         broadcast_l();
     }
     if (!effect->isOffloadable()) {
-        if (mType == ThreadBase::OFFLOAD) {
-            PlaybackThread *t = (PlaybackThread *)this;
-            t->invalidateTracks();
+        if (mOutput && (mOutput->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) != 0) {
+            ALOGD("%s: offload not compatible with effect %s, invalidate the track",
+                    __func__, effect->desc().name);
+            invalidateTracks();
         }
         if (effect->sessionId() == AUDIO_SESSION_OUTPUT_MIX) {
             mAfThreadCallback->onNonOffloadableGlobalEffectEnable();
@@ -1839,9 +1841,9 @@ status_t ThreadBase::addEffect_ll(const sp<IAfEffectModule>& effect)
     sp<IAfEffectChain> chain = getEffectChain_l(sessionId);
     bool chainCreated = false;
 
-    ALOGD_IF((mType == OFFLOAD) && !effect->isOffloadable(),
-             "%s: on offloaded thread %p: effect %s does not support offload flags %#x",
-             __func__, this, effect->desc().name, effect->desc().flags);
+    ALOGD_IF(mIsOffload && !effect->isOffloadable(),
+             "%s: on offload thread(%d): effect %s does not support offload flags %#x",
+             __func__, mId, effect->desc().name, effect->desc().flags);
 
     if (chain == 0) {
         // create a new chain for this session
@@ -1859,7 +1861,7 @@ status_t ThreadBase::addEffect_ll(const sp<IAfEffectModule>& effect)
         return BAD_VALUE;
     }
 
-    effect->setOffloaded_l(mType == OFFLOAD, mId);
+    effect->setOffloaded_l(mIsOffload, mId);
 
     status_t status = chain->addEffect(effect);
     if (status != NO_ERROR) {
@@ -1896,7 +1898,7 @@ void ThreadBase::removeEffect_l(const sp<IAfEffectModule>& effect, bool release)
     }
 }
 
-void ThreadBase::lockEffectChains_l(Vector<sp<IAfEffectChain>>& effectChains)
+void ThreadBase::lockEffectChains_l(std::vector<sp<IAfEffectChain>>& effectChains)
         NO_THREAD_SAFETY_ANALYSIS  // calls EffectChain::lock()
 {
     effectChains = mEffectChains;
@@ -1905,7 +1907,7 @@ void ThreadBase::lockEffectChains_l(Vector<sp<IAfEffectChain>>& effectChains)
     }
 }
 
-void ThreadBase::unlockEffectChains(const Vector<sp<IAfEffectChain>>& effectChains)
+void ThreadBase::unlockEffectChains(const std::vector<sp<IAfEffectChain>>& effectChains)
         NO_THREAD_SAFETY_ANALYSIS  // calls EffectChain::unlock()
 {
     for (const auto& effectChain : effectChains) {
@@ -1959,8 +1961,8 @@ void ThreadBase::systemReady()
     }
     mSystemReady = true;
 
-    for (size_t i = 0; i < mPendingConfigEvents.size(); i++) {
-        sendConfigEvent_l(mPendingConfigEvents.editItemAt(i));
+    for (const auto& configEvent : mPendingConfigEvents) {
+        sendConfigEvent_l(configEvent);
     }
     mPendingConfigEvents.clear();
 }
@@ -2202,8 +2204,22 @@ bool ThreadBase::invalidateTracks_l(std::set<audio_port_handle_t>* portIds) {
         }
     }
 
-    // TODO(b/410038399) consider to apply to all threads for symmetry.
-    if (trackMatch && (type() == MMAP_PLAYBACK || type() == MMAP_CAPTURE)) {
+    if (trackMatch) {
+        if (type() == OFFLOAD) {
+            // On invalidating an offload track, the IAudioTrack instance is
+            // destroyed and the offload output is released. If it so happens
+            // that APM::getOutputForAttr for the new IAudioTrack is called before
+            // OffloadThread::prepareTracks_l checks and removes an invalid track,
+            // the same output can get reused.
+            //
+            // The side effect of this is data present in HAL and below from before the
+            // invalidate will be rendered before data from the new seek position
+            // is rendered. This is unexpected.
+            //
+            // To fix this, set hint to issue flush when an offload track is invalidated.
+            mFlushPending = true;
+        }
+
         broadcast_l();
     }
     return trackMatch;
@@ -2262,7 +2278,6 @@ PlaybackThread::PlaybackThread(const sp<IAfThreadCallback>& afThreadCallback,
         mSuspended(0), mBytesWritten(0),
         mFramesWritten(0),
         mSuspendedFrames(0),
-        // mStreamTypes[] initialized in constructor body
         mNumWrites(0), mNumDelayedWrites(0), mInWrite(false),
         mMixerStatus(MIXER_IDLE),
         mMixerStatusIgnoringFastTracks(MIXER_IDLE),
@@ -2275,7 +2290,7 @@ PlaybackThread::PlaybackThread(const sp<IAfThreadCallback>& afThreadCallback,
         mScreenState(mAfThreadCallback->getScreenState()),
         // index 0 is reserved for normal mixer's submix
         mFastTrackAvailMask(((1 << FastMixerState::sMaxFastTracks) - 1) & ~1),
-        mHwSupportsPause(false), mHwPaused(false), mFlushPending(false),
+        mHwSupportsPause(false), mHwPaused(false),
         mLeftVolFloat(-1.0), mRightVolFloat(-1.0),
         mDownStreamPatch{},
         mIsTimestampAdvancing(kMinimumTimeBetweenTimestampChecksNs)
@@ -2324,18 +2339,6 @@ PlaybackThread::PlaybackThread(const sp<IAfThreadCallback>& afThreadCallback,
                 "audio.timestamp.corrected_output_device",
                 (int64_t)(mIsMsdDevice ? AUDIO_DEVICE_OUT_BUS // turn on by default for MSD
                                        : AUDIO_DEVICE_NONE));
-    }
-    if (!audioserver_flags::portid_volume_management()) {
-        for (int i = AUDIO_STREAM_MIN; i < AUDIO_STREAM_FOR_POLICY_CNT; ++i) {
-            const audio_stream_type_t stream{static_cast<audio_stream_type_t>(i)};
-            mStreamTypes[stream].volume = 0.0f;
-            mStreamTypes[stream].mute = mAfThreadCallback->streamMute_l(stream);
-        }
-        // Audio patch and call assistant volume are always max
-        mStreamTypes[AUDIO_STREAM_PATCH].volume = 1.0f;
-        mStreamTypes[AUDIO_STREAM_PATCH].mute = false;
-        mStreamTypes[AUDIO_STREAM_CALL_ASSISTANT].volume = 1.0f;
-        mStreamTypes[AUDIO_STREAM_CALL_ASSISTANT].mute = false;
     }
 }
 
@@ -2386,19 +2389,7 @@ void PlaybackThread::preExit()
 void PlaybackThread::dumpTracks_l(int fd, const Vector<String16>& /* args */)
 {
     String8 result;
-    if (!audioserver_flags::portid_volume_management()) {
-        result.appendFormat("  Stream volumes in dB: ");
-        for (int i = 0; i < AUDIO_STREAM_CNT; ++i) {
-            const stream_type_t *st = &mStreamTypes[i];
-            if (i > 0) {
-                result.appendFormat(", ");
-            }
-            result.appendFormat("%d:%.2g", i, 20.0 * log10(st->volume));
-            if (st->mute) {
-                result.append("M");
-            }
-        }
-    }
+
     result.append("\n");
     write(fd, result.c_str(), result.length());
     result.clear();
@@ -2584,7 +2575,8 @@ sp<IAfTrack> PlaybackThread::createTrack_l(
             if (ok != 0) {
                 ALOGE("%s pthread_once failed: %d", __func__, ok);
             }
-            frameCount = max(frameCount, mFrameCount * sFastTrackMultiplier); // incl framecount 0
+            // incl framecount 0
+            frameCount = std::max(frameCount, mFrameCount * sFastTrackMultiplier);
         }
 
         // check compatibility with audio effects.
@@ -2921,30 +2913,6 @@ void PlaybackThread::setMasterMute(bool muted)
     } else {
         mMasterMute = muted;
     }
-}
-
-void PlaybackThread::setStreamVolume(audio_stream_type_t stream, float value, bool muted)
-{
-    ALOGV("%s: stream %d value %f muted %d", __func__, stream, value, muted);
-    audio_utils::lock_guard _l(mutex());
-    mStreamTypes[stream].volume = value;
-    if (com_android_media_audio_ring_my_car()) {
-        mStreamTypes[stream].mute = muted;
-    }
-    broadcast_l();
-}
-
-void PlaybackThread::setStreamMute(audio_stream_type_t stream, bool muted)
-{
-    audio_utils::lock_guard _l(mutex());
-    mStreamTypes[stream].mute = muted;
-    broadcast_l();
-}
-
-float PlaybackThread::streamVolume(audio_stream_type_t stream) const
-{
-    audio_utils::lock_guard _l(mutex());
-    return mStreamTypes[stream].volume;
 }
 
 void PlaybackThread::setVolumeForOutput_l(float left, float right) const
@@ -3399,7 +3367,7 @@ NO_THREAD_SAFETY_ANALYSIS
     // matter.
     // create a copy of mEffectChains as calling moveEffectChain_ll()
     // can reorder some effect chains
-    Vector<sp<IAfEffectChain>> effectChains = mEffectChains;
+    std::vector<sp<IAfEffectChain>> effectChains = mEffectChains;
     for (size_t i = 0; i < effectChains.size(); i ++) {
         mAfThreadCallback->moveEffectChain_ll(effectChains[i]->sessionId(),
             this/* srcThread */, this/* dstThread */);
@@ -3879,6 +3847,8 @@ status_t PlaybackThread::addEffectChain_l(const sp<IAfEffectChain>& chain)
             AUDIO_SESSION_OUTPUT_STAGE < AUDIO_SESSION_OUTPUT_MIX &&
             AUDIO_SESSION_DEVICE < AUDIO_SESSION_OUTPUT_STAGE,
             "audio_session_t constants misdefined");
+
+    // Number of chains are small, but the array is sorted so could use std::lower_bound().
     size_t size = mEffectChains.size();
     size_t i = 0;
     for (i = 0; i < size; i++) {
@@ -3886,7 +3856,7 @@ status_t PlaybackThread::addEffectChain_l(const sp<IAfEffectChain>& chain)
             break;
         }
     }
-    mEffectChains.insertAt(chain, i);
+    mEffectChains.insert(mEffectChains.begin() + i, chain);
     checkSuspendOnAddEffectChain_l(chain);
 
     return NO_ERROR;
@@ -3898,9 +3868,9 @@ size_t PlaybackThread::removeEffectChain_l(const sp<IAfEffectChain>& chain)
 
     ALOGV("removeEffectChain_l() %p from thread %p for session %d", chain.get(), this, session);
 
-    for (size_t i = 0; i < mEffectChains.size(); i++) {
-        if (chain == mEffectChains[i]) {
-            mEffectChains.removeAt(i);
+    for (auto it = mEffectChains.begin() ; it != mEffectChains.end(); ++it) {
+        if (chain == *it) {
+            (void) mEffectChains.erase(it);  // okay not to update it as we break below.
             // detach all active tracks from the chain
             for (const auto& track : mActiveTracks) {
                 if (session == track->sessionId()) {
@@ -4042,7 +4012,7 @@ NO_THREAD_SAFETY_ANALYSIS  // manual locking of AudioFlinger
     {
         cpuStats.sample(myName);
 
-        Vector<sp<IAfEffectChain>> effectChains;
+        std::vector<sp<IAfEffectChain>> effectChains;
         audio_session_t activeHapticSessionId = AUDIO_SESSION_NONE;
         bool isHapticSessionSpatialized = false;
         std::vector<sp<IAfTrackBase>> activeTracks;
@@ -4153,7 +4123,7 @@ NO_THREAD_SAFETY_ANALYSIS  // manual locking of AudioFlinger
                     sendStatistics(false /* force */);
                 }
 
-                if (mActiveTracks.empty() && mConfigEvents.isEmpty()) {
+                if (mActiveTracks.empty() && mConfigEvents.empty()) {
                     // we're about to wait, flush the binder command buffer
                     IPCThreadState::self()->flushCommands();
 
@@ -4219,12 +4189,15 @@ NO_THREAD_SAFETY_ANALYSIS  // manual locking of AudioFlinger
             }
             // signal actual start of output stream when the render position reported by
             // the kernel starts moving.
-            if (!mHalStarted && ((isSuspended() && (mBytesWritten != 0)) || (!mStandby
+            {
+                audio_utils::unique_lock _whsl(mWaitHalStartMutex);
+                if (!mHalStarted && ((isSuspended() && (mBytesWritten != 0)) || (!mStandby
                     && (mKernelPositionOnStandby
                             != mTimestamp.mPosition[ExtendedTimestamp::LOCATION_KERNEL])))) {
-                mHalStarted = true;
-                mWaitHalStartCV.notify_all();
-            }
+                    mHalStarted = true;
+                    mWaitHalStartCV.notify_all();
+                }
+            } // mWaitHalStartMutex scope ends
 
             // prevent any changes in effect chain list and in each effect chain
             // during mixing and effect process as the audio buffers could be deleted
@@ -4496,8 +4469,8 @@ NO_THREAD_SAFETY_ANALYSIS  // manual locking of AudioFlinger
                                     const ssize_t
                                             availableToWrite = mPipeSink->availableToWrite();
                                     const size_t pipeFrames = monoPipe->maxFrames();
-                                    const size_t
-                                            remainingFrames = pipeFrames - max(availableToWrite, 0);
+                                    const size_t remainingFrames = pipeFrames -
+                                            std::max(availableToWrite, static_cast<ssize_t>(0));
                                     mMonopipePipeDepthStats.add(remainingFrames);
                                 }
                             }
@@ -4611,7 +4584,7 @@ NO_THREAD_SAFETY_ANALYSIS  // manual locking of AudioFlinger
                     // update sleep time (which is >= 0)
                     mSleepTimeUs = deltaNs / 1000;
                 }
-                if (!mSignalPending && mConfigEvents.isEmpty() && !exitPending()) {
+                if (!mSignalPending && mConfigEvents.empty() && !exitPending()) {
                     mWaitWorkCV.wait_for(_l, std::chrono::microseconds(mSleepTimeUs));
                 }
                 ATRACE_END();
@@ -4696,7 +4669,7 @@ void PlaybackThread::collectTimestamps_l()
                         timestamp.mPosition[ExtendedTimestamp::LOCATION_KERNEL]
                         - int64_t(mDownstreamLatencyStatMs.getMean() * mSampleRate * 1e-3);
                 // prevent retrograde
-                timestamp.mPosition[ExtendedTimestamp::LOCATION_KERNEL] = max(
+                timestamp.mPosition[ExtendedTimestamp::LOCATION_KERNEL] = std::max(
                         newPosition,
                         (mTimestamp.mPosition[ExtendedTimestamp::LOCATION_KERNEL]
                                 - mSuspendedFrames));
@@ -4973,7 +4946,7 @@ status_t PlaybackThread::createAudioPatch_l(const struct audio_patch *patch,
     mOutDeviceTypeAddrs = deviceTypeAddrs;
 
     if (mOutput->audioHwDev->supportsAudioPatches()) {
-        sp<DeviceHalInterface> hwDevice = mOutput->audioHwDev->hwDevice();
+        const sp<DeviceHalInterface>& hwDevice = mOutput->audioHwDev->hwDevice();
         status = hwDevice->createAudioPatch(patch->num_sources,
                                             patch->sources,
                                             patch->num_sinks,
@@ -5025,7 +4998,7 @@ status_t PlaybackThread::releaseAudioPatch_l(const audio_patch_handle_t handle)
     mOutDeviceTypeAddrs.clear();
 
     if (mOutput->audioHwDev->supportsAudioPatches()) {
-        sp<DeviceHalInterface> hwDevice = mOutput->audioHwDev->hwDevice();
+        const sp<DeviceHalInterface>& hwDevice = mOutput->audioHwDev->hwDevice();
         status = hwDevice->releaseAudioPatch(handle);
     } else {
         status = mOutput->stream->legacyReleaseAudioPatch();
@@ -5464,10 +5437,10 @@ void PlaybackThread::onAddNewTrack_l()
 
 void PlaybackThread::onAsyncError(bool isHardError)
 {
-    auto allTrackPortIds = getTrackPortIds();
-    invalidateTracks();
-    if (isHardError) {
-        mAfThreadCallback->onHardError(allTrackPortIds);
+    if (!isHardError || !isOffloadOrDirect()) {
+        invalidateTracks();
+    } else {
+        mAfThreadCallback->onHardError(id());
     }
 }
 
@@ -5501,10 +5474,11 @@ void MixerThread::threadLoop_sleepTime()
                 MonoPipe *monoPipe = static_cast<MonoPipe *>(mPipeSink.get());
                 const ssize_t availableToWrite = mPipeSink->availableToWrite();
                 const size_t pipeFrames = monoPipe->maxFrames();
-                const size_t framesLeft = pipeFrames - max(availableToWrite, 0);
+                const size_t framesLeft = pipeFrames -
+                        std::max(availableToWrite, static_cast<ssize_t>(0));
                 // HAL_framecount <= framesDelay ~ framesLeft / 2 <= Normal_Mixer_framecount
-                const size_t framesDelay = std::min(
-                        mNormalFrameCount, max(framesLeft / 2, mFrameCount));
+                const size_t framesDelay = std::clamp(static_cast<size_t>(framesLeft / 2),
+                        mFrameCount, mNormalFrameCount);
                 ALOGV("pipeFrames:%zu framesLeft:%zu framesDelay:%zu",
                         pipeFrames, framesLeft, framesDelay);
                 mSleepTimeUs = framesDelay * MICROS_PER_SECOND / mSampleRate;
@@ -5557,7 +5531,6 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
 
     mixer_state mixerStatus = MIXER_IDLE;
     // find out which tracks need to be processed
-    size_t count = mActiveTracks.size();
     size_t mixedTracks = 0;
     size_t tracksWithEffect = 0;
     // counts only _active_ fast tracks
@@ -5610,7 +5583,7 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
             if (*mMixerStatus == MIXER_TRACKS_READY && mUnderrunFrames.size() > 0) {
                 for (const auto &underrun : mUnderrunFrames) {
                     underrun.first->tallyUnderrunFrames(underrun.second);
-                    maxUnderrunFrames = max(underrun.second, maxUnderrunFrames);
+                    maxUnderrunFrames = std::max(underrun.second, maxUnderrunFrames);
                 }
             }
             // send the max underrun frames for this mixer period
@@ -5784,11 +5757,13 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                 }
                 sp<AudioTrackServerProxy> proxy = track->audioTrackServerProxy();
                 float volume;
-                if (!audioserver_flags::portid_volume_management()) {
-                    if (track->isPlaybackRestricted() || mStreamTypes[track->streamType()].mute) {
+
+                if (com_android_media_audio_ring_my_car()) {
+                    if (!track->canBypassMute()
+                        && (track->isPlaybackRestricted() || track->getPortMute())) {
                         volume = 0.f;
                     } else {
-                        volume = masterVolume * mStreamTypes[track->streamType()].volume;
+                        volume = masterVolume * track->getPortVolume();
                     }
                 } else {
                     if (track->isPlaybackRestricted() || track->getPortMute()) {
@@ -5797,6 +5772,7 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                         volume = masterVolume * track->getPortVolume();
                     }
                 }
+
                 const auto amn = mAfThreadCallback->getAudioManagerNative();
                 if (amn) {
                     track->maybeLogPlaybackHardening(*amn);
@@ -5813,27 +5789,29 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                 float vlf = float_from_gain(gain_minifloat_unpack_left(vlr));
                 float vrf = float_from_gain(gain_minifloat_unpack_right(vlr));
                 if (amn) {
-                    if (!audioserver_flags::portid_volume_management()) {
-                        track->processMuteEvent(*amn,
-                                /*muteState=*/{masterVolume == 0.f,
-                                               mStreamTypes[track->streamType()].volume == 0.f,
-                                               mStreamTypes[track->streamType()].mute,
-                                               track->isPlaybackRestrictedOp(),
-                                               vlf == 0.f && vrf == 0.f,
-                                               vh == 0.f,
-                                               /*muteFromPortVolume=*/false,
-                                               track->isPlaybackRestrictedControl()});
+                    bool portMute = false;
+                    bool portVolumeMute = false;
+                    if (com_android_media_audio_ring_my_car()) {
+                        portMute = track->canBypassMute()
+                                   ? false
+                                   : track->getPortVolume() == 0.f;
+                        portVolumeMute = track->canBypassMute()
+                                         ? false
+                                         : track->getPortMute();
                     } else {
-                        track->processMuteEvent(*amn,
-                                /*muteState=*/{masterVolume == 0.f,
-                                               track->getPortVolume() == 0.f,
-                                               /* muteFromStreamMuted= */ false,
-                                               track->isPlaybackRestrictedOp(),
-                                               vlf == 0.f && vrf == 0.f,
-                                               vh == 0.f,
-                                           track->getPortMute(),
-                                           track->isPlaybackRestrictedControl()});
+                        portMute = track->getPortVolume() == 0.f;
+                        portVolumeMute = track->getPortMute();
                     }
+                    track->processMuteEvent(*amn,
+                            /*muteState=*/{/*muteFromMasterMute*/ masterVolume == 0.f,
+                                           /*muteFromStreamVolume*/ portMute,
+                                           /* muteFromStreamMuted*/ false,
+                                           /*muteFromPlaybackRestricted*/ track->isPlaybackRestrictedOp(),
+                                           /*muteFromClientVolume*/ vlf == 0.f && vrf == 0.f,
+                                           /*muteFromVolumeShaper*/ vh == 0.f,
+                                           /*muteFromPortVolume*/ portVolumeMute,
+                                           /*muteFromOpAudioControl*/
+                                               track->isPlaybackRestrictedControl()});
                 }
                 vlf *= volume;
                 vrf *= volume;
@@ -5988,15 +5966,19 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
             const float vh = track->getVolumeHandler()->getVolume(
                     track->audioTrackServerProxy()->framesReleased()).first;
             float v;
-            if (!audioserver_flags::portid_volume_management()) {
-                v = masterVolume * mStreamTypes[track->streamType()].volume;
-                if (mStreamTypes[track->streamType()].mute || track->isPlaybackRestricted()) {
+
+            if (com_android_media_audio_ring_my_car()) {
+                if (!track->canBypassMute()
+                    && (track->isPlaybackRestricted() || track->getPortMute())) {
                     v = 0;
+                } else {
+                    v = masterVolume * track->getPortVolume();
                 }
             } else {
-                v = masterVolume * track->getPortVolume();
                 if (track->isPlaybackRestricted() || track->getPortMute()) {
                     v = 0;
+                } else {
+                    v = masterVolume * track->getPortVolume();
                 }
             }
 
@@ -6024,27 +6006,31 @@ PlaybackThread::mixer_state MixerThread::prepareTracks_l(
                     vrf = GAIN_FLOAT_UNITY;
                 }
                 if (amn) {
-                    if (!audioserver_flags::portid_volume_management()) {
-                        track->processMuteEvent(*amn,
-                                /*muteState=*/{masterVolume == 0.f,
-                                               mStreamTypes[track->streamType()].volume == 0.f,
-                                               mStreamTypes[track->streamType()].mute,
-                                               track->isPlaybackRestrictedOp(),
-                                               vlf == 0.f && vrf == 0.f,
-                                               vh == 0.f,
-                                               /*muteFromPortVolume=*/false,
-                                               track->isPlaybackRestrictedControl()});
+                    bool portMute;
+                    bool getPortMute;
+                    if (com_android_media_audio_ring_my_car()) {
+                        portMute = track->canBypassMute()
+                                   ? false
+                                   : track->getPortVolume() == 0.f;;
+                        getPortMute = track->canBypassMute()
+                                      ? false
+                                      : track->getPortMute();
                     } else {
-                        track->processMuteEvent(*amn,
-                                /*muteState=*/{masterVolume == 0.f,
-                                               track->getPortVolume() == 0.f,
-                                               /* muteFromStreamMuted= */ false,
-                                               track->isPlaybackRestrictedOp(),
-                                               vlf == 0.f && vrf == 0.f,
-                                               vh == 0.f,
-                                               track->getPortMute(),
-                                               track->isPlaybackRestrictedControl()});
+                        portMute = track->getPortVolume() == 0.f;
+                        getPortMute = track->getPortMute();
+
                     }
+                    track->processMuteEvent(*amn,
+                            /*muteState=*/{/*muteFromMasterMute*/ masterVolume == 0.f,
+                                           /*muteFromStreamVolume*/ portMute,
+                                           /*muteFromStreamMuted= */ false,
+                                           /*muteFromPlaybackRestricted*/
+                                                   track->isPlaybackRestrictedOp(),
+                                           /*muteFromClientVolume*/ vlf == 0.f && vrf == 0.f,
+                                           /*muteFromVolumeShaper*/ vh == 0.f,
+                                           /*muteFromPortVolume*/ getPortMute,
+                                           /*muteFromOpAudioControl*/
+                                                   track->isPlaybackRestrictedControl()});
                 }
                 // now apply the master volume and stream type volume and shaper volume
                 vlf *= v * vh;
@@ -6719,8 +6705,8 @@ DirectOutputThread::DirectOutputThread(const sp<IAfThreadCallback>& afThreadCall
         AudioStreamOut* output, audio_io_handle_t id, ThreadBase::type_t type, bool systemReady,
         const audio_offload_info_t& offloadInfo)
     :   PlaybackThread(afThreadCallback, output, id, type, systemReady)
-    , mOffloadInfo(offloadInfo)
 {
+    mOffloadInfo = offloadInfo;
     setMasterBalance(afThreadCallback->getMasterBalance_l());
 }
 
@@ -6771,73 +6757,52 @@ void DirectOutputThread::processVolume_l(const sp<IAfTrack>& track, bool lastTra
     const bool clientVolumeMute = (left == 0.f && right == 0.f);
 
     const auto amn = mAfThreadCallback->getAudioManagerNative();
-    if (!audioserver_flags::portid_volume_management()) {
-        if (mMasterMute || mStreamTypes[track->streamType()].mute ||
-            track->isPlaybackRestricted()) {
-            left = right = 0;
-        } else {
-            float typeVolume = mStreamTypes[track->streamType()].volume;
-            const float v = mMasterVolume * typeVolume * shaperVolume;
 
-            if (left > GAIN_FLOAT_UNITY) {
-                left = GAIN_FLOAT_UNITY;
-            }
-            if (right > GAIN_FLOAT_UNITY) {
-                right = GAIN_FLOAT_UNITY;
-            }
-            left *= v;
-            right *= v;
-            if (mAfThreadCallback->getMode() != AUDIO_MODE_IN_COMMUNICATION
-                || audio_channel_count_from_out_mask(mChannelMask) > 1) {
-                left *= mMasterBalanceLeft; // DirectOutputThread balance applied as track volume
-                right *= mMasterBalanceRight;
-            }
-        }
-        if (amn) {
-            track->processMuteEvent(*amn,
-                    /*muteState=*/{mMasterMute,
-                                   mStreamTypes[track->streamType()].volume == 0.f,
-                                   mStreamTypes[track->streamType()].mute,
-                                   track->isPlaybackRestrictedOp(),
-                                   clientVolumeMute,
-                                   shaperVolume == 0.f,
-                                   /*muteFromPortVolume=*/false,
-                                   track->isPlaybackRestrictedControl()});
-        }
+    if (mMasterMute || track->isPlaybackRestricted()) {
+        left = right = 0;
     } else {
-        if (mMasterMute || track->isPlaybackRestricted()) {
-            left = right = 0;
-        } else {
-            float typeVolume = track->getPortVolume();
-            const float v = mMasterVolume * typeVolume * shaperVolume;
+        float typeVolume = track->getPortVolume();
+        const float v = mMasterVolume * typeVolume * shaperVolume;
 
-            if (left > GAIN_FLOAT_UNITY) {
-                left = GAIN_FLOAT_UNITY;
-            }
-            if (right > GAIN_FLOAT_UNITY) {
-                right = GAIN_FLOAT_UNITY;
-            }
-            left *= v;
-            right *= v;
-            if (mAfThreadCallback->getMode() != AUDIO_MODE_IN_COMMUNICATION
-                || audio_channel_count_from_out_mask(mChannelMask) > 1) {
-                left *= mMasterBalanceLeft; // DirectOutputThread balance applied as track volume
-                right *= mMasterBalanceRight;
-            }
+        if (left > GAIN_FLOAT_UNITY) {
+            left = GAIN_FLOAT_UNITY;
         }
-        if (amn) {
-            track->processMuteEvent(*amn,
-                    /*muteState=*/{mMasterMute,
-                                   track->getPortVolume() == 0.f,
-                                   /* muteFromStreamMuted= */ false,
-                                   track->isPlaybackRestrictedOp(),
-                                   clientVolumeMute,
-                                   shaperVolume == 0.f,
-                                   track->getPortMute(),
-                                   track->isPlaybackRestrictedControl()});
+        if (right > GAIN_FLOAT_UNITY) {
+            right = GAIN_FLOAT_UNITY;
+        }
+        left *= v;
+        right *= v;
+        if (mAfThreadCallback->getMode() != AUDIO_MODE_IN_COMMUNICATION
+            || audio_channel_count_from_out_mask(mChannelMask) > 1) {
+            left *= mMasterBalanceLeft; // DirectOutputThread balance applied as track volume
+            right *= mMasterBalanceRight;
         }
     }
     if (amn) {
+        bool portMute = false;
+        bool portVolumeMute = false;
+        if (com_android_media_audio_ring_my_car()) {
+            portMute = track->canBypassMute()
+                       ? false
+                       : track->getPortVolume() == 0.f;
+            portVolumeMute = track->canBypassMute()
+                             ? false
+                             : track->getPortMute();
+        } else {
+            portMute = track->getPortVolume() == 0.f;
+            portVolumeMute = track->getPortMute();
+        }
+        track->processMuteEvent(*amn,
+                /*muteState=*/{/*muteFromMasterMute*/ mMasterMute,
+                               /*muteFromStreamVolume*/ portMute,
+                               /*muteFromStreamMuted*/ false,
+                               /*muteFromPlaybackRestricted*/ track->isPlaybackRestrictedOp(),
+                               /*muteFromClientVolume*/ clientVolumeMute,
+                               /*muteFromVolumeShaper*/ shaperVolume == 0.f,
+                               /*muteFromPortVolume*/ portVolumeMute,
+                               /*muteFromOpAudioControl*/
+                                       track->isPlaybackRestrictedControl()});
+
         track->maybeLogPlaybackHardening(*amn);
     }
     if (lastTrack) {
@@ -6849,7 +6814,7 @@ void DirectOutputThread::processVolume_l(const sp<IAfTrack>& track, bool lastTra
             // Delegate volume control to effect in track effect chain if needed
             // only one effect chain can be present on DirectOutputThread, so if
             // there is one, the track is connected to it
-            if (!mEffectChains.isEmpty()) {
+            if (!mEffectChains.empty()) {
                 // if effect chain exists, volume is handled by it.
                 // Convert volumes from float to 8.24
                 uint32_t vl = (uint32_t)(left * (1 << 24));
@@ -7017,7 +6982,7 @@ PlaybackThread::mixer_state DirectOutputThread::prepareTracks_l(
         } else {
             // clear effect chain input buffer if the last active track started underruns
             // to avoid sending previous audio buffer again to effects
-            if (!mEffectChains.isEmpty() && last) {
+            if (!mEffectChains.empty() && last) {
                 mEffectChains[0]->clearInputBuffer();
             }
             if (track->isStopping_1()) {
@@ -7051,7 +7016,7 @@ PlaybackThread::mixer_state DirectOutputThread::prepareTracks_l(
                 // fill a buffer, then remove it from active list.
                 // Only consider last track started for mixer state control
                 bool isTimestampAdvancing = mIsTimestampAdvancing.check(mOutput);
-                if (!isTunerStream()  // tuner streams remain active in underrun
+                if (!isTunerStream_l()  // tuner streams remain active in underrun
                         && --(track->retryCount()) <= 0) {
                     if (isTimestampAdvancing) { // HAL is still playing audio, give us more time.
                         track->retryCount() = kMaxTrackRetriesOffload;
@@ -7665,7 +7630,7 @@ PlaybackThread::mixer_state OffloadThread::prepareTracks_l(
                 // No buffers for this track. Give it a few chances to
                 // fill a buffer, then remove it from active list.
                 bool isTimestampAdvancing = mIsTimestampAdvancing.check(mOutput);
-                if (!isTunerStream()  // tuner streams remain active in underrun
+                if (!isTunerStream_l()  // tuner streams remain active in underrun
                         && --(track->retryCount()) <= 0) {
                     if (isTimestampAdvancing) { // HAL is still playing audio, give us more time.
                         track->retryCount() = kMaxTrackRetriesOffload;
@@ -7747,27 +7712,6 @@ void OffloadThread::flushHw_l()
         mCallbackThread->setWriteBlocked(mWriteAckSequence);
         mCallbackThread->setDraining(mDrainSequence);
     }
-}
-
-// TODO(b/410038399) move to base class and unify with Mmap implementation for clarity.
-
-bool OffloadThread::invalidateTracks_l(std::set<audio_port_handle_t>* portIds) {
-    const bool trackMatch = ThreadBase::invalidateTracks_l(portIds);
-    if (trackMatch) {
-        // On invalidating an offload track, the IAudioTrack instance is
-        // destroyed and the offload output is released. If it so happens
-        // that APM::getOutputForAttr for the new IAudioTrack is called before
-        // OffloadThread::prepareTracks_l checks and removes an invalid track,
-        // the same output can get reused.
-        //
-        // The side effect of this is data present in HAL and below from before the
-        // invalidate will be rendered before data from the new seek position
-        // is rendered. This is unexpected.
-        //
-        // To fix this, set hint to issue flush when an offload track is invalidated.
-        mFlushPending = true;
-    }
-    return trackMatch;
 }
 
 // ----------------------------------------------------------------------------
@@ -7964,10 +7908,6 @@ void DuplicatingThread::addOutputTrack(IAfPlaybackThread* thread)
         ALOGE("addOutputTrack() initCheck failed %d", status);
         return;
     }
-    if (!audioserver_flags::portid_volume_management()) {
-        thread->asVolumeInterface()->setStreamVolume(
-                AUDIO_STREAM_PATCH, /*volume=*/1.0f, /*muted=*/false);
-    }
 
     mOutputTracks.emplace(outputTrack);
     ALOGV("addOutputTrack() track %p, on thread %p", outputTrack.get(), thread);
@@ -8121,7 +8061,7 @@ void SpatializerThread::setHalLatencyMode_l() {
 }
 
 status_t SpatializerThread::setRequestedLatencyMode(audio_latency_mode_t mode) {
-    if (mode < 0 || mode >= AUDIO_LATENCY_MODE_CNT) {
+    if (mode < 0 || static_cast<int>(mode) >= AUDIO_LATENCY_MODE_CNT) {
         return BAD_VALUE;
     }
     audio_utils::lock_guard _l(mutex());
@@ -8430,10 +8370,10 @@ reacquire_wakelock:
         // Note: these sp<> are released at the end of the for loop outside of the mutex() lock.
         sp<IAfRecordTrack> activeTrack;
         std::vector<sp<IAfRecordTrack>> oldActiveTracks;
-        Vector<sp<IAfEffectChain>> effectChains;
+        std::vector<sp<IAfEffectChain>> effectChains;
 
         // activeTracks accumulates a copy of a subset of mActiveTracks
-        Vector<sp<IAfRecordTrack>> activeTracks;
+        std::vector<sp<IAfRecordTrack>> activeTracks;
 
         // reference to the (first and only) active fast track
         sp<IAfRecordTrack> fastTrack;
@@ -8568,7 +8508,7 @@ reacquire_wakelock:
                     fastTrack = activeTrack;
                 }
 
-                activeTracks.add(activeTrack);
+                activeTracks.push_back(activeTrack);
                 ++it;
             }
 
@@ -8596,7 +8536,7 @@ reacquire_wakelock:
             }
 
             // sleep if there are no active tracks to process
-            if (activeTracks.isEmpty()) {
+            if (activeTracks.empty()) {
                 if (sleepUs == 0) {
                     sleepUs = kRecordThreadSleepUs;
                 }
@@ -8653,7 +8593,7 @@ reacquire_wakelock:
                 didModify = true;
             }
             AudioBufferProvider* abp = (fastTrack != 0 && fastTrack->isPatchTrack()) ?
-                    reinterpret_cast<AudioBufferProvider*>(fastTrack.get()) : nullptr;
+                    fastTrack->asAudioBufferProvider() : nullptr;
             if (state->mFastPatchRecordBufferProvider != abp) {
                 state->mFastPatchRecordBufferProvider = abp;
                 state->mFastPatchRecordFormat = fastTrack == 0 ?
@@ -8690,7 +8630,7 @@ reacquire_wakelock:
 
         // If an NBAIO source is present, use it to read the normal capture's data
         if (mPipeSource != 0) {
-            size_t framesToRead = min(mRsmpInFramesOA - rear, mRsmpInFramesP2 / 2);
+            size_t framesToRead = std::min(mRsmpInFramesOA - rear, mRsmpInFramesP2 / 2);
 
             // The audio fifo read() returns OVERRUN on overflow, and advances the read pointer
             // to the full buffer point (clearing the overflow condition).  Upon OVERRUN error,
@@ -8710,7 +8650,7 @@ reacquire_wakelock:
                         "more frames to read than fifo size, %zd > %zu",
                         availableToRead, mPipeFramesP2);
                 const size_t pipeFramesFree = mPipeFramesP2 - availableToRead;
-                const size_t sleepFrames = min(pipeFramesFree, mRsmpInFramesP2) / 2;
+                const size_t sleepFrames = std::min(pipeFramesFree, mRsmpInFramesP2) / 2;
                 ALOGVV("mPipeFramesP2:%zu mRsmpInFramesP2:%zu sleepFrames:%zu availableToRead:%zd",
                         mPipeFramesP2, mRsmpInFramesP2, sleepFrames, availableToRead);
                 sleepUs = (sleepFrames * 1000000LL) / mSampleRate;
@@ -8871,7 +8811,7 @@ reacquire_wakelock:
                 // This isn't strictly necessary but helps limit buffer resizing in
                 // RecordBufferConverter.  TODO: remove when no longer needed.
                 if (audio_is_linear_pcm(activeTrack->format())) {
-                    framesOut = min(framesOut,
+                    framesOut = std::min(framesOut,
                             destinationFramesPossible(
                                     framesIn, mSampleRate, activeTrack->sampleRate()));
                 }
@@ -9096,22 +9036,15 @@ sp<IAfRecordTrack> RecordThread::createRecordTrack_l(
     }
 
     if (maxSharedAudioHistoryMs != 0) {
-        if (audioserver_permissions()) {
-            const auto res = mAfThreadCallback->getPermissionProvider().checkPermission(
-                    CAPTURE_AUDIO_HOTWORD,
-                    attributionSource.uid);
-            if (!res.ok()) {
-                lStatus = aidl_utils::statusTFromBinderStatus(res.error());
-            }
-            if (!res.value()) {
-                lStatus = PERMISSION_DENIED;
-                goto Exit;
-            }
-        } else {
-            if (!captureHotwordAllowed(attributionSource)) {
-                lStatus = PERMISSION_DENIED;
-                goto Exit;
-            }
+        const auto res = mAfThreadCallback->getPermissionProvider().checkPermission(
+                CAPTURE_AUDIO_HOTWORD,
+                attributionSource.uid);
+        if (!res.ok()) {
+            lStatus = aidl_utils::statusTFromBinderStatus(res.error());
+        }
+        if (!res.value()) {
+            lStatus = PERMISSION_DENIED;
+            goto Exit;
         }
         if (maxSharedAudioHistoryMs < 0
                 || maxSharedAudioHistoryMs > kMaxSharedAudioHistoryMs) {
@@ -9217,8 +9150,8 @@ sp<IAfRecordTrack> RecordThread::createRecordTrack_l(
         const size_t minNotificationsByMs = (minFramesByMs + maxNotificationFrames - 1) /
                 maxNotificationFrames;
         const size_t minFrameCount = maxNotificationFrames *
-                max(kMinNotifications, minNotificationsByMs);
-        frameCount = max(frameCount, minFrameCount);
+                std::max(kMinNotifications, minNotificationsByMs);
+        frameCount = std::max(frameCount, minFrameCount);
         if (notificationFrameCount == 0 || notificationFrameCount > maxNotificationFrames) {
             notificationFrameCount = maxNotificationFrames;
         }
@@ -9232,11 +9165,9 @@ sp<IAfRecordTrack> RecordThread::createRecordTrack_l(
         if (!mSharedAudioPackageName.empty()
                 && mSharedAudioPackageName == attributionSource.packageName
                 && mSharedAudioSessionId == sessionId
-                && (audioserver_permissions() ?
-                      mAfThreadCallback->getPermissionProvider().checkPermission(
+                && mAfThreadCallback->getPermissionProvider().checkPermission(
                           CAPTURE_AUDIO_HOTWORD,
-                          attributionSource.uid).value_or(false)
-                    : captureHotwordAllowed(attributionSource))) {
+                          attributionSource.uid).value_or(false)) {
             startFrames = mSharedAudioStartFrames;
         }
 
@@ -9998,19 +9929,6 @@ uint32_t RecordThread::getInputFramesLost() const
     return 0;
 }
 
-KeyedVector<audio_session_t, bool> RecordThread::sessionIds() const
-{
-    KeyedVector<audio_session_t, bool> ids;
-    audio_utils::lock_guard _l(mutex());
-    for (const auto& track : mTracks) {
-        audio_session_t sessionId = track->sessionId();
-        if (ids.indexOfKey(sessionId) < 0) {
-            ids.add(sessionId, true);
-        }
-    }
-    return ids;
-}
-
 AudioStreamIn* RecordThread::clearInput_l()
 {
     AudioStreamIn* input = ThreadBase::clearInput_l();
@@ -10040,7 +9958,7 @@ status_t RecordThread::addEffectChain_l(const sp<IAfEffectChain>& chain)
     // just moved them to a new input stream.
     chain->syncHalEffectsState_l();
 
-    mEffectChains.add(chain);
+    mEffectChains.push_back(chain);
 
     return NO_ERROR;
 }
@@ -10048,13 +9966,7 @@ status_t RecordThread::addEffectChain_l(const sp<IAfEffectChain>& chain)
 size_t RecordThread::removeEffectChain_l(const sp<IAfEffectChain>& chain)
 {
     ALOGV("removeEffectChain_l() %p from thread %p", chain.get(), this);
-
-    for (size_t i = 0; i < mEffectChains.size(); i++) {
-        if (chain == mEffectChains[i]) {
-            mEffectChains.removeAt(i);
-            break;
-        }
-    }
+    std::erase(mEffectChains, chain);
     return mEffectChains.size();
 }
 
@@ -10082,7 +9994,7 @@ status_t RecordThread::createAudioPatch_l(const struct audio_patch* patch,
     }
 
     if (mInput->audioHwDev->supportsAudioPatches()) {
-        sp<DeviceHalInterface> hwDevice = mInput->audioHwDev->hwDevice();
+        const sp<DeviceHalInterface>& hwDevice = mInput->audioHwDev->hwDevice();
         status = hwDevice->createAudioPatch(patch->num_sources,
                                             patch->sources,
                                             patch->num_sinks,
@@ -10123,7 +10035,7 @@ status_t RecordThread::releaseAudioPatch_l(const audio_patch_handle_t handle)
     mInDeviceTypeAddr.reset();
 
     if (mInput->audioHwDev->supportsAudioPatches()) {
-        sp<DeviceHalInterface> hwDevice = mInput->audioHwDev->hwDevice();
+        const sp<DeviceHalInterface>& hwDevice = mInput->audioHwDev->hwDevice();
         status = hwDevice->releaseAudioPatch(handle);
     } else {
         status = mInput->stream->legacyReleaseAudioPatch();
@@ -10314,27 +10226,35 @@ std::string RecordThread::getLocalLogHeader() const {
 
 // Mmap stream control interface implementation. Each MmapThreadHandle controls one
 // MmapPlaybackThread or MmapCaptureThread instance.
-class MmapThreadHandle : public MmapStreamInterface {
+class MmapThreadHandle : public media::BnMmapStream {
 public:
     explicit MmapThreadHandle(const sp<IAfMmapThread>& thread);
     ~MmapThreadHandle() override;
 
-    // MmapStreamInterface virtuals
-    status_t createMmapBuffer(int32_t minSizeFrames,
-        struct audio_mmap_buffer_info* info) final;
-    status_t getMmapPosition(struct audio_mmap_position* position) final;
-    status_t getExternalPosition(uint64_t* position, int64_t* timeNanos) final;
-    status_t start(const AudioClient& client,
-           const audio_attributes_t* attr, audio_port_handle_t* handle) final;
-    status_t stop(audio_port_handle_t handle) final;
-    status_t standby() final;
-    status_t reportData(const void* buffer, size_t frameCount) final;
+    binder::Status createMmapBuffer(
+            int32_t minSizeFrames, media::MmapBufferInfo* _aidl_return) final;
+    binder::Status getMmapPosition(media::IMmapStream::MmapStreamPosition* _aidl_return) final;
+    binder::Status getObservablePosition(
+            media::IMmapStream::MmapObservablePosition* _aidl_return) final;
+    binder::Status start(const media::AudioClient& client,
+            const ::std::optional< ::android::media::audio::common::AudioAttributes>& attr,
+            int32_t portId, int32_t* _aidl_return) final;
+    binder::Status stop(int32_t portId) final;
+    binder::Status standby() final;
+    binder::Status reportData(const ::std::vector<uint8_t>& buffer) final;
+    binder::Status drain(int64_t wakeUpNanos, bool allowSoftWakeUp,
+                         media::TimerQueueHandle* handle) final;
+    binder::Status activate(const media::TimerQueueHandle& handle) final;
+    binder::Status setPlaybackParameters(
+            const media::audio::common::AudioPlaybackRate& rate) final;
+    binder::Status getPlaybackParameters(
+            media::audio::common::AudioPlaybackRate* rate) final;
 private:
     const sp<IAfMmapThread> mThread;
 };
 
 /* static */
-sp<MmapStreamInterface> IAfMmapThread::createMmapStreamInterfaceAdapter(
+sp<media::IMmapStream> IAfMmapThread::createMmapStreamInterfaceAdapter(
         const sp<IAfMmapThread>& mmapThread) {
     return sp<MmapThreadHandle>::make(mmapThread);
 }
@@ -10352,43 +10272,123 @@ MmapThreadHandle::~MmapThreadHandle()
     mThread->disconnect();
 }
 
-status_t MmapThreadHandle::createMmapBuffer(int32_t minSizeFrames,
-                                  struct audio_mmap_buffer_info *info)
+binder::Status MmapThreadHandle::createMmapBuffer(
+        int32_t minSizeFrames, media::MmapBufferInfo* _aidl_return)
 {
-    return mThread->createMmapBuffer(minSizeFrames, info);
+    struct audio_mmap_buffer_info info;
+    const status_t status = mThread->createMmapBuffer(minSizeFrames, &info);
+    if (status == NO_ERROR) {
+        const int bufferFd = info.shared_memory_fd;
+        // we dup the bufferFd and then leave it to the Parcel and Binder
+        // to transfer and reclaim the resource.
+        _aidl_return->sharedFd.reset(binder::unique_fd(dup(bufferFd)));
+        _aidl_return->bufferSizeFrames = info.buffer_size_frames;
+        _aidl_return->burstSizeFrames = info.burst_size_frames;
+        _aidl_return->flags = static_cast<int32_t>(info.flags);
+    }
+    return aidl_utils::binderStatusFromStatusT(status);
 }
 
-status_t MmapThreadHandle::getMmapPosition(struct audio_mmap_position* position)
+binder::Status MmapThreadHandle::getMmapPosition(
+        media::IMmapStream::MmapStreamPosition* _aidl_return)
 {
-    return mThread->getMmapPosition(position);
+    struct audio_mmap_position position;
+    const status_t status = mThread->getMmapPosition(&position);
+    if (status == NO_ERROR) {
+        _aidl_return->timeNanos = position.time_nanoseconds;
+        _aidl_return->positionFrames = position.position_frames;
+    }
+    return aidl_utils::binderStatusFromStatusT(status);
 }
 
-status_t MmapThreadHandle::getExternalPosition(uint64_t* position,
-                                                             int64_t *timeNanos) {
-    return mThread->getExternalPosition(position, timeNanos);
-}
-
-status_t MmapThreadHandle::start(const AudioClient& client,
-        const audio_attributes_t *attr, audio_port_handle_t *handle)
+binder::Status MmapThreadHandle::getObservablePosition(
+        media::IMmapStream::MmapObservablePosition* _aidl_return)
 {
-    return mThread->start(client, attr, handle);
+    uint64_t position;
+    int64_t timeNanos;
+    const status_t status = mThread->getObservablePosition(&position, &timeNanos);
+    if (status == NO_ERROR) {
+        _aidl_return->timeNanos = timeNanos;
+        _aidl_return->positionFrames = position;
+    }
+    return aidl_utils::binderStatusFromStatusT(status);
 }
 
-status_t MmapThreadHandle::stop(audio_port_handle_t handle)
+binder::Status MmapThreadHandle::start(
+        const ::android::media::AudioClient& client,
+        const ::std::optional<::android::media::audio::common::AudioAttributes>& attr,
+        int32_t portId,
+        int32_t* _aidl_return)
 {
-    return mThread->stop(handle);
+    const AudioClient legacyClient =
+            VALUE_OR_RETURN_BINDER_STATUS(aidl2legacy_AudioClient_AudioClient(client));
+    const audio_attributes_t legacyAttr = attr.has_value() ?
+            VALUE_OR_RETURN_BINDER_STATUS(
+                    aidl2legacy_AudioAttributes_audio_attributes_t(attr.value()))
+            : AUDIO_ATTRIBUTES_INITIALIZER;
+    audio_port_handle_t handle =
+            VALUE_OR_RETURN_BINDER_STATUS(aidl2legacy_int32_t_audio_port_handle_t(portId));
+    const status_t status = mThread->start(
+            legacyClient, attr.has_value() ? &legacyAttr : nullptr, &handle);
+    if (status == NO_ERROR) {
+        *_aidl_return =
+                VALUE_OR_RETURN_BINDER_STATUS(legacy2aidl_audio_port_handle_t_int32_t(handle));
+    }
+    return aidl_utils::binderStatusFromStatusT(status);
 }
 
-status_t MmapThreadHandle::standby()
+binder::Status MmapThreadHandle::stop(int32_t portId)
 {
-    return mThread->standby();
+    const audio_port_handle_t handle =
+            VALUE_OR_RETURN_BINDER_STATUS(aidl2legacy_int32_t_audio_port_handle_t(portId));
+    const status_t status = mThread->stop(handle);
+    return aidl_utils::binderStatusFromStatusT(status);
 }
 
-status_t MmapThreadHandle::reportData(const void* buffer, size_t frameCount)
+binder::Status MmapThreadHandle::standby()
 {
-    return mThread->reportData(buffer, frameCount);
+    const status_t status = mThread->standby();
+    return aidl_utils::binderStatusFromStatusT(status);
 }
 
+binder::Status MmapThreadHandle::reportData(const ::std::vector<uint8_t>& buffer)
+{
+    ALOGV("%s: SoundDose ThreadHandle reportData: %zu", __func__, buffer.size());
+    const size_t frameCount = buffer.size() /
+            std::max(mThread->frameSize(), static_cast<size_t>(1));
+    const status_t status = mThread->reportData(buffer.data(), frameCount);
+    return aidl_utils::binderStatusFromStatusT(status);
+}
+
+binder::Status MmapThreadHandle::drain(int64_t wakeUpNanos, bool allowSoftWakeUp,
+                                       media::TimerQueueHandle* handle) {
+    audio_utils::TimerQueue::handle_t legacy = audio_utils::TimerQueue::INVALID_HANDLE;
+    const status_t status = mThread->drain(wakeUpNanos, allowSoftWakeUp, &legacy);
+    if (status == NO_ERROR) {
+        *handle = VALUE_OR_RETURN_BINDER_STATUS(
+                legacy2aidl_timer_queue_handle_t_TimerQueueHandle(legacy));
+    }
+    return aidl_utils::binderStatusFromStatusT(status);
+}
+
+binder::Status MmapThreadHandle::activate(const media::TimerQueueHandle& handle) {
+    audio_utils::TimerQueue::handle_t legacy = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_TimerQueueHandle_timer_queue_handle_t(handle));
+    const status_t status = mThread->activate(legacy);
+    return aidl_utils::binderStatusFromStatusT(status);
+}
+
+binder::Status MmapThreadHandle::setPlaybackParameters(
+        const media::audio::common::AudioPlaybackRate& rate) {
+    const status_t status = mThread->setPlaybackParameters(rate);
+    return aidl_utils::binderStatusFromStatusT(status);
+}
+
+binder::Status MmapThreadHandle::getPlaybackParameters(
+        media::audio::common::AudioPlaybackRate* rate) {
+    const status_t status = mThread->getPlaybackParameters(rate);
+    return aidl_utils::binderStatusFromStatusT(status);
+}
 
 MmapThread::MmapThread(
         const sp<IAfThreadCallback>& afThreadCallback, audio_io_handle_t id,
@@ -10440,7 +10440,7 @@ void MmapThread::disconnect()
 void MmapThread::configure_l(const audio_attributes_t* attr,
                                                 audio_stream_type_t streamType __unused,
                                                 audio_session_t sessionId,
-                                                const sp<MmapStreamCallback>& callback,
+                             const sp<media::IMmapStreamCallback>& callback,
                                                 const DeviceIdVector& deviceIds,
                                                 audio_port_handle_t portId)
 {
@@ -10517,26 +10517,19 @@ status_t MmapThread::start(const AudioClient& client,
 
     audio_io_handle_t io = mId;
     AttributionSourceState adjAttributionSource;
-    if (!com::android::media::audio::audioserver_permissions()) {
-        adjAttributionSource = afutils::checkAttributionSourcePackage(
-                client.attributionSource);
-    } else {
-        // TODO(b/342475009) validate in oboeservice, and plumb downwards
-        auto validatedRes = ValidatedAttributionSourceState::createFromTrustedUidNoPackage(
-                    client.attributionSource,
-                    mAfThreadCallback->getPermissionProvider()
-                );
-        if (!validatedRes.has_value()) {
-            ALOGE("MMAP client package validation fail: %s",
-                    validatedRes.error().toString8().c_str());
-            return aidl_utils::statusTFromBinderStatus(validatedRes.error());
-        }
-        adjAttributionSource = std::move(validatedRes.value()).unwrapInto();
+    // TODO(b/342475009) validate in oboeservice, and plumb downwards
+    auto validatedRes = ValidatedAttributionSourceState::createFromTrustedUidNoPackage(
+            client.attributionSource, mAfThreadCallback->getPermissionProvider());
+    if (!validatedRes.has_value()) {
+        ALOGE("MMAP client package validation fail: %s", validatedRes.error().toString8().c_str());
+        return aidl_utils::statusTFromBinderStatus(validatedRes.error());
     }
+    adjAttributionSource = std::move(validatedRes.value()).unwrapInto();
 
     const auto localSessionId = mSessionId;
     auto localAttr = mAttr;
 
+    std::variant<audio_input_flags_t, audio_output_flags_t> vflags;
     if (isOutput()) {
         audio_config_t config = AUDIO_CONFIG_INITIALIZER;
         config.sample_rate = mSampleRate;
@@ -10545,10 +10538,11 @@ status_t MmapThread::start(const AudioClient& client,
         audio_stream_type_t stream = streamType_l();
         audio_output_flags_t flags =
                 (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_MMAP_NOIRQ | AUDIO_OUTPUT_FLAG_DIRECT);
-        if (auto offloadInfo = offloadInfo_l(); offloadInfo.has_value()) {
+        if (mOffloadInfo.has_value()) {
             flags = (audio_output_flags_t)(flags | AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD);
-            config.offload_info = offloadInfo.value();
+            config.offload_info = mOffloadInfo.value();
         }
+        vflags = flags;
         DeviceIdVector deviceIds = mDeviceIds;
         std::vector<audio_io_handle_t> secondaryOutputs;
         bool isSpatialized;
@@ -10576,6 +10570,7 @@ status_t MmapThread::start(const AudioClient& client,
         config.format = mFormat;
         audio_port_handle_t deviceId = getFirstDeviceId(mDeviceIds);
         audio_source_t source = AUDIO_SOURCE_DEFAULT;
+        vflags = (audio_input_flags_t)(AUDIO_INPUT_FLAG_NONE);
         mutex().unlock();
         ret = AudioSystem::getInputForAttr(&localAttr, &io,
                                               RECORD_RIID_INVALID,
@@ -10636,7 +10631,7 @@ status_t MmapThread::start(const AudioClient& client,
     // Given that MmapThread::mAttr is mutable, should a MmapTrack have attributes ?
     const auto track = IAfMmapTrack::create(
             this, attr == nullptr ? mAttr : *attr, mSampleRate, mFormat,
-                                        mChannelMask, mSessionId, isOutput(),
+                                        mChannelMask, mSessionId, vflags, isOutput(),
                                         adjAttributionSource,
                                         IPCThreadState::self()->getCallingPid(), portId);
 
@@ -10646,7 +10641,22 @@ status_t MmapThread::start(const AudioClient& client,
     }
     // MMAP tracks are only created when they are started, so mark them as Start for the purposes
     // of the IAfTrackBase interface
+    bool checkEffect = mOutput && (mOutput->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) != 0;
+
+    mutex().unlock();
+    if (checkEffect) {
+        ret = mAfThreadCallback->tryMoveEffectChain(track->sessionId(), this);
+        if (ret == NO_ERROR && track->isNonOffloadableEffectEnabled()) {
+            ret = PERMISSION_DENIED;
+        }
+        if (ret != NO_ERROR) {
+            mutex().lock();
+            track->invalidate();
+            return ret;
+        }
+    }
     track->start();
+    mutex().lock();
     if (!isOutput()) {
         track->setSilenced_l(isClientSilenced_l(portId));
     }
@@ -10771,6 +10781,28 @@ status_t MmapThread::reportData(const void* /*buffer*/, size_t /*frameCount*/) {
     return INVALID_OPERATION;
 }
 
+status_t MmapThread::drain(int64_t /*wakeUpNanos*/, bool /*allowSoftWakeUp*/,
+                           audio_utils::TimerQueue::handle_t* /*handle*/) {
+    // This is a stub implementation. The MmapPlaybackThread overrides this function.
+    return INVALID_OPERATION;
+}
+
+status_t MmapThread::activate(audio_utils::TimerQueue::handle_t /*handle*/) {
+    // This is a stub implementation. The MmapPlaybackThread overrides this function.
+    return INVALID_OPERATION;
+}
+
+status_t MmapThread::setPlaybackParameters(
+        const media::audio::common::AudioPlaybackRate& /*rate*/) {
+    // This is a stub implementation. The MmapPlaybackThread overrides this function.
+    return INVALID_OPERATION;
+}
+
+status_t MmapThread::getPlaybackParameters(media::audio::common::AudioPlaybackRate* /*rate*/) {
+    // This is a stub implementation. The MmapPlaybackThread overrides this function.
+    return INVALID_OPERATION;
+}
+
 void MmapThread::readHalParameters_l()
 {
     status_t result = mHalStream->getAudioProperties(&mSampleRate, &mChannelMask, &mHALFormat);
@@ -10814,7 +10846,7 @@ bool MmapThread::threadLoop()
 
     while (!exitPending())
     {
-        Vector<sp<IAfEffectChain>> effectChains;
+        std::vector<sp<IAfEffectChain>> effectChains;
 
         { // under Thread lock
         audio_utils::unique_lock _l(mutex());
@@ -10823,7 +10855,7 @@ bool MmapThread::threadLoop()
             // A signal was raised while we were unlocked
             mSignalPending = false;
         } else {
-            if (mConfigEvents.isEmpty()) {
+            if (mConfigEvents.empty()) {
                 // we're about to wait, flush the binder command buffer
                 IPCThreadState::self()->flushCommands();
 
@@ -10986,7 +11018,7 @@ NO_THREAD_SAFETY_ANALYSIS  // elease and re-acquire mutex()
     // For mmap streams, once the routing has changed, they will be disconnected. It should be
     // okay to notify the client earlier before the new patch creation.
     if (!areDeviceIdsEqual(deviceIds, mDeviceIds)) {
-        if (const sp<MmapStreamCallback> callback = mCallback.promote()) {
+        if (const sp<media::IMmapStreamCallback> callback = mCallback.promote()) {
             // The aaudioservice handle the routing changed event asynchronously. In that case,
             // it is safe to hold the lock here.
             callback->onRoutingChanged(deviceIds);
@@ -11092,7 +11124,7 @@ status_t MmapThread::addEffectChain_l(const sp<IAfEffectChain>& chain)
     chain->setOutBuffer(nullptr);
     chain->syncHalEffectsState_l();
 
-    mEffectChains.add(chain);
+    mEffectChains.push_back(chain);
     checkSuspendOnAddEffectChain_l(chain);
     return NO_ERROR;
 }
@@ -11103,9 +11135,9 @@ size_t MmapThread::removeEffectChain_l(const sp<IAfEffectChain>& chain)
 
     ALOGV("removeEffectChain_l() %p from thread %p for session %d", chain.get(), this, session);
 
-    for (size_t i = 0; i < mEffectChains.size(); i++) {
-        if (chain == mEffectChains[i]) {
-            mEffectChains.removeAt(i);
+    for (auto it = mEffectChains.begin(); it != mEffectChains.end(); ++it) {
+        if (chain == *it) {
+            (void) mEffectChains.erase(it);  // we break at the end.
             // detach all active tracks from the chain
             // detach all tracks with same session ID from this chain
             for (const auto& track : mActiveTracks) {
@@ -11127,7 +11159,7 @@ void MmapThread::threadLoop_standby()
 
 void MmapThread::threadLoop_exit()
 {
-    sp<MmapStreamCallback> callback;
+    sp<media::IMmapStreamCallback> callback;
     std::vector<audio_port_handle_t> portIds;
     {
         audio_utils::lock_guard _l(mutex());
@@ -11156,45 +11188,11 @@ bool MmapThread::isValidSyncEvent(
     return false;
 }
 
-status_t MmapThread::checkEffectCompatibility_l(
-        const effect_descriptor_t *desc, audio_session_t sessionId)
-{
-    // No global effect sessions on mmap threads
-    if (audio_is_global_session(sessionId)) {
-        ALOGW("checkEffectCompatibility_l(): global effect %s on MMAP thread %s",
-                desc->name, mThreadName);
-        return BAD_VALUE;
-    }
-
-    if (!isOutput() && ((desc->flags & EFFECT_FLAG_TYPE_MASK) != EFFECT_FLAG_TYPE_PRE_PROC)) {
-        ALOGW("checkEffectCompatibility_l(): non pre processing effect %s on capture mmap thread",
-                desc->name);
-        return BAD_VALUE;
-    }
-    if (isOutput() && ((desc->flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_PRE_PROC)) {
-        ALOGW("checkEffectCompatibility_l(): pre processing effect %s created on playback mmap "
-              "thread", desc->name);
-        return BAD_VALUE;
-    }
-
-    // Only allow effects without processing load or latency
-    if ((desc->flags & EFFECT_FLAG_NO_PROCESS_MASK) != EFFECT_FLAG_NO_PROCESS) {
-        return BAD_VALUE;
-    }
-
-    if (IAfEffectModule::isHapticGenerator(&desc->type)) {
-        ALOGE("%s(): HapticGenerator is not supported for MmapThread", __func__);
-        return BAD_VALUE;
-    }
-
-    return NO_ERROR;
-}
-
 void MmapThread::checkInvalidTracks_l()
 {
     for (const auto& track : mActiveTracks) {
         if (track->isInvalid()) {
-            if (const sp<MmapStreamCallback> callback = mCallback.promote()) {
+            if (const sp<media::IMmapStreamCallback> callback = mCallback.promote()) {
                 // The aaudioservice handle the routing changed event asynchronously. In that case,
                 // it is safe to hold the lock here.
                 callback->onRoutingChanged({});
@@ -11207,8 +11205,27 @@ void MmapThread::checkInvalidTracks_l()
     }
 }
 
-void MmapThread::dumpInternals_l(int fd, const Vector<String16>& /* args */)
+void MmapThread::dumpInternals_l(int fd, const Vector<String16>& args)
 {
+    if (isOutput()) {
+        AudioStreamOut *output = mOutput;
+        audio_output_flags_t flags = output != NULL ? output->flags : AUDIO_OUTPUT_FLAG_NONE;
+        dprintf(fd, "  AudioStreamOut: %p flags %#x (%s)\n",
+                output, flags, toString(flags).c_str());
+        if (output != nullptr && output->stream) {
+            dprintf(fd, "  Hal stream dump:\n");
+            (void)output->stream->dump(fd, args);
+        }
+    } else {
+        AudioStreamIn *input = mInput;
+        audio_input_flags_t flags = input != NULL ? input->flags : AUDIO_INPUT_FLAG_NONE;
+        dprintf(fd, "  AudioStreamIn: %p flags %#x (%s)\n",
+                input, flags, toString(flags).c_str());
+        if (input != nullptr && input->stream) {
+            dprintf(fd, "  Hal stream dump:\n");
+            (void)input->stream->dump(fd);
+        }
+    }
     dprintf(fd, "  Attributes: content type %d usage %d source %d\n",
             mAttr.content_type, mAttr.usage, mAttr.source);
     dprintf(fd, "  Session: %d port Id: %d\n", mSessionId, mPortId);
@@ -11246,34 +11263,26 @@ std::string MmapThread::getLocalLogHeader() const {
 /* static */
 sp<IAfMmapThread> IAfMmapThread::create(
         const sp<IAfThreadCallback>& afThreadCallback, audio_io_handle_t id,
-        AudioHwDevice* hwDev,  AudioStreamOut* output, bool systemReady) {
-    return sp<MmapPlaybackThread>::make(afThreadCallback, id, hwDev, output, systemReady);
+        AudioHwDevice* hwDev,  AudioStreamOut* output, bool systemReady,
+        const std::shared_ptr<audio_utils::TimerQueue>& timerQueue) {
+    return sp<MmapPlaybackThread>::make(
+            afThreadCallback, id, hwDev, output, systemReady, timerQueue);
 }
 
 MmapPlaybackThread::MmapPlaybackThread(
         const sp<IAfThreadCallback>& afThreadCallback, audio_io_handle_t id,
-        AudioHwDevice *hwDev,  AudioStreamOut *output, bool systemReady)
+        AudioHwDevice *hwDev,  AudioStreamOut *output, bool systemReady,
+        const std::shared_ptr<audio_utils::TimerQueue>& timerQueue)
     : MmapThread(afThreadCallback, id, hwDev, output->stream, systemReady, true /* isOut */,
             nullptr /* input */, output),
-      mStreamType(AUDIO_STREAM_MUSIC)
+      mStreamType(AUDIO_STREAM_MUSIC),
+      mTimerQueue(timerQueue)
 {
     snprintf(mThreadName, kThreadNameLength, "AudioMmapOut_%X", id);
     mFlagsAsString = toString(output->flags);
     mChannelCount = audio_channel_count_from_out_mask(mChannelMask);
     mMasterVolume = afThreadCallback->masterVolume_l();
     mMasterMute = afThreadCallback->masterMute_l();
-    if (!audioserver_flags::portid_volume_management()) {
-        for (int i = AUDIO_STREAM_MIN; i < AUDIO_STREAM_FOR_POLICY_CNT; ++i) {
-            const audio_stream_type_t stream{static_cast<audio_stream_type_t>(i)};
-            mStreamTypes[stream].volume = 0.0f;
-            mStreamTypes[stream].mute = mAfThreadCallback->streamMute_l(stream);
-        }
-        // Audio patch and call assistant volume are always max
-        mStreamTypes[AUDIO_STREAM_PATCH].volume = 1.0f;
-        mStreamTypes[AUDIO_STREAM_PATCH].mute = false;
-        mStreamTypes[AUDIO_STREAM_CALL_ASSISTANT].volume = 1.0f;
-        mStreamTypes[AUDIO_STREAM_CALL_ASSISTANT].mute = false;
-    }
     if (mAudioHwDev) {
         if (mAudioHwDev->canSetMasterVolume()) {
             mMasterVolume = 1.0;
@@ -11288,7 +11297,7 @@ MmapPlaybackThread::MmapPlaybackThread(
 void MmapPlaybackThread::configure(const audio_attributes_t* attr,
                                    audio_stream_type_t streamType,
                                    audio_session_t sessionId,
-                                   const sp<MmapStreamCallback>& callback,
+                                   const sp<media::IMmapStreamCallback>& callback,
                                    const DeviceIdVector& deviceIds,
                                    audio_port_handle_t portId,
                                    const audio_offload_info_t* offloadInfo)
@@ -11326,59 +11335,21 @@ void MmapPlaybackThread::setMasterMute(bool muted)
     }
 }
 
-void MmapPlaybackThread::setStreamVolume(audio_stream_type_t stream, float value, bool muted)
-{
-    ALOGV("%s: stream %d value %f muted %d", __func__, stream, value, muted);
-    audio_utils::lock_guard _l(mutex());
-    mStreamTypes[stream].volume = value;
-    if (com_android_media_audio_ring_my_car()) {
-        mStreamTypes[stream].mute = muted;
-    }
-    if (stream == mStreamType) {
-        broadcast_l();
-    }
-}
-
-float MmapPlaybackThread::streamVolume(audio_stream_type_t stream) const
-{
-    audio_utils::lock_guard _l(mutex());
-    return mStreamTypes[stream].volume;
-}
-
-void MmapPlaybackThread::setStreamMute(audio_stream_type_t stream, bool muted)
-{
-    audio_utils::lock_guard _l(mutex());
-    mStreamTypes[stream].mute = muted;
-    if (stream == mStreamType) {
-        broadcast_l();
-    }
-}
-
 void MmapPlaybackThread::processVolume_l()
 NO_THREAD_SAFETY_ANALYSIS // access of track->processMuteEvent
 {
     float volume = 0;
-    if (!audioserver_flags::portid_volume_management()) {
-        if (mMasterMute || streamMuted_l()) {
-            volume = 0;
-        } else {
-            volume = mMasterVolume * streamVolume_l();
-        }
-    } else {
-        if (mMasterMute) {
-            volume = 0;
-        } else {
-            // All mmap tracks are declared with the same audio attributes to the audio policy
-            // manager. Hence, they follow the same routing / volume group. Any change of volume
-            // will be broadcasted to all tracks. Thus, take arbitrarily first track volume.
-            size_t numtracks = mActiveTracks.size();
-            if (numtracks) {
-                const auto track = (*mActiveTracks.begin())->asIAfMmapTrack();
-                if (track->getPortMute()) {
-                    volume = 0;
-                } else {
-                    volume = mMasterVolume * track->getPortVolume();
-                }
+    if (!mMasterMute) {
+        // All mmap tracks are declared with the same audio attributes to the audio policy
+        // manager. Hence, they follow the same routing / volume group. Any change of volume
+        // will be broadcasted to all tracks. Thus, take arbitrarily first track volume.
+        size_t numtracks = mActiveTracks.size();
+        if (numtracks) {
+            const auto track = (*mActiveTracks.begin())->asIAfMmapTrack();
+            if (track->getPortMute()) {
+                volume = 0;
+            } else {
+                volume = mMasterVolume * track->getPortVolume();
             }
         }
     }
@@ -11396,7 +11367,7 @@ NO_THREAD_SAFETY_ANALYSIS // access of track->processMuteEvent
         // Delegate volume control to effect in track effect chain if needed
         // only one effect chain can be present on DirectOutputThread, so if
         // there is one, the track is connected to it
-        if (!mEffectChains.isEmpty()) {
+        if (!mEffectChains.empty()) {
             mEffectChains[0]->setVolume(&vol, &vol);
             volume = (float)vol / (1 << 24);
         }
@@ -11405,7 +11376,7 @@ NO_THREAD_SAFETY_ANALYSIS // access of track->processMuteEvent
             mHalVolFloat = volume; // HW volume control worked, so update value.
             mNoCallbackWarningCount = 0;
         } else {
-            sp<MmapStreamCallback> callback = mCallback.promote();
+            sp<media::IMmapStreamCallback> callback = mCallback.promote();
             if (callback != 0) {
                 mHalVolFloat = volume; // SW volume control worked, so update value.
                 mNoCallbackWarningCount = 0;
@@ -11423,29 +11394,17 @@ NO_THREAD_SAFETY_ANALYSIS // access of track->processMuteEvent
         for (const auto& track : mActiveMmapTracksView) {
             track->setMetadataHasChanged();
             if (amn) {
-                if (!audioserver_flags::portid_volume_management()) {
-                    track->processMuteEvent(*amn,
-                            /*muteState=*/{mMasterMute,
-                            streamVolume_l() == 0.f,
-                            streamMuted_l(),
-                            // TODO(b/241533526): adjust logic to include mute from AppOps
-                            false /*muteFromPlaybackRestricted*/,
-                            false /*muteFromClientVolume*/,
-                            false /*muteFromVolumeShaper*/,
-                            false /*muteFromPortVolume*/,
-                            shouldMutePlaybackHardening});
-                } else {
-                    track->processMuteEvent(*amn,
-                        /*muteState=*/{mMasterMute,
-                                       track->getPortVolume() == 0.f,
-                                       /* muteFromStreamMuted= */ false,
-                                       // TODO(b/241533526): adjust logic to include mute from AppOp
-                                       false /*muteFromPlaybackRestricted*/,
-                                       false /*muteFromClientVolume*/,
-                                       false /*muteFromVolumeShaper*/,
-                                       track->getPortMute(),
-                                       shouldMutePlaybackHardening});
-                }
+                track->processMuteEvent(*amn,
+                    /*muteState=*/{mMasterMute,
+                                   track->getPortVolume() == 0.f,
+                                   /* muteFromStreamMuted= */ false,
+                                   // TODO(b/241533526): adjust logic to include mute from AppOp
+                                   false /*muteFromPlaybackRestricted*/,
+                                   false /*muteFromClientVolume*/,
+                                   false /*muteFromVolumeShaper*/,
+                                   track->getPortMute(),
+                                   shouldMutePlaybackHardening});
+
                 track->maybeLogPlaybackHardening(*amn);
             }
         }
@@ -11468,7 +11427,7 @@ ThreadBase::MetadataUpdate MmapPlaybackThread::updateMetadata_l()
         };
         trackMetadata.channel_mask = track->channelMask();
         std::string tagStr(track->attributes().tags);
-        if (audioserver_flags::enable_gmap_mode() && track->attributes().usage == AUDIO_USAGE_GAME
+        if (track->attributes().usage == AUDIO_USAGE_GAME
                 && afThreadCallback()->hasAlreadyCaptured(track->uid())
                 && (tagStr.size() + strlen(AUDIO_ATTRIBUTES_TAG_GMAP_BIDIRECTIONAL)
                     + (tagStr.size() ? 1 : 0))
@@ -11499,7 +11458,7 @@ void MmapPlaybackThread::toAudioPortConfig(struct audio_port_config* config)
     }
 }
 
-status_t MmapPlaybackThread::getExternalPosition(uint64_t* position,
+status_t MmapPlaybackThread::getObservablePosition(uint64_t* position,
         int64_t* timeNanos) const
 {
     if (mOutput == nullptr) {
@@ -11523,16 +11482,125 @@ status_t MmapPlaybackThread::reportData(const void* buffer, size_t frameCount) {
     return NO_ERROR;
 }
 
+void MmapPlaybackThread::onWakeUp() {
+    sp<media::IMmapStreamCallback> callback = nullptr;
+    media::TimerQueueHandle handle;
+    {
+        audio_utils::lock_guard _l(mutex());
+        callback = mCallback.promote();
+        auto aidl = legacy2aidl_timer_queue_handle_t_TimerQueueHandle(mWakeUpHandle);
+        mWakeUpHandle = audio_utils::TimerQueue::INVALID_HANDLE;
+        if (!aidl.ok()) {
+            return;
+        }
+        handle = aidl.value();
+    }
+    if (callback != nullptr) {
+        callback->onWakeUp(handle);
+    }
+}
+
+status_t MmapPlaybackThread::drain(int64_t wakeUpNanos, bool /*allowSoftWakeUp*/,
+                                   audio_utils::TimerQueue::handle_t* handle) {
+    {
+        audio_utils::lock_guard _l(mutex());
+        if (!mTimerQueue->ready()) {
+            ALOGW("%s timer queue is not ready", __func__);
+            *handle = audio_utils::TimerQueue::INVALID_HANDLE;
+            return NO_ERROR;
+        }
+        auto weakPtr = wp<MmapPlaybackThread>::fromExisting(this);
+
+        *handle = mTimerQueue->add([weakPtr, this]() {
+            constexpr bool kAcquireWakelock = true;
+            constexpr bool kCheckDisplay = true;
+            const auto strongPtr = weakPtr.promote();
+            if (strongPtr) {  // if strongPr exists, "this" is valid
+                const auto startTime = systemTime(SYSTEM_TIME_BOOTTIME);
+
+                if constexpr (kAcquireWakelock) {
+                    // check screenstate and only acquire the wakelock if the display is off
+                    // as the device will not suspend with an active display.
+                    const bool displayOff = !kCheckDisplay ||
+                            (mAfThreadCallback->getScreenState() & 1);
+                    if (displayOff) {
+                        // acquire the wakelock here, the next drain call or stop
+                        // will release it.
+                        audio_utils::lock_guard _l(mutex());
+                        if (!mWakeLockToken) acquireWakeLock_l();
+                        ALOGV("MmapCallback: acquiring wakelock");
+                    }
+                }
+                onWakeUp();
+                // handle statistics
+                ++mTimerQueueCallbacks;
+                mTimerQueueCallbackNs += systemTime(SYSTEM_TIME_BOOTTIME) - startTime;
+            }
+        }, wakeUpNanos);
+        mWakeUpHandle = *handle;
+    }
+    releaseWakeLock();
+    return NO_ERROR;
+}
+
+status_t MmapPlaybackThread::activate(audio_utils::TimerQueue::handle_t handle) {
+    {
+        audio_utils::lock_guard _l(mutex());
+        if (!mTimerQueue->remove(handle)) {
+            ALOGW("%s(%jd), the handle does not exist", __func__, handle);
+            return BAD_VALUE;
+        }
+        if (mWakeUpHandle != handle) {
+            // This should not happen.
+            ALOGW("%s(%jd) does not match %jd", __func__, handle, mWakeUpHandle);
+        }
+        mWakeUpHandle = audio_utils::TimerQueue::INVALID_HANDLE;
+    }
+    acquireWakeLock();
+    return NO_ERROR;
+}
+
+status_t MmapPlaybackThread::setPlaybackParameters(
+        const media::audio::common::AudioPlaybackRate& rate) {
+    const audio_playback_rate_t legacy = VALUE_OR_RETURN_STATUS(
+            aidl2legacy_AudioPlaybackRate_audio_playback_rate_t(rate));
+    audio_utils::lock_guard lock(mutex());
+    return mOutput->stream->setPlaybackRateParameters(legacy);
+}
+
+status_t MmapPlaybackThread::getPlaybackParameters(media::audio::common::AudioPlaybackRate* rate) {
+    audio_playback_rate_t legacy;
+    {
+        audio_utils::lock_guard lock(mutex());
+        if (status_t status = mOutput->stream->getPlaybackRateParameters(&legacy);
+            status != NO_ERROR) {
+            ALOGE("%s failed, result=%d", __func__, status);
+            return status;
+        }
+    }
+    *rate = VALUE_OR_RETURN_STATUS(
+            legacy2aidl_audio_playback_rate_t_AudioPlaybackRate(legacy));
+    return NO_ERROR;
+}
+
 // startMelComputation_l() must be called with AudioFlinger::mutex() held
 void MmapPlaybackThread::startMelComputation_l(
         const sp<audio_utils::MelProcessor>& processor)
 {
-    ALOGV("%s: starting mel processor for thread %d", __func__, id());
+    ALOGV("%s(%d): SoundDose starting mel processor %s", __func__, id(),
+            (processor ? "active" : "inactive"));
     mMelProcessor.store(processor);
     if (processor) {
         processor->resume();
     }
-
+    sp<media::IMmapStreamCallback> callback;
+    {
+        audio_utils::lock_guard lock(mutex());
+        callback = mCallback.promote();
+    }
+    if (callback) {
+        callback->onSoundDoseChanged(processor != nullptr);
+    }
     // no need to update output format for MMapPlaybackThread since it is
     // assigned constant for each thread
 }
@@ -11540,24 +11608,28 @@ void MmapPlaybackThread::startMelComputation_l(
 // stopMelComputation_l() must be called with AudioFlinger::mutex() held
 void MmapPlaybackThread::stopMelComputation_l()
 {
-    ALOGV("%s: pausing mel processor for thread %d", __func__, id());
-    auto melProcessor = mMelProcessor.load();
-    if (melProcessor != nullptr) {
+    ALOGV("%s(%d): SoundDose pausing mel processor", __func__, id());
+    if (auto melProcessor = mMelProcessor.load()) {
         melProcessor->pause();
+        sp<media::IMmapStreamCallback> callback;
+        {
+            audio_utils::lock_guard lock(mutex());
+            callback = mCallback.promote();
+        }
+        if (callback) {
+            callback->onSoundDoseChanged(false /* active */);
+        }
     }
 }
 
 void MmapPlaybackThread::dumpInternals_l(int fd, const Vector<String16>& args)
 {
     MmapThread::dumpInternals_l(fd, args);
-    if (!audioserver_flags::portid_volume_management()) {
-        dprintf(fd, "  Stream type: %d Stream volume: %f HAL volume: %f Stream mute %d",
-                mStreamType, streamVolume_l(), mHalVolFloat, streamMuted_l());
-    } else {
-        dprintf(fd, "  HAL volume: %f", mHalVolFloat);
-    }
+    dprintf(fd, "  HAL volume: %f", mHalVolFloat);
     dprintf(fd, "\n");
     dprintf(fd, "  Master volume: %f Master mute %d\n", mMasterVolume, mMasterMute);
+    dprintf(fd, "  TimerQueueCallbacks: %d\n", mTimerQueueCallbacks.load());
+    dprintf(fd, "  TimerQueueCallback Ms: %lf\n", mTimerQueueCallbackNs.load() * 1e-6);
 }
 
 /* static */
@@ -11582,7 +11654,7 @@ void MmapCaptureThread::processVolume_l()
     bool changed = false;
     bool silenced = false;
 
-    sp<MmapStreamCallback> callback = mCallback.promote();
+    sp<media::IMmapStreamCallback> callback = mCallback.promote();
     if (callback == 0) {
         if (mNoCallbackWarningCount < kMaxNoCallbackWarnings) {
             ALOGW("Could not set MMAP stream silenced: no onStreamSilenced callback!");
@@ -11649,7 +11721,7 @@ void MmapCaptureThread::toAudioPortConfig(struct audio_port_config* config)
     }
 }
 
-status_t MmapCaptureThread::getExternalPosition(
+status_t MmapCaptureThread::getObservablePosition(
         uint64_t* position, int64_t* timeNanos) const
 {
     if (mInput == nullptr) {

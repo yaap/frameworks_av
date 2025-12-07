@@ -49,6 +49,10 @@ int32_t FixedBlockReader::readFromStorage(uint8_t *buffer, int32_t numBytes) {
     return bytesToRead;
 }
 
+void FixedBlockReader::flush() {
+    mPosition = mAvailable;
+}
+
 AdapterProcessResult FixedBlockReader::processVariableBlock(uint8_t *buffer, int32_t numBytes) {
     aaudio_data_callback_result_t result = AAUDIO_CALLBACK_RESULT_CONTINUE;
     int32_t bytesLeft = numBytes;

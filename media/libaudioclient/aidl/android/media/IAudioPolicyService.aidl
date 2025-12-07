@@ -66,7 +66,7 @@ import com.android.media.permission.INativePermissionController;
 /**
  * IAudioPolicyService interface (see AudioPolicyInterface for method descriptions).
  *
- * {@hide}
+ * @hide
  */
 interface IAudioPolicyService {
     oneway void onNewAudioModulesAvailable();
@@ -103,6 +103,8 @@ interface IAudioPolicyService {
     void stopOutput(int /* audio_port_handle_t */ portId);
 
     void releaseOutput(int /* audio_port_handle_t */ portId);
+
+    void forceReleaseDirectOutput(int /* audio_io_handle_t */ output);
 
     GetInputForAttrResponse getInputForAttr(in AudioAttributes attr,
                                             int /* audio_io_handle_t */ input,
@@ -358,6 +360,8 @@ interface IAudioPolicyService {
      */
     boolean isHotwordStreamSupported(boolean lookbackAudio);
 
+    AudioAttributes getAttributesForStreamType(in AudioStreamType stream);
+    AudioStreamType getStreamTypeForAttributes(in AudioAttributes attributes);
     AudioProductStrategy[] listAudioProductStrategies();
     int /* product_strategy_t */ getProductStrategyFromAudioAttributes(
             in AudioAttributes aa, boolean fallbackOnDefault);

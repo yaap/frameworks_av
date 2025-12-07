@@ -57,6 +57,7 @@
 #include <gui/BufferItemConsumer.h>
 #include <gui/BufferQueue.h>
 #include <gui/Surface.h>
+#include <gui/Flags.h> // remove with WB_MEDIA_MIGRATION
 #include <hidlmemory/FrameworkUtils.h>
 #include <mediadrm/ICrypto.h>
 #include <media/IOMX.h>
@@ -225,6 +226,9 @@ static const char *kCodecFramesReleased = "android.media.mediacodec.frames-relea
 static const char *kCodecFramesRendered = "android.media.mediacodec.frames-rendered";
 static const char *kCodecFramesDropped = "android.media.mediacodec.frames-dropped";
 static const char *kCodecFramesSkipped = "android.media.mediacodec.frames-skipped";
+static const char *kCodecFramesStagnant = "android.media.mediacodec.frames-stagnant";
+static const char *kCodecFramesBackward = "android.media.mediacodec.frames-backward";
+static const char *kCodecFramesForward = "android.media.mediacodec.frames-forward";
 static const char *kCodecFramerateContent = "android.media.mediacodec.framerate-content";
 static const char *kCodecFramerateDesired = "android.media.mediacodec.framerate-desired";
 static const char *kCodecFramerateActual = "android.media.mediacodec.framerate-actual";
@@ -1009,10 +1013,17 @@ public:
     virtual void onComponentAllocated(const char *componentName) override;
     virtual void onComponentConfigured(
             const sp<AMessage> &inputFormat, const sp<AMessage> &outputFormat) override;
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
+    virtual void onInputSurfaceCreated(
+            const sp<AMessage> &inputFormat,
+            const sp<AMessage> &outputFormat,
+            const sp<Surface> &inputSurface) override;
+#else
     virtual void onInputSurfaceCreated(
             const sp<AMessage> &inputFormat,
             const sp<AMessage> &outputFormat,
             const sp<BufferProducerWrapper> &inputSurface) override;
+#endif
     virtual void onInputSurfaceCreationFailed(status_t err) override;
     virtual void onInputSurfaceAccepted(
             const sp<AMessage> &inputFormat,
@@ -1085,10 +1096,17 @@ void CodecCallback::onComponentConfigured(
     notify->post();
 }
 
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
+void CodecCallback::onInputSurfaceCreated(
+        const sp<AMessage> &inputFormat,
+        const sp<AMessage> &outputFormat,
+        const sp<Surface> &inputSurface) {
+#else
 void CodecCallback::onInputSurfaceCreated(
         const sp<AMessage> &inputFormat,
         const sp<AMessage> &outputFormat,
         const sp<BufferProducerWrapper> &inputSurface) {
+#endif
     sp<AMessage> notify(mNotify->dup());
     notify->setInt32("what", kWhatInputSurfaceCreated);
     notify->setMessage("input-format", inputFormat);
@@ -1258,17 +1276,19 @@ sp<PersistentSurface> MediaCodec::CreatePersistentInputSurface() {
 
     sp<IOMX> omx = client.interface();
 
-    sp<IGraphicBufferProducer> bufferProducer;
+    sp<MediaSurfaceType> surface;
     sp<hardware::media::omx::V1_0::IGraphicBufferSource> bufferSource;
 
-    status_t err = omx->createInputSurface(&bufferProducer, &bufferSource);
+    // Change IOMX to use Surface too in a follow up CL.
+    sp<IGraphicBufferProducer> igbp = mediaflagtools::surfaceTypeToIGBP(surface);
+    status_t err = omx->createInputSurface(&igbp, &bufferSource);
 
     if (err != OK) {
         ALOGE("Failed to create persistent input surface.");
         return NULL;
     }
 
-    return new PersistentSurface(bufferProducer, bufferSource);
+    return new PersistentSurface(surface, bufferSource);
 }
 
 inline MediaResourceType getResourceType(const std::string& resourceName) {
@@ -1710,6 +1730,9 @@ void MediaCodec::updateMediametrics() {
             mediametrics_setInt64(mMetricsHandle, kCodecFramesRendered, m.frameRenderedCount);
             mediametrics_setInt64(mMetricsHandle, kCodecFramesSkipped, m.frameSkippedCount);
             mediametrics_setInt64(mMetricsHandle, kCodecFramesDropped, m.frameDroppedCount);
+            mediametrics_setInt64(mMetricsHandle, kCodecFramesStagnant, m.frameStagnantCount);
+            mediametrics_setInt64(mMetricsHandle, kCodecFramesBackward, m.frameJumpBackwardCount);
+            mediametrics_setInt64(mMetricsHandle, kCodecFramesForward, m.frameJumpForwardCount);
             mediametrics_setDouble(mMetricsHandle, kCodecFramerateContent, m.contentFrameRate);
             mediametrics_setDouble(mMetricsHandle, kCodecFramerateDesired, m.desiredFrameRate);
             mediametrics_setDouble(mMetricsHandle, kCodecFramerateActual, m.actualFrameRate);
@@ -3488,8 +3511,7 @@ status_t MediaCodec::setSurface(const sp<Surface> &surface) {
     return PostAndAwaitResponse(msg, &response);
 }
 
-status_t MediaCodec::createInputSurface(
-        sp<IGraphicBufferProducer>* bufferProducer) {
+status_t MediaCodec::createInputSurface(sp<MediaSurfaceType>* surface) {
     sp<AMessage> msg = new AMessage(kWhatCreateInputSurface, this);
 
     sp<AMessage> response;
@@ -3499,9 +3521,14 @@ status_t MediaCodec::createInputSurface(
         sp<RefBase> obj;
         bool found = response->findObject("input-surface", &obj);
         CHECK(found);
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
+        sp<Surface> wrapper(static_cast<Surface*>(obj.get()));
+        *surface = wrapper;
+#else
         sp<BufferProducerWrapper> wrapper(
                 static_cast<BufferProducerWrapper*>(obj.get()));
-        *bufferProducer = wrapper->getBufferProducer();
+        *surface = mediaflagtools::igbpToSurfaceType(wrapper->getBufferProducer());
+#endif
     } else {
         ALOGW("createInputSurface failed, err=%d", err);
     }
@@ -7627,7 +7654,12 @@ void MediaCodec::onOutputFormatChanged() {
     if (mCallback != NULL) {
         sp<AMessage> msg = mCallback->dup();
         msg->setInt32("callbackID", CB_OUTPUT_FORMAT_CHANGED);
-        msg->setMessage("format", mOutputFormat);
+
+        // Here format is MediaCodec's internal copy of output format.
+        // Make a copy since codec internal or the client might modify it.
+        sp<AMessage> copy = mOutputFormat->dup();
+        msg->setMessage("format", copy);
+
         msg->post();
     }
 }

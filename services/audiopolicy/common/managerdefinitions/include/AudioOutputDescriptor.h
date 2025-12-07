@@ -411,9 +411,9 @@ public:
      * @param muted true to mute, false otherwise
      * @param vs volume source to be considered
      * @param device scoped for the change
-     * @param delayMs potentially applyed to prevent cut sounds.
+     * @param delayMs potentially applied to prevent cut sounds.
      */
-    void setSwMute(bool muted, VolumeSource vs, const StreamTypeVector &streams,
+    void setSwMute(bool muted, VolumeSource vs,
                    const DeviceTypeSet& device, uint32_t delayMs);
 
     virtual bool setVolume(float volumeDb, bool muted,

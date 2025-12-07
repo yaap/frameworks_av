@@ -69,6 +69,7 @@
 #include <system/audio.h>
 
 #include <media/stagefright/rtsp/ARTPWriter.h>
+#include <android_media_mediarecorder.h>
 #include <com_android_media_editing_flags.h>
 
 namespace android {
@@ -136,6 +137,7 @@ StagefrightRecorder::StagefrightRecorder(const AttributionSourceState& client)
       mRTPSockDscp(0),
       mRTPSockOptEcn(0),
       mRTPSockNetwork(0),
+      mRTPVidEncCoeffPercent(80),
       mLastSeqNo(0),
       mStarted(false),
       mSelectedDeviceId(AUDIO_PORT_HANDLE_NONE),
@@ -597,7 +599,7 @@ status_t StagefrightRecorder::setParamVideoEncodingBitRate(int32_t bitRate) {
         // Regular I frames may overload the network so we reduce the bitrate to allow
         // margins for the I frame overruns.
         // Still send requested bitrate (TMMBR) in the reply (TMMBN).
-        const float coefficient = 0.8f;
+        const float coefficient = mRTPVidEncCoeffPercent / 100.f;
         mVideoBitRate = (bitRate * coefficient) / 1000 * 1000;
     }
     if (mOutputFormat == OUTPUT_FORMAT_RTP_AVP && mStarted && mPauseStartTimeUs == 0) {
@@ -932,6 +934,11 @@ status_t StagefrightRecorder::requestIDRFrame() {
     return ret;
 }
 
+status_t StagefrightRecorder::setRTPVidEncCoeffPercent(int32_t percent) {
+    mRTPVidEncCoeffPercent = percent;
+    return OK;
+}
+
 status_t StagefrightRecorder::setLogSessionId(const String8 &log_session_id) {
     ALOGV("setLogSessionId: %s", log_session_id.c_str());
 
@@ -1112,6 +1119,11 @@ status_t StagefrightRecorder::setParameter(
         int64_t networkHandle;
         if (safe_strtoi64(value.c_str(), &networkHandle)) {
             return setSocketNetwork(networkHandle);
+        }
+    } else if (key == "rtp-param-vid-enc-coeff-percent") {
+        int32_t percent;
+        if (safe_strtoi32(value.c_str(), &percent)) {
+            return setRTPVidEncCoeffPercent(percent);
         }
     } else if (key == "log-session-id") {
         return setLogSessionId(value);
@@ -2015,6 +2027,14 @@ status_t StagefrightRecorder::setupVideoEncoder(
             format->setString("mime", MEDIA_MIMETYPE_VIDEO_AV1);
             break;
 
+        case VIDEO_ENCODER_APV:
+            if (android::media::mediarecorder::apv_recording_support()) {
+                format->setString("mime", MEDIA_MIMETYPE_VIDEO_APV);
+            } else {
+                CHECK(!"Should not be here, unsupported video encoding.");
+            }
+            break;
+
         default:
             CHECK(!"Should not be here, unsupported video encoding.");
             break;
@@ -2159,7 +2179,7 @@ status_t StagefrightRecorder::setupVideoEncoder(
     }
 
     if (cameraSource == NULL) {
-        mSurface = mediaflagtools::igbpToSurfaceType(encoder->getGraphicBufferProducer());
+        mSurface = encoder->getSurface();
     }
 
     *source = encoder;

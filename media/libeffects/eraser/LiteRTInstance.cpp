@@ -25,12 +25,65 @@
 
 namespace aidl::android::hardware::audio::effect {
 
-LiteRTInstance::LiteRTInstance(const std::string_view& modelPath)
-    : mModelPath(modelPath),
-      mInputTensorIdx(-1),
-      mInputType(kTfLiteNoType),
-      mOutputTensorIdx(-1),
-      mOutputType(kTfLiteNoType) {
+namespace {
+// Helper to convert TfLiteType to a human-readable string.
+const char* tfliteTypeToString(TfLiteType type) {
+    switch (type) {
+        case kTfLiteNoType:
+            return "NoType";
+        case kTfLiteFloat32:
+            return "Float32";
+        case kTfLiteInt32:
+            return "Int32";
+        case kTfLiteUInt8:
+            return "UInt8";
+        case kTfLiteInt64:
+            return "Int64";
+        case kTfLiteString:
+            return "String";
+        case kTfLiteBool:
+            return "Bool";
+        case kTfLiteInt16:
+            return "Int16";
+        case kTfLiteComplex64:
+            return "Complex64";
+        case kTfLiteInt8:
+            return "Int8";
+        case kTfLiteFloat16:
+            return "Float16";
+        case kTfLiteFloat64:
+            return "Float64";
+        case kTfLiteComplex128:
+            return "Complex128";
+        case  kTfLiteUInt64:
+            return "Uint64";
+        case kTfLiteResource:
+            return "Resource";
+        case kTfLiteVariant:
+            return "Variant";
+        case kTfLiteUInt32:
+            return "UInt32";
+        case kTfLiteUInt16:
+            return "UInt16";
+    }
+    return "Unknown";
+}
+
+// Helper to calculate the total number of elements in a tensor.
+size_t getTensorSize(const TfLiteTensor* tensor) {
+    if (tensor == nullptr || tensor->dims == nullptr) {
+        return 0;
+    }
+    size_t size = 1;
+    for (int i = 0; i < tensor->dims->size; ++i) {
+        size *= tensor->dims->data[i];
+    }
+    return size;
+}
+
+}  // namespace
+
+LiteRTInstance::LiteRTInstance(const std::string_view& modelPath) : mModelPath(modelPath) {
     LOG(DEBUG) << "LiteRTInstance created for model: " << mModelPath;
 }
 
@@ -45,25 +98,24 @@ bool LiteRTInstance::initialize(int numThreads) {
         return true;
     }
 
-    mModel = tflite::FlatBufferModel::BuildFromFile(std::string(mModelPath).c_str());
+    mModel = tflite::FlatBufferModel::VerifyAndBuildFromFile(std::string(mModelPath).c_str());
     if (!mModel) {
         LOG(ERROR) << "Failed to load model file " << mModelPath;
         return false;
     }
-    LOG(INFO) << "Model " << mModelPath << "successfully loaded";
 
-    tflite::ops::builtin::BuiltinOpResolver resolver;
-    tflite::InterpreterBuilder builder(*mModel, resolver);
-    if (builder.SetNumThreads(numThreads) != kTfLiteOk) {
-        LOG(ERROR) << "Failed to set number of threads to: " << numThreads;
-        cleanup();
-        return false;
-    }
-
+    tflite::InterpreterBuilder builder(*mModel, mResolver);
     const TfLiteStatus status = builder(&mInterpreter);
     if(status != kTfLiteOk || mInterpreter == nullptr) {
         LOG(ERROR) << "Interpreter builder failed with ret " << status << ", interpreter "
                    << mInterpreter;
+        cleanup();
+        return false;
+    }
+
+    if (builder.SetNumThreads(numThreads) != kTfLiteOk) {
+        LOG(ERROR) << "Failed to set number of threads to: " << numThreads;
+        cleanup();
         return false;
     }
 
@@ -74,53 +126,47 @@ bool LiteRTInstance::initialize(int numThreads) {
     }
 
     // Get Input and Output Tensor Details for sanity checks
-    // Note: This assumes the model has at least one input and one output.
     if (mInterpreter->inputs().empty() || mInterpreter->outputs().empty()) {
         LOG(ERROR) << "Invalid input/output for model " << mModelPath;
         cleanup();
         return false;
     }
 
-    mInputTensorIdx = mInterpreter->inputs()[0];
-    TfLiteTensor* inputTensor = mInterpreter->tensor(mInputTensorIdx);
-    if (!inputTensor) {
-        LOG(ERROR) << "Failed to get input tensor structure for index " << mInputTensorIdx;
+    const auto inputTensorIndex = mInterpreter->inputs()[0];
+    TfLiteTensor* inputTensor = mInterpreter->tensor(inputTensorIndex);
+    if (!inputTensor || inputTensor->type != kTfLiteFloat32) {
+        LOG(ERROR) << " Input tensor invalid or not supported";
         cleanup();
         return false;
     }
-    mInputType = inputTensor->type;
-    // Perform type check if needed (e.g., assert mInputType == kTfLiteFloat16)
+    mInputTensorType = inputTensor->type;
+    mInputTensorSize = getTensorSize(inputTensor);
 
-    mOutputTensorIdx = mInterpreter->outputs()[0];
-    TfLiteTensor* outputTensor = mInterpreter->tensor(mOutputTensorIdx);
-    if (!outputTensor) {
-        LOG(ERROR) << "Failed to get output tensor structure for index " << mOutputTensorIdx;
+    const auto outputTensorIndex = mInterpreter->outputs()[0];
+    TfLiteTensor* outputTensor = mInterpreter->tensor(outputTensorIndex);
+    if (!outputTensor || outputTensor->type != kTfLiteFloat32) {
+        LOG(ERROR) << " Output tensor invalid or not supported";
         cleanup();
         return false;
     }
-    mOutputType = outputTensor->type;
+    mOutputTensorType = outputTensor->type;
+    mOutputTensorSize = getTensorSize(outputTensor);
 
-    LOG(DEBUG) << "Model " << mModelPath << " loaded, tensor Info: " << dumpModelDetails();
+    LOG(DEBUG) << "Model " << mModelPath << " successfully loaded: " << dumpModelDetails();
     return true;
 }
 
-TfLiteTensor* LiteRTInstance::inputTensor() const {
-    if (!isInitialized() || mInputTensorIdx < 0) {
-        return nullptr;
+bool LiteRTInstance::invoke() const {
+    if (!isInitialized()) {
+        LOG(ERROR) << " instance not initialized.";
+        return false;
     }
-    return mInterpreter->tensor(mInputTensorIdx);
-}
-
-TfLiteTensor* LiteRTInstance::outputTensor() const {
-    if (!isInitialized() || mOutputTensorIdx < 0) {
-        return nullptr;
+    TfLiteStatus invokeStatus = mInterpreter->Invoke();
+    if (invokeStatus != kTfLiteOk) {
+        LOG(ERROR) << " Model " << mModelPath << " invoke failed: " <<  invokeStatus;
+        return false;
     }
-    return mInterpreter->tensor(mOutputTensorIdx);
-}
-
-void LiteRTInstance::resetTensorIndex() {
-    mInputTensorIdx = 0;
-    mOutputTensorIdx = 0;
+    return true;
 }
 
 // Releases resources in the correct order
@@ -128,7 +174,7 @@ void LiteRTInstance::cleanup() {
     // Interpreter must be reset before the delegate it uses
     mInterpreter.reset();
     mModel.reset();
-    LOG(INFO) << "Instance cleaned up " << mModelPath;
+    LOG(DEBUG) << "Instance cleaned up " << mModelPath;
 }
 
 // warmup inference once with all zero data
@@ -146,7 +192,7 @@ bool LiteRTInstance::warmup() {
     return true;
 }
 
-std::string LiteRTInstance::dumpTensorShape(const int tensorIndex) {
+std::string LiteRTInstance::dumpTensorShape(const int tensorIndex) const {
     if (!isInitialized()) {
         return "Not Initialized";
     }
@@ -157,7 +203,9 @@ std::string LiteRTInstance::dumpTensorShape(const int tensorIndex) {
 
     // TODO: move to utility method
     std::ostringstream oss;
-    oss << "[";
+    oss << "Name: " << (tensor->name ? tensor->name : "<Unnamed>") << "\n";
+    oss << "Type: " << tfliteTypeToString(tensor->type) << "\n";
+    oss << "Dimensions: [";
     for (int i = 0; i < tensor->dims->size; ++i) {
         oss << tensor->dims->data[i] << (i == tensor->dims->size - 1 ? "" : ", ");
     }
@@ -165,29 +213,29 @@ std::string LiteRTInstance::dumpTensorShape(const int tensorIndex) {
     return oss.str();
 }
 
-std::string LiteRTInstance::dumpModelDetails() {
+std::string LiteRTInstance::dumpModelDetails() const {
     if (!isInitialized()) {
        return "uninitialized.";
-   }
+    }
 
-   std::ostringstream oss;
-   oss << "Model Path: " << mModelPath << "\n";
-   oss << "Input Tensors (" << mInterpreter->inputs().size() << "):\n";
-   for (int index : mInterpreter->inputs()) {
-       TfLiteTensor* tensor = mInterpreter->tensor(index);
-       oss << "  Index " << index << ": " << (tensor ? tensor->name : "N/A")
-           << ", Type " << static_cast<int>(tensor ? tensor->type : kTfLiteNoType)
-           << ", Shape " << dumpTensorShape(index) << "\n";
-   }
+    std::ostringstream oss;
+    oss << "Model Path: " << mModelPath << "\n";
+    oss << "Input Tensors (" << mInterpreter->inputs().size() << "):\n";
+    for (int index : mInterpreter->inputs()) {
+        TfLiteTensor* tensor = mInterpreter->tensor(index);
+        oss << "  Index " << index << ": " << (tensor ? tensor->name : "N/A")
+            << ", Type " << static_cast<int>(tensor ? tensor->type : kTfLiteNoType)
+            << ", Shape " << dumpTensorShape(index) << "\n";
+    }
 
-   oss << "Output Tensors (" << mInterpreter->outputs().size() << "):\n";
-   for (int index : mInterpreter->outputs()) {
-       TfLiteTensor* tensor = mInterpreter->tensor(index);
-       oss << "  Index " << index << ": " << (tensor ? tensor->name : "N/A")
-           << ", Type " << static_cast<int>(tensor ? tensor->type : kTfLiteNoType)
-           << ", Shape " << dumpTensorShape(index) << "\n";
-   }
-   return oss.str();
+    oss << "Output Tensors (" << mInterpreter->outputs().size() << "):\n";
+    for (int index : mInterpreter->outputs()) {
+        TfLiteTensor* tensor = mInterpreter->tensor(index);
+        oss << "  Index " << index << ": " << (tensor ? tensor->name : "N/A")
+            << ", Type " << static_cast<int>(tensor ? tensor->type : kTfLiteNoType)
+            << ", Shape " << dumpTensorShape(index) << "\n";
+    }
+    return oss.str();
 }
 
 }  // namespace aidl::android::hardware::audio::effect

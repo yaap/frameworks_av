@@ -17,6 +17,8 @@
 package android.companion.virtualcamera;
 
 import android.companion.virtualcamera.Format;
+import android.companion.virtualcamera.ICaptureResultConsumer;
+import android.companion.virtualcamera.VirtualCameraMetadata;
 import android.view.Surface;
 
 /**
@@ -37,11 +39,23 @@ oneway interface IVirtualCameraCallback {
      * android.hardware.camera2.CameraCaptureSession.StateCallback#onConfigured(CameraCaptureSession)}
      * is called.
      */
-    oneway void onOpenCamera();
+    void onOpenCamera();
 
     /**
-     * Called when there's new video stream. This callback is send after clients opens and
-     * configures camera. Implementation should hold onto the surface until corresponding
+     * Called when there's a new camera session. This callback is sent when clients open and
+     * configure the video session for the virtual camera.
+     *
+     * @param sessionParameters - native CameraMetadata of the session parameters packed
+     *      as VirtualCameraMetadata.
+     * @param captureResultConsumer - consumer interface to inject the metadata of capture results
+     *      to the virtual camera service. It is null if per frame camera metadata is not enabled.
+     */
+    void onConfigureSession(in VirtualCameraMetadata sessionParameters,
+        in @nullable ICaptureResultConsumer captureResultConsumer);
+
+    /**
+     * Called when there's new video stream. This callback is sent after the client opens and
+     * configures the camera. Implementation should hold onto the surface until corresponding
      * terminateStream call is received.
      *
      * @param streamId - id of the video stream.
@@ -51,17 +65,20 @@ oneway interface IVirtualCameraCallback {
      * @param pixelFormat - pixel format of the surface.
      */
     void onStreamConfigured(int streamId, in Surface surface, int width, int height,
-            in Format pixelFormat);
+        in Format pixelFormat);
 
     /**
      * Called when framework requests capture. This can be used by the client as a hint
      * to render another frame into input surface.
      *
      * @param streamId - id of the stream corresponding to the Surface for which next
-     *     frame is requested.
+     *      frame is requested.
      * @param frameId - id of the requested frame.
+     * @param captureRequestSettings - The capture request settings metadata provided by the app
+     *      in association with the requested {@code frameId}.
      */
-    void onProcessCaptureRequest(int streamId, int frameId);
+    void onProcessCaptureRequest(int streamId, int frameId,
+        in @nullable VirtualCameraMetadata captureRequestSettings);
 
     /**
      * Called when the corresponding stream is no longer in use. Implementation should dispose of

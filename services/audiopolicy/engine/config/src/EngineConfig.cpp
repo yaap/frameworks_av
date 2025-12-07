@@ -95,12 +95,11 @@ ConversionResult<AttributesGroup> aidl2legacy_AudioHalAttributeGroup_AttributesG
 ConversionResult<ProductStrategy> aidl2legacy_AudioHalProductStrategy_ProductStrategy(
         const media::audio::common::AudioHalProductStrategy& aidl) {
     ProductStrategy ps;
-    ps.name = aidl.name.value_or(VALUE_OR_RETURN(
-                    aidlAudioHalProductStrategyIdToName(aidl.id)));
+    ps.name = aidl.name.value_or(VALUE_OR_RETURN(aidlAudioHalProductStrategyIdToName(aidl.id)));
     ps.id = aidl.id;
     ps.attributesGroups = VALUE_OR_RETURN(convertContainer<AttributesGroups>(
-                    aidl.attributesGroups,
-                    aidl2legacy_AudioHalAttributeGroup_AttributesGroup));
+                    aidl.attributesGroups,aidl2legacy_AudioHalAttributeGroup_AttributesGroup));
+    ps.zoneId = aidl.zoneId;
     return ps;
 }
 
@@ -184,6 +183,7 @@ struct ProductStrategyTraits : public BaseSerializerTraits<ProductStrategy, Prod
     struct Attributes {
         static constexpr const char *name = "name";
         static constexpr const char *id = "id";
+        static constexpr const char *zoneId = "zoneId";
     };
     static android::status_t deserialize(_xmlDoc *doc, const _xmlNode *root, Collection &ps);
 };
@@ -559,11 +559,21 @@ status_t ProductStrategyTraits::deserialize(_xmlDoc *doc, const _xmlNode *child,
     }
     ALOGV("%s: %s, %s = %d", __FUNCTION__, name.c_str(), Attributes::id, id);
 
+    int zoneId = 0;
+    std::string zoneIdLiteral = getXmlAttribute(child, Attributes::zoneId);
+    if (!zoneIdLiteral.empty()) {
+        if (!convertTo(zoneIdLiteral, zoneId)) {
+            return BAD_VALUE;
+        }
+        ALOGV("%s: %s, %s = %d", __FUNCTION__, name.c_str(), Attributes::zoneId, zoneId);
+    }
+    ALOGV("%s: %s = %s", __FUNCTION__, Attributes::name, name.c_str());
+
     size_t skipped = 0;
     AttributesGroups attrGroups;
     deserializeCollection<AttributesGroupTraits>(doc, child, attrGroups, skipped);
 
-    strategies.push_back({name, id, attrGroups});
+    strategies.push_back({name, id, zoneId, attrGroups});
     return NO_ERROR;
 }
 

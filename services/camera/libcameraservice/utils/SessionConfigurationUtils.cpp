@@ -503,7 +503,7 @@ binder::Status createConfiguredSurface(
         return STATUS_ERROR(CameraService::ERROR_INVALID_OPERATION, msg.c_str());
     }
     if (consumerUsage & GraphicBuffer::USAGE_HW_TEXTURE) {
-        ALOGW("%s: Camera %s with consumer usage flag: %" PRIu64 ": Forcing asynchronous mode for"
+        ALOGV("%s: Camera %s with consumer usage flag: %" PRIu64 ": Forcing asynchronous mode for"
                 "stream", __FUNCTION__, logicalCameraId.c_str(), consumerUsage);
         useAsync = true;
     }

@@ -99,6 +99,10 @@ class VirtualCameraDevice
     return mCameraId;
   }
 
+  bool isPerFrameCameraMetadataEnabled() const {
+    return mPerFrameCameraMetadataEnabled;
+  }
+
   const std::vector<
       aidl::android::companion::virtualcamera::SupportedStreamConfiguration>&
   getInputConfigs() const;
@@ -154,7 +158,7 @@ class VirtualCameraDevice
       aidl::android::companion::virtualcamera::SupportedStreamConfiguration>
       mSupportedInputConfigurations;
 
-  [[maybe_unused]] const bool mPerFrameCameraMetadataEnabled;
+  const bool mPerFrameCameraMetadataEnabled;
   std::optional<::aidl::android::companion::virtualcamera::VirtualCameraMetadata>
       mConfigCameraCharacteristics;
 

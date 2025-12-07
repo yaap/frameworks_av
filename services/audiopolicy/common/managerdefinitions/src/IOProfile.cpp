@@ -17,6 +17,9 @@
 #define LOG_TAG "APM::IOProfile"
 //#define LOG_NDEBUG 0
 
+#include <com_android_media_audio.h>
+#include <com_android_media_audioserver.h>
+
 #include <system/audio.h>
 #include "IOProfile.h"
 #include "HwModule.h"
@@ -253,6 +256,22 @@ IOProfile::CompatibilityScore IOProfile::getFlagsCompatibleScore(
     }
 
     return EXACT_MATCH;
+}
+
+bool IOProfile::routesToDevice(const sp<DeviceDescriptor> &device) const
+{
+    if (!com::android::media::audioserver::enable_strict_port_routing_checks() ||
+        !com::android::media::audio::check_route_in_get_audio_mix_port()) {
+        return supportsDevice(device);
+    }
+
+    // If profile does not contain ID, this is most likely indicating HIDL.
+    // Return routable so as to follow the legacy behavior.
+    if (getHalId() == AUDIO_PORT_HANDLE_NONE) {
+        return supportsDevice(device);
+    }
+
+    return mRoutableDevices.contains(device);
 }
 
 void IOProfile::dump(String8 *dst, int spaces) const

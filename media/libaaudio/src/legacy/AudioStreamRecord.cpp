@@ -307,9 +307,9 @@ void AudioStreamRecord::close_l() {
     // So we should join callbacks explicitly before returning.
     // Unlock around the join to avoid deadlocks if the callback tries to lock.
     // This can happen if the callback returns AAUDIO_CALLBACK_RESULT_STOP
-    mStreamLock.unlock();
+    mStreamMutex.unlock();
     mAudioRecord->stopAndJoinCallbacks();
-    mStreamLock.lock();
+    mStreamMutex.lock();
 
     mAudioRecord.clear();
     // Do not close mFixedBlockReader. It has a unique_ptr to its buffer

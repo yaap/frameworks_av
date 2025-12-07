@@ -1041,7 +1041,8 @@ protected:
 class OutputBuffersArray : public OutputBuffers {
 public:
     OutputBuffersArray(const char *componentName, const char *name = "Output[N]")
-        : OutputBuffers(componentName, name) { }
+        : OutputBuffers(componentName, name),
+          mBufferType(C2BufferData::INVALID) { }
     ~OutputBuffersArray() override = default;
 
     /**
@@ -1109,6 +1110,8 @@ public:
 private:
     BuffersArrayImpl mImpl;
     std::function<sp<Codec2Buffer>()> mAlloc;
+
+    C2BufferData::type_t mBufferType;
 };
 
 class FlexOutputBuffers : public OutputBuffers {

@@ -249,10 +249,16 @@ product_strategy_t Engine::remapStrategyFromContext(product_strategy_t strategy,
                                                  const SwAudioOutputCollection &outputs) const {
     auto legacyStrategy = getLegacyStrategyFromProduct(strategy);
 
+    // TODO: b/429390420 remove when ASSISTANT strategy is in use
+    if (legacyStrategy == STRATEGY_ASSISTANT) {
+        legacyStrategy = STRATEGY_MEDIA;
+    }
+
     if (isInCall()) {
         switch (legacyStrategy) {
         case STRATEGY_ACCESSIBILITY:
         case STRATEGY_DTMF:
+        case STRATEGY_ASSISTANT:
         case STRATEGY_MEDIA:
         case STRATEGY_SONIFICATION:
         case STRATEGY_SONIFICATION_RESPECTFUL:
@@ -391,6 +397,7 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
     case STRATEGY_ACCESSIBILITY:
     case STRATEGY_SONIFICATION_RESPECTFUL:
     case STRATEGY_REROUTING:
+    case STRATEGY_ASSISTANT:
     case STRATEGY_MEDIA: {
         DeviceVector devices2;
         if (strategy != STRATEGY_SONIFICATION) {
@@ -540,25 +547,6 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
     ALOGVV("%s strategy %d, device %s", __func__,
            strategy, dumpDeviceTypes(devices.types()).c_str());
     return devices;
-}
-
-DeviceVector Engine::getPreferredAvailableDevicesForInputSource(
-            const DeviceVector& availableInputDevices, audio_source_t inputSource) const {
-    DeviceVector preferredAvailableDevVec = {};
-    AudioDeviceTypeAddrVector preferredDevices;
-    const status_t status = getDevicesForRoleAndCapturePreset(
-            inputSource, DEVICE_ROLE_PREFERRED, preferredDevices);
-    if (status == NO_ERROR) {
-        // Only use preferred devices when they are all available.
-        preferredAvailableDevVec =
-                availableInputDevices.getDevicesFromDeviceTypeAddrVec(preferredDevices);
-        if (preferredAvailableDevVec.size() == preferredDevices.size()) {
-            ALOGVV("%s using pref device %s for source %u",
-                   __func__, preferredAvailableDevVec.toString().c_str(), inputSource);
-            return preferredAvailableDevVec;
-        }
-    }
-    return preferredAvailableDevVec;
 }
 
 DeviceVector Engine::getDisabledDevicesForInputSource(

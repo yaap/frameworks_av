@@ -80,6 +80,8 @@ LIBAAUDIO {
     AAudioStream_getOffloadPadding; #introduced=36
     AAudioStream_setOffloadEndOfStream; #introduced=36
     AAudioStream_flushFromFrame; #introduced=37
+    AAudioStream_setPlaybackParameters; #introduced=37
+    AAudioStream_getPlaybackParameters; #introduced=37
 
     AAudioStreamBuilder_addTag; # systemapi
     AAudioStreamBuilder_clearTags; # systemapi

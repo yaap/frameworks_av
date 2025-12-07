@@ -56,11 +56,6 @@ public:
                        audio_input_flags_t /*flags*/,
                        int32_t /*mixPortHalId*/) override { return NO_INIT; }
     status_t closeInput(audio_io_handle_t /*input*/) override { return NO_INIT; }
-    status_t setStreamVolume(audio_stream_type_t /*stream*/,
-                             float /*volume*/,
-                             bool /*muted*/,
-                             audio_io_handle_t /*output*/,
-                             int /*delayMs*/) override { return NO_INIT; }
 
     status_t setPortsVolume(const std::vector<audio_port_handle_t> & /*ports*/, float /*volume*/,
                             bool /*muted*/, audio_io_handle_t /*output*/,

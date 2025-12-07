@@ -24,6 +24,7 @@
 
 #include <android/content/AttributionSourceState.h>
 #include <aaudio/AAudio.h>
+#include <audio_utils/TimerQueue.h>
 #include <media/AidlConversion.h>
 #include <mediautils/ServiceUtilities.h>
 #include <utils/String16.h>
@@ -323,6 +324,69 @@ Status AAudioService::updateTimestamp(int32_t streamHandle, int32_t *_aidl_retur
         AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
     }
     AIDL_RETURN(serviceStream->updateTimestamp());
+}
+
+Status AAudioService::drainStream(
+        int32_t streamHandle, int64_t wakeUpNanos, bool allowSoftWakeUp,
+        android::media::TimerQueueHandle* handle, int32_t* _aidl_return) {
+    static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
+    if (handle == nullptr) {
+        AIDL_RETURN(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+    }
+
+    audio_utils::TimerQueue::handle_t legacyHandle = audio_utils::TimerQueue::INVALID_HANDLE;
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
+    }
+    aaudio_result_t result = serviceStream->drain(wakeUpNanos, allowSoftWakeUp, &legacyHandle);
+    if (result == AAUDIO_OK) {
+        *handle = VALUE_OR_RETURN_BINDER_STATUS(
+                legacy2aidl_timer_queue_handle_t_TimerQueueHandle(legacyHandle));
+    }
+    AIDL_RETURN(result);
+}
+
+Status AAudioService::activateStream(
+        int32_t streamHandle, const android::media::TimerQueueHandle& handle,
+        int32_t* _aidl_return) {
+    static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
+
+    audio_utils::TimerQueue::handle_t legacyHandle = VALUE_OR_RETURN_BINDER_STATUS(
+            aidl2legacy_TimerQueueHandle_timer_queue_handle_t(handle));
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
+    }
+    AIDL_RETURN(serviceStream->activate(legacyHandle));
+}
+
+Status AAudioService::setPlaybackParameters(int32_t streamHandle,
+                                            const media::audio::common::AudioPlaybackRate& rate,
+                                            int32_t* _aidl_return) {
+    static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
+
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
+    }
+    AIDL_RETURN(serviceStream->setPlaybackParameters(rate));
+}
+
+Status AAudioService::getPlaybackParameters(int32_t streamHandle,
+                                            media::audio::common::AudioPlaybackRate* rateOut,
+                                            int32_t* _aidl_return) {
+    static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
+
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
+    }
+    AIDL_RETURN(serviceStream->getPlaybackParameters(rateOut));
 }
 
 bool AAudioService::isCallerInService() {

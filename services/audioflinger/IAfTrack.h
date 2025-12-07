@@ -22,6 +22,7 @@
 #include <audiomanager/IAudioManager.h>
 #include <binder/IMemory.h>
 #include <media/AppOpsSession.h>
+#include <media/AudioBufferProvider.h>
 #include <mediautils/SingleThreadExecutor.h>
 #include <datapath/VolumePortInterface.h>
 #include <fastpath/FastMixerDumpState.h>
@@ -177,9 +178,14 @@ public:
     };
 
     virtual status_t initCheck() const = 0;
+    virtual bool isNonOffloadableEffectEnabled_l() const
+            REQUIRES(audio_utils::AudioFlinger_Mutex) = 0;
+    virtual bool isNonOffloadableEffectEnabled() const
+            EXCLUDES_AudioFlinger_Mutex = 0;
     virtual status_t start(
             AudioSystem::sync_event_t event = AudioSystem::SYNC_EVENT_NONE,
-            audio_session_t triggerSession = AUDIO_SESSION_NONE) = 0;
+            audio_session_t triggerSession = AUDIO_SESSION_NONE)
+            EXCLUDES_ThreadBase_Mutex = 0;
     virtual void stop() = 0;
     virtual sp<IMemory> getCblk() const = 0;
     virtual audio_track_cblk_t* cblk() const = 0;
@@ -353,6 +359,8 @@ public:
     virtual sp<IAfPatchTrack> asIAfPatchTrack() { return {}; }
     virtual sp<IAfPatchRecord> asIAfPatchRecord() { return {}; }
     virtual sp<IAfRecordTrack> asIAfRecordTrack() { return {}; }
+
+    virtual AudioBufferProvider* asAudioBufferProvider() = 0;
 };
 
 // Functionality shared between MMAP and audioflinger datapath playback tracks. Note that MMAP
@@ -512,7 +520,7 @@ public:
     virtual sp<media::VolumeShaper::State> getVolumeShaperState(int id) const = 0;
     virtual sp<media::VolumeHandler> getVolumeHandler() const = 0;
     /** Set the computed normalized final volume of the track.
-     * !masterMute * masterVolume * streamVolume * averageLRVolume */
+     * !masterMute * masterVolume * portVolume * averageLRVolume */
     virtual void setFinalVolume(float volumeLeft, float volumeRight) = 0;
     virtual float getFinalVolume() const = 0;
     virtual void getFinalVolume(float* left, float* right) const = 0;
@@ -564,6 +572,8 @@ public:
     virtual bool isPlaybackRestrictedOp() const = 0;
 
     virtual bool isPlaybackRestricted() const = 0;
+
+    virtual bool canBypassMute() const = 0;
 
     // Used by thread only
 
@@ -649,6 +659,7 @@ public:
             audio_format_t format,
             audio_channel_mask_t channelMask,
             audio_session_t sessionId,
+            std::variant<audio_input_flags_t, audio_output_flags_t> flags,
             bool isOut,
             const android::content::AttributionSourceState& attributionSource,
             pid_t creatorPid,

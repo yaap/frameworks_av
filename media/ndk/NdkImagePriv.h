@@ -53,7 +53,8 @@ enum AIMAGE_PRIVATE_FORMATS {
 // TODO: this only supports ImageReader
 struct AImage {
     AImage(AImageReader* reader, int32_t format, uint64_t usage, BufferItem* buffer,
-           int64_t timestamp, int32_t width, int32_t height, int32_t numPlanes);
+           int64_t timestamp, int32_t width, int32_t height, int32_t numPlanes,
+           android_dataspace dataspace);
 
     // free all resources while keeping object alive. Caller must obtain reader lock
     void close() { close(-1); }

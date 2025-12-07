@@ -133,7 +133,7 @@ class VirtualCameraRenderThread {
   // other buffers will be returned to the buffer queue.
   void requestTextureUpdate() EXCLUDES(mLock);
 
-  // Equeue capture task for processing on render thread.
+  // Enqueue capture task for processing on render thread.
   void enqueueTask(std::unique_ptr<ProcessCaptureRequestTask> task)
       EXCLUDES(mLock);
 

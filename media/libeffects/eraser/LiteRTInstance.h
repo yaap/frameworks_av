@@ -17,10 +17,12 @@
 #pragma once
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
 #pragma clang diagnostic push
+
 #pragma clang diagnostic ignored "-Wsign-compare"
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
@@ -33,6 +35,12 @@
 
 namespace aidl::android::hardware::audio::effect {
 
+/**
+ * @brief A generic, stateless wrapper for a TensorFlow Lite model interpreter.
+ *
+ * It is designed to be stateless, leaving buffer and stream management (such as creating
+ * overlapping windows) to the client.
+ */
 class LiteRTInstance {
   public:
     // Constructor stores configuration, does not load model yet
@@ -41,9 +49,11 @@ class LiteRTInstance {
 
     /**
      * @brief Initialization: Loads model, creates delegate, builds interpreter, allocate tensors.
-     * @param numThreads Optional: Number of threads for the interpreter. `-1` lets TFLite decide.
+     * @param numThreads Optional: Number of threads for the interpreter. Default set to `-1`, lets
+     * TFLite decide.
+     * @return true on success, false on failure.
      */
-    bool initialize(int numThreads = 1);
+    bool initialize(int numThreads = -1);
 
     /**
      * @brief Checks if the instance has been successfully initialized.
@@ -61,58 +71,88 @@ class LiteRTInstance {
 
     // Gets a pointer to the underlying TFLite interpreter.
     tflite::Interpreter* interpreter() const { return mInterpreter.get(); }
-    // Gets the index of the primary input tensor.
-    int inputTensorIndex() const { return mInputTensorIdx; }
     // Gets the data type of the primary input tensor.
-    TfLiteType inputType() const { return mInputType; }
-    // Gets the index of the primary output tensor.
-    int outputTensorIndex() const { return mOutputTensorIdx; }
+    TfLiteType inputTensorType() const { return mInputTensorType; }
     // Gets the data type of the primary output tensor.
-    TfLiteType outputType() const { return mOutputType; }
-
-    void resetTensorIndex();
+    TfLiteType outputTensorType() const { return mOutputTensorType; }
 
     /**
-     * @brief Gets a pointer to the primary input tensor structure.
-     * Provides access to the input tensor metadata (dims, type) and data buffer.
-     * @return Pointer to the TfLiteTensor, or nullptr if not initialized or index is invalid.
+     * @brief Runs a single inference cycle on the current input tensor data.
+     *
+     * The client must have already populated the input tensor before calling this.
+     *
+     * @param input A pointer to the client-managed input buffer.
+     * @param output A pointer to the client-managed output buffer.
+     * @return true if model inference invoke success, false otherwise.
      */
-     TfLiteTensor* inputTensor() const;
+    bool invoke() const;
 
-     /**
-      * @brief Gets a pointer to the primary output tensor structure.
-      * Provides access to the output tensor metadata (dims, type) and data buffer.
-      * @return Pointer to the TfLiteTensor, or nullptr if not initialized or index is invalid.
-      */
-     TfLiteTensor* outputTensor() const;
+    /**
+     * @brief Gets the total number of elements in the primary input tensor.
+     * Determined by the product of its dimensions.
+     * @return The size of the input tensor, or 0 if not initialized.
+     */
+    size_t inputTensorSize() const { return mInputTensorSize; }
 
-     /**
-      * @brief Dumps details about the loaded model (inputs, outputs, ops).
-      * Useful for debugging. Requires interpreter to be initialized.
-      * @return A string containing model details, or an error message.
-      */
-     std::string dumpModelDetails();
+    /**
+     * @brief Gets the total number of elements in the primary output tensor.
+     * Determined by the product of its dimensions.
+     * @return The size of the output tensor, or 0 if not initialized.
+     */
+    size_t outputTensorSize() const { return mOutputTensorSize; }
+
+    /**
+     * @brief Gets a non-owning view of the input tensor data.
+     * @return Span of type T to the data of input tensor.
+     */
+    template <class T>
+    std::span<T> typedInputTensor() const {
+        if (!isInitialized()) {
+            return std::span<T>();
+        }
+        return {mInterpreter->typed_input_tensor<T>(0), mInputTensorSize};
+    }
+
+    /**
+     * @brief Gets a non-owning view of the output tensor data.
+     * @return Span of type T to the data of output tensor.
+     */
+    template <class T>
+    std::span<T> typedOutputTensor() const {
+        if (!isInitialized()) {
+            return std::span<T>();
+        }
+        return {mInterpreter->typed_output_tensor<T>(0), mOutputTensorSize};
+    }
+
+    /**
+     * @brief Dumps details about the loaded model (inputs, outputs, ops).
+     * Useful for debugging. Requires interpreter to be initialized.
+     * @return A string containing model details, or an error message.
+     */
+    std::string dumpModelDetails() const;
 
 private:
     const std::string mModelPath;
     // Resources (Managed internally)
     std::unique_ptr<tflite::FlatBufferModel> mModel;
     std::unique_ptr<tflite::Interpreter> mInterpreter;
-    // TODO: Add delegate unique_ptr
+    tflite::ops::builtin::BuiltinOpResolver mResolver;
 
+    size_t mInputTensorSize = 0;
+    TfLiteType mInputTensorType = kTfLiteNoType;
+    std::vector<int> mInputTensorDims;
 
-    // Metadata (Extracted during initialization)
-    int mInputTensorIdx;
-    TfLiteType mInputType;
-    int mOutputTensorIdx;
-    TfLiteType mOutputType;
+    size_t mOutputTensorSize = 0;
+    TfLiteType mOutputTensorType = kTfLiteNoType;
+    std::vector<int> mOutputTensorDims;
 
     /**
      * @brief Dumps shape information for a specific tensor.
      * @param tensorIndex The index of the tensor.
      * @return A string describing the tensor's shape, or an error message.
      */
-    std::string dumpTensorShape(const int tensorIndex);
+    std::string dumpTensorShape(const int tensorIndex) const;
 
     // Prevent copying and moving as this class manages unique resources.
     LiteRTInstance(const LiteRTInstance&) = delete;

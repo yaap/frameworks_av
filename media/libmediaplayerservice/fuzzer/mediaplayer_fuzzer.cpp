@@ -326,7 +326,8 @@ void MediaPlayerServiceFuzzer::invokeMediaPlayer() {
                     sp<SurfaceControl> surfaceControl = makeSurfaceControl();
                     if (surfaceControl) {
                         sp<Surface> surface = surfaceControl->getSurface();
-                        mMediaPlayer->setVideoSurfaceTexture(surface->getIGraphicBufferProducer());
+                        mMediaPlayer->setVideoSurfaceTexture(
+                            mediaflagtools::surfaceToSurfaceType(surface));
                     }
                 },
                 [&]() {

@@ -539,7 +539,7 @@ class AudioPolicyManagerFuzzerDynamicPolicy : public AudioPolicyManagerFuzzerWit
     void registerPolicyMixes();
     void unregisterPolicyMixes();
 
-    Vector<AudioMix> mAudioMixes;
+    std::vector<AudioMix> mAudioMixes;
     const std::string mMixAddress = "remote_submix_media";
 };
 
@@ -563,7 +563,7 @@ status_t AudioPolicyManagerFuzzerDynamicPolicy::addPolicyMix(
     myAudioMix.mDeviceType = deviceType;
     // Clear mAudioMix before add new one to make sure we don't add already existing mixes.
     mAudioMixes.clear();
-    mAudioMixes.add(myAudioMix);
+    mAudioMixes.push_back(myAudioMix);
 
     // As the policy mixes registration may fail at some case,
     // caller need to check the returned status.

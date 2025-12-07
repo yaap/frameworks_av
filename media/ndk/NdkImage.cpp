@@ -32,11 +32,11 @@ using namespace android;
 #define ALIGN(x, mask) ( ((x) + (mask) - 1) & ~((mask) - 1) )
 
 AImage::AImage(AImageReader* reader, int32_t format, uint64_t usage, BufferItem* buffer,
-        int64_t timestamp, int32_t width, int32_t height, int32_t numPlanes) :
+        int64_t timestamp, int32_t width, int32_t height, int32_t numPlanes,
+        android_dataspace dataspace) :
         mReader(reader), mFormat(format), mUsage(usage), mBuffer(buffer), mLockedBuffer(nullptr),
-        mTimestamp(timestamp), mWidth(width), mHeight(height), mNumPlanes(numPlanes) {
-    PublicFormat publicFormat = static_cast<PublicFormat>(format);
-    mHalDataSpace = mapPublicFormatToHalDataspace(publicFormat);
+        mTimestamp(timestamp), mWidth(width), mHeight(height), mNumPlanes(numPlanes),
+        mHalDataSpace(dataspace) {
     LOG_FATAL_IF(reader == nullptr, "AImageReader shouldn't be null while creating AImage");
 }
 

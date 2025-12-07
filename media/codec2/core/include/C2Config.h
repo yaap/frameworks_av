@@ -265,7 +265,7 @@ enum C2ParamIndexKind : C2Param::type_index_t {
     kParamIndexSurfaceScaling, // u32
 
     // input surface
-    kParamIndexInputSurfaceEos, // input-surface, eos
+    kParamIndexInputSurfaceStart, // input-surface, start
     kParamIndexTimedControl, // struct
     kParamIndexStartAt, // input-surface, struct
     kParamIndexSuspendAt, // input-surface, struct
@@ -2662,11 +2662,11 @@ constexpr char C2_PARAMKEY_SURFACE_SCALING_MODE[] = "raw.surface-scaling";
 /* ======================================= INPUT SURFACE ======================================= */
 
 /**
- * Input surface EOS
+ * Input surface Start
  */
-typedef C2GlobalParam<C2Tuning, C2EasyBoolValue, kParamIndexInputSurfaceEos>
-        C2InputSurfaceEosTuning;
-constexpr char C2_PARAMKEY_INPUT_SURFACE_EOS[] = "input-surface.eos";
+typedef C2GlobalParam<C2Tuning, C2EasyBoolValue, kParamIndexInputSurfaceStart>
+        C2InputSurfaceStartTuning;
+constexpr char C2_PARAMKEY_INPUT_SURFACE_START[] = "input-surface.start";
 
 /**
  * Start/suspend/resume/stop controls and timestamps for input surface.

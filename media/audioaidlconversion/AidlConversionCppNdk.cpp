@@ -2882,6 +2882,9 @@ legacy2aidl_audio_mode_t_AudioMode(audio_mode_t legacy) {
             return AudioMode::SYS_RESERVED_CALL_REDIRECT;
         case AUDIO_MODE_COMMUNICATION_REDIRECT:
             return AudioMode::SYS_RESERVED_COMMUNICATION_REDIRECT;
+        case AUDIO_MODE_ASSISTANT_CONVERSATION:
+            // TODO(b/416329698): return the new mode when supported
+            break;
         case AUDIO_MODE_CNT:
             break;
     }

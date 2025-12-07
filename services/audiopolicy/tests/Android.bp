@@ -85,6 +85,7 @@ cc_test {
     require_root: true,
 
     static_libs: [
+        "com.android.media.audio-aconfig-cc",
         "com.android.media.audioserver-aconfig-cc",
     ],
 

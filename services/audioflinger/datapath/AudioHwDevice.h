@@ -72,7 +72,7 @@ public:
 
    [[nodiscard]] audio_module_handle_t handle() const { return mHandle; }
    [[nodiscard]] const char *moduleName() const { return mModuleName; }
-   [[nodiscard]] sp<DeviceHalInterface> hwDevice() const { return mHwDevice; }
+   [[nodiscard]] const sp<DeviceHalInterface>& hwDevice() const { return mHwDevice; }
 
     /** This method creates and opens the audio hardware output stream.
      * The "address" parameter qualifies the "devices" audio device type if needed.

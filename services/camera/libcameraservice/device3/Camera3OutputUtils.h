@@ -25,6 +25,7 @@
 #include <fmq/MessageQueue.h>
 
 #include <common/CameraDeviceBase.h>
+#include <android/content/res/CameraCompatibilityInfo.h>
 
 #include "device3/BufferUtils.h"
 #include "device3/DistortionMapper.h"
@@ -154,7 +155,7 @@ namespace camera3 {
         bool legacyClient;
         nsecs_t& minFrameDuration;
         bool& isFixedFps;
-        int rotationOverride;
+        const content::res::CameraCompatibilityInfo& compatInfo;
         std::string &activePhysicalId;
     };
 

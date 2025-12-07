@@ -893,6 +893,24 @@ enum {
                                    AAUDIO_CHANNEL_TOP_BACK_RIGHT,
     /**
      * Supported for only Output
+     * Available since API level 37.
+     */
+    AAUDIO_CHANNEL_13POINT0 = AAUDIO_CHANNEL_FRONT_LEFT |
+                              AAUDIO_CHANNEL_FRONT_RIGHT |
+                              AAUDIO_CHANNEL_FRONT_CENTER |
+                              AAUDIO_CHANNEL_SIDE_LEFT |
+                              AAUDIO_CHANNEL_SIDE_RIGHT |
+                              AAUDIO_CHANNEL_TOP_FRONT_LEFT |
+                              AAUDIO_CHANNEL_TOP_FRONT_RIGHT |
+                              AAUDIO_CHANNEL_TOP_FRONT_CENTER |
+                              AAUDIO_CHANNEL_TOP_BACK_LEFT |
+                              AAUDIO_CHANNEL_TOP_BACK_RIGHT |
+                              AAUDIO_CHANNEL_BOTTOM_FRONT_LEFT |
+                              AAUDIO_CHANNEL_BOTTOM_FRONT_RIGHT |
+                              AAUDIO_CHANNEL_BOTTOM_FRONT_CENTER,
+
+    /**
+     * Supported for only Output
      */
     AAUDIO_CHANNEL_9POINT1POINT4 = AAUDIO_CHANNEL_7POINT1POINT4 |
                                    AAUDIO_CHANNEL_FRONT_WIDE_LEFT |
@@ -1837,12 +1855,15 @@ typedef void (*AAudioStream_presentationEndCallback)(AAudioStream* _Nonnull stre
  * queued in the audio system (e.g. the combination of the Android audio framework and the device's
  * audio hardware) have been played.
  *
- * The presentation end callback must be used together with the data callback.
  * The presentation end callback won't be called if the stream is closed before all the data
  * is played.
  *
- * The callback function will be called from the same thread as the data callback thread,
- * which is a real-time thread owned by audio framework.
+ * If data callback is set, the callback function will be called from the same thread as the data
+ * callback thread, which is a real-time thread owned by audio framework.
+ *
+ * If data callback is not set, the presentation end callback will be fired from a thread owned
+ * by audio framework, this may not be a real-time thread.
+ *
  * The callback function will not be called after AAudioStream_close() is called.
  *
  * Available since API level 36.
@@ -2708,6 +2729,102 @@ AAUDIO_API aaudio_result_t AAudioStream_flushFromFrame(
         AAudioStream* _Nonnull stream,
         AAudio_FlushFromAccuracy accuracy,
         int64_t* _Nonnull inOutPosition) __INTRODUCED_IN(37);
+
+/**
+ * Behavior when the values for speed and / or pitch are out of the applicable range.
+ */
+typedef enum AAudio_FallbackMode : int32_t {
+    /**
+     * It is up to the system to choose best handling.
+     */
+    AAUDIO_FALLBACK_MODE_DEFAULT = 0,
+    /**
+     * Play silence for parameter values that are out of range.
+     */
+    AAUDIO_FALLBACK_MODE_MUTE = 1,
+    /**
+     * When the requested speed and or pitch is out of range, processing will be
+     * stopped and {@link AAUDIO_ERROR_ILLEGAL_ARGUMENT} will be returned.
+     */
+    AAUDIO_FALLBACK_MODE_FAIL = 2,
+} AAudio_FallbackMode;
+
+/**
+ * Algorithms used for time-stretching (preserving pitch while playing audio
+ * content at different speed).
+ */
+typedef enum AAudio_StretchMode : int32_t {
+    /**
+     * Time-stretching algorithm is selected by the system.
+     */
+    AAUDIO_STRETCH_MODE_DEFAULT = 0,
+    /**
+     * Selects time-stretch algorithm best suitable for voice (speech) content.
+     */
+    AAUDIO_STRETCH_MODE_VOICE = 1,
+} AAudio_StretchMode;
+
+/**
+ * Structure for common playback params.
+ * Call {@link AAudioStream_setPlaybackParameters} to control playback behavior.
+ * Call {@link AAudioStream_getPlaybackParameters} to query current playback parameters.
+ */
+typedef struct AAudioPlaybackParameters {
+    /**
+     * See {@link AAudio_FallbackMode}. One of {@link AAUDIO_FALLBACK_MODE_DEFAULT},
+     * {@link AAUDIO_FALLBACK_MODE_MUTE} or {@link AAUDIO_FALLBACK_MODE_FAIL}.
+     */
+    AAudio_FallbackMode fallbackMode;
+    /**
+     * See {@link AAudio_StretchMode}. One of {@link AAUDIO_STRETCH_MODE_DEFAULT}
+     * or {@link AAUDIO_STRETCH_MODE_VOICE}.
+     */
+    AAudio_StretchMode stretchMode;
+    /**
+     * Increases or decreases the tonal frequency of the audio content.
+     * It is expressed as a multiplicative factor, where normal pitch is 1.0f.
+     * The pitch must be in range of [0.25f, 4.0f].
+     */
+    float pitch;
+    /**
+     * Increases or decreases the time to play back a set of audio frames.
+     * Normal speed is 1.0f. The speed must in range of [0.01f, 20.0f].
+     */
+    float speed;
+} AAudioPlaybackParameters;
+
+/**
+ * Set playback parameters for the given stream.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream().
+ * @param parameters a pointer of AAudioPlaybackParameters where current playback parameters
+ *                   will be written to on success.
+ * @return AAUDIO_OK if the playback parameters are set successfully.
+ *         AAUDIO_ERROR_ILLEGAL_ARGUMENT if the given stream is not an output stream or
+ *         the requested parameters are invalid.
+ *         AAUDIO_ERROR_UNIMPLEMENTED if the device or the stream doesn't support setting
+ *         playback parameters.
+ *         AAUDIO_ERROR_INVALID_STATE if the stream is not initialized successfully.
+ */
+AAUDIO_API aaudio_result_t AAudioStream_setPlaybackParameters(
+        AAudioStream* _Nonnull stream,
+        const AAudioPlaybackParameters* _Nonnull parameters) __INTRODUCED_IN(37);
+
+/**
+ * Get current playback parameters for the given stream.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream().
+ * @param outParameters a pointer of AAudioPlaybackParameters where current playback parameters
+ *                      will be written to on success.
+ * @return AAUDIO_OK if the playback parameters are queried successfully.
+ *         AAUDIO_ERROR_ILLEGAL_ARGUMENT if the given stream is not an output stream.
+ *         AAUDIO_ERROR_UNIMPLEMENTED if the device or the stream doesn't support querying
+ *         playback parameters.
+ *         AAUDIO_ERROR_INVALID_STATE if the stream is not initialized successfully.
+ */
+AAUDIO_API aaudio_result_t AAudioStream_getPlaybackParameters(
+        AAudioStream* _Nonnull stream,
+        AAudioPlaybackParameters* _Nonnull outParameters) __INTRODUCED_IN(37);
 
 /************************************************************************************
  * Helper functions for AAudio MMAP.

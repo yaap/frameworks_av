@@ -731,6 +731,23 @@ inline constexpr int32_t IAMF_PROFILE_BASE          = 0x1 << 17;
 inline constexpr int32_t IAMF_PROFILE_BASE_ENHANCED = 0x1 << 18;
 inline constexpr int32_t IAMF_v1                    = 0x1 << 24;
 
+inline constexpr int32_t IAMFProfileSimpleOpus = IAMF_v1 | IAMF_PROFILE_SIMPLE | IAMF_CODEC_OPUS;
+inline constexpr int32_t IAMFProfileSimpleAac = IAMF_v1 | IAMF_PROFILE_SIMPLE | IAMF_CODEC_AAC;
+inline constexpr int32_t IAMFProfileSimpleFlac = IAMF_v1 | IAMF_PROFILE_SIMPLE | IAMF_CODEC_FLAC;
+inline constexpr int32_t IAMFProfileSimplePcm = IAMF_v1 | IAMF_PROFILE_SIMPLE | IAMF_CODEC_PCM;
+inline constexpr int32_t IAMFProfileBaseOpus = IAMF_v1 | IAMF_PROFILE_BASE | IAMF_CODEC_OPUS;
+inline constexpr int32_t IAMFProfileBaseAac = IAMF_v1 | IAMF_PROFILE_BASE | IAMF_CODEC_AAC;
+inline constexpr int32_t IAMFProfileBaseFlac = IAMF_v1 | IAMF_PROFILE_BASE | IAMF_CODEC_FLAC;
+inline constexpr int32_t IAMFProfileBasePcm = IAMF_v1 | IAMF_PROFILE_BASE | IAMF_CODEC_PCM;
+inline constexpr int32_t IAMFProfileBaseEnhancedOpus =
+        IAMF_v1 | IAMF_PROFILE_BASE_ENHANCED | IAMF_CODEC_OPUS;
+inline constexpr int32_t IAMFProfileBaseEnhancedAac =
+        IAMF_v1 | IAMF_PROFILE_BASE_ENHANCED | IAMF_CODEC_AAC;
+inline constexpr int32_t IAMFProfileBaseEnhancedFlac =
+        IAMF_v1 | IAMF_PROFILE_BASE_ENHANCED | IAMF_CODEC_FLAC;
+inline constexpr int32_t IAMFProfileBaseEnhancedPcm =
+        IAMF_v1 | IAMF_PROFILE_BASE_ENHANCED | IAMF_CODEC_PCM;
+
 inline static const char* asString_IamfProfile(int32_t i, const char* def = "??") {
     std::string version, profile, codec;
     switch (i & (0xff << 24)) {

@@ -336,21 +336,6 @@ status_t AudioFlingerClientAdapter::getMasterBalance(float* balance) const{
     return statusTFromBinderStatus(mDelegate->getMasterBalance(balance));
 }
 
-status_t AudioFlingerClientAdapter::setStreamVolume(audio_stream_type_t stream, float value,
-                                                    bool muted, audio_io_handle_t output) {
-    AudioStreamType streamAidl = VALUE_OR_RETURN_STATUS(
-            legacy2aidl_audio_stream_type_t_AudioStreamType(stream));
-    int32_t outputAidl = VALUE_OR_RETURN_STATUS(legacy2aidl_audio_io_handle_t_int32_t(output));
-    return statusTFromBinderStatus(
-            mDelegate->setStreamVolume(streamAidl, value, muted, outputAidl));
-}
-
-status_t AudioFlingerClientAdapter::setStreamMute(audio_stream_type_t stream, bool muted) {
-    AudioStreamType streamAidl = VALUE_OR_RETURN_STATUS(
-            legacy2aidl_audio_stream_type_t_AudioStreamType(stream));
-    return statusTFromBinderStatus(mDelegate->setStreamMute(streamAidl, muted));
-}
-
 status_t AudioFlingerClientAdapter::setPortsVolume(
         const std::vector<audio_port_handle_t> &portIds, float volume, bool muted,
         audio_io_handle_t output) {
@@ -440,6 +425,11 @@ size_t AudioFlingerClientAdapter::getInputBufferSize(uint32_t sampleRate, audio_
 status_t AudioFlingerClientAdapter::openOutput(const media::OpenOutputRequest& request,
                                                media::OpenOutputResponse* response) {
     return statusTFromBinderStatus(mDelegate->openOutput(request, response));
+}
+
+status_t AudioFlingerClientAdapter::openMmapStream(const media::OpenMmapRequest& request,
+                                                   media::OpenMmapResponse* response) {
+    return statusTFromBinderStatus(mDelegate->openMmapStream(request, response));
 }
 
 audio_io_handle_t AudioFlingerClientAdapter::openDuplicateOutput(audio_io_handle_t output1,
@@ -1010,22 +1000,6 @@ Status AudioFlingerServerAdapter::getMasterBalance(float* _aidl_return) {
     return Status::fromStatusT(mDelegate->getMasterBalance(_aidl_return));
 }
 
-Status AudioFlingerServerAdapter::setStreamVolume(AudioStreamType stream, float value,
-                                                  bool muted, int32_t output) {
-    audio_stream_type_t streamLegacy = VALUE_OR_RETURN_BINDER(
-            aidl2legacy_AudioStreamType_audio_stream_type_t(stream));
-    audio_io_handle_t outputLegacy = VALUE_OR_RETURN_BINDER(
-            aidl2legacy_int32_t_audio_io_handle_t(output));
-    return Status::fromStatusT(
-            mDelegate->setStreamVolume(streamLegacy, value, muted, outputLegacy));
-}
-
-Status AudioFlingerServerAdapter::setStreamMute(AudioStreamType stream, bool muted) {
-    audio_stream_type_t streamLegacy = VALUE_OR_RETURN_BINDER(
-            aidl2legacy_AudioStreamType_audio_stream_type_t(stream));
-    return Status::fromStatusT(mDelegate->setStreamMute(streamLegacy, muted));
-}
-
 Status AudioFlingerServerAdapter::setPortsVolume(
         const std::vector<int32_t>& portIds, float volume, bool muted, int32_t output) {
     std::vector<audio_port_handle_t> portIdsLegacy = VALUE_OR_RETURN_BINDER(
@@ -1099,6 +1073,11 @@ Status AudioFlingerServerAdapter::getInputBufferSize(int32_t sampleRate,
 Status AudioFlingerServerAdapter::openOutput(const media::OpenOutputRequest& request,
                                              media::OpenOutputResponse* _aidl_return) {
     return Status::fromStatusT(mDelegate->openOutput(request, _aidl_return));
+}
+
+Status AudioFlingerServerAdapter::openMmapStream(const media::OpenMmapRequest& request,
+                                                 media::OpenMmapResponse* _aidl_return) {
+    return Status::fromStatusT(mDelegate->openMmapStream(request, _aidl_return));
 }
 
 Status AudioFlingerServerAdapter::openDuplicateOutput(int32_t output1, int32_t output2,

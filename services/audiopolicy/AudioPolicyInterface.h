@@ -162,6 +162,7 @@ public:
     virtual status_t stopOutput(audio_port_handle_t portId) = 0;
     // releases the output, return true if the output descriptor is reopened.
     virtual bool releaseOutput(audio_port_handle_t portId) = 0;
+    virtual status_t forceReleaseDirectOutput(audio_io_handle_t output) = 0;
 
     // Request an input appropriate for record from the supplied device with supplied parameters.
     // attr -- attributes for the requested record
@@ -350,8 +351,8 @@ public:
 
     virtual status_t releaseSoundTriggerSession(audio_session_t session) = 0;
 
-    virtual status_t registerPolicyMixes(const Vector<AudioMix>& mixes) = 0;
-    virtual status_t unregisterPolicyMixes(Vector<AudioMix> mixes) = 0;
+    virtual status_t registerPolicyMixes(const std::vector<AudioMix>& mixes) = 0;
+    virtual status_t unregisterPolicyMixes(const std::vector<AudioMix>& mixes) = 0;
     virtual status_t getRegisteredPolicyMixes(std::vector<AudioMix>& mixes) = 0;
 
     virtual status_t updatePolicyMix(
@@ -397,6 +398,11 @@ public:
                 audio_devices_t device, std::vector<audio_format_t> *formats) = 0;
 
     virtual void     setAppState(audio_port_handle_t portId, app_state_t state) = 0;
+
+    virtual audio_attributes_t getAttributesForStreamType(audio_stream_type_t streamType) = 0;
+
+    virtual audio_stream_type_t getStreamTypeForAttributes(
+                const audio_attributes_t &attributes) = 0;
 
     virtual status_t listAudioProductStrategies(AudioProductStrategyVector &strategies) = 0;
 
@@ -594,11 +600,6 @@ public:
     // misc control functions
     //
 
-    // set a stream volume for a particular output. For the same user setting, a given stream type
-    // can have different volumes
-    // for each output (destination device) it is attached to.
-    virtual status_t setStreamVolume(audio_stream_type_t stream, float volume, bool muted,
-                                     audio_io_handle_t output, int delayMs = 0) = 0;
     /**
      * Set volume for given AudioTrack port ids for a particular output.
      * For the same user setting, a given volume group and associated output port id

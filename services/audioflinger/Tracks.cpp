@@ -65,24 +65,14 @@
 #define ALOGVV(a...) do { } while(0)
 #endif
 
-// TODO: Remove when this is put into AidlConversionUtil.h
-#define VALUE_OR_RETURN_BINDER_STATUS(x)    \
-    ({                                      \
-       auto _tmp = (x);                     \
-       if (!_tmp.ok()) return ::android::aidl_utils::binderStatusFromStatusT(_tmp.error()); \
-       std::move(_tmp.value());             \
-     })
-
 namespace audioserver_flags = com::android::media::audioserver;
 
 namespace android {
 
 using ::android::aidl_utils::binderStatusFromStatusT;
-using ::com::android::media::audio::hardening_impl;
 using ::com::android::media::audio::hardening_partial;
 using ::com::android::media::audio::hardening_strict;
 using binder::Status;
-using com::android::media::audio::audioserver_permissions;
 using com::android::media::permission::PermissionEnum::CAPTURE_AUDIO_HOTWORD;
 using content::AttributionSourceState;
 using media::VolumeShaper;
@@ -348,9 +338,7 @@ void TrackBase::deferRestartIfDisabled()
 
 void TrackBase::beginBatteryAttribution() {
     mBatteryStatsHolder.emplace(uid());
-    if (media::psh_utils::AudioPowerManager::enabled()) {
-        mTrackToken = media::psh_utils::createAudioTrackToken(uid());
-    }
+    mTrackToken = media::psh_utils::createAudioTrackToken(uid());
 }
 
 void TrackBase::endBatteryAttribution() {
@@ -451,6 +439,30 @@ void TrackBase::signal() {
     }
 }
 
+bool TrackBase::isNonOffloadableEffectEnabled_l() const {
+    if (!isOffloaded()) return false;
+    if (const sp<IAfThreadBase> thread = mThread.promote();
+            thread != nullptr) {
+        const bool nonOffloadableGlobalEffectEnabled =
+                thread->afThreadCallback()->isNonOffloadableGlobalEffectEnabled_l();
+        audio_utils::lock_guard _lth(thread->mutex());
+        const sp<IAfEffectChain>& ec = thread->getEffectChain_l(mSessionId);
+        if (nonOffloadableGlobalEffectEnabled ||
+                (ec != nullptr && ec->isNonOffloadableEnabled())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TrackBase::isNonOffloadableEffectEnabled() const {
+    if (!isOffloaded()) return false;
+    const sp<IAfThreadBase> thread = mThread.promote();
+    if (thread == nullptr) return false;
+    audio_utils::lock_guard _laf(thread->afThreadCallback()->mutex());
+    return isNonOffloadableEffectEnabled_l();
+}
+
 PatchTrackBase::PatchTrackBase(const sp<ClientProxy>& proxy,
         IAfThreadBase* thread, const Timeout& timeout)
     : mProxy(proxy)
@@ -545,7 +557,15 @@ Status TrackHandle::getCblk(
 }
 
 Status TrackHandle::start(int32_t* _aidl_return) {
-    *_aidl_return = mTrack->start();
+    status_t status = NO_ERROR;
+    if (mTrack->isOffloaded() && mTrack->isNonOffloadableEffectEnabled()) {
+        mTrack->invalidate();
+        status = PERMISSION_DENIED;
+    }
+    if (status == NO_ERROR) {
+        status = mTrack->start();
+    }
+    *_aidl_return = status;
     return Status::ok();
 }
 
@@ -589,10 +609,6 @@ Status TrackHandle::getTimestamp(media::AudioTimestampInternal* timestamp,
     if (*_aidl_return != OK) {
         return Status::ok();
     }
-
-    // restrict position modulo INT_MAX to avoid integer sanitization abort
-    legacy.mPosition &= INT_MAX;
-
     *timestamp = legacy2aidl_AudioTimestamp_AudioTimestampInternal(legacy).value();
     return Status::ok();
 }
@@ -705,10 +721,14 @@ sp<OpPlayAudioMonitor> OpPlayAudioMonitor::createIfNeeded(
             const AttributionSourceState& attributionSource, const audio_attributes_t& attr, int id,
             audio_stream_type_t streamType)
 {
-    const uid_t uid = VALUE_OR_FATAL(aidl2legacy_int32_t_uid_t(attributionSource.uid));
+    const uid_t uid = attributionSource.uid;
+
     if (isServiceUid(uid)) {
-        ALOGW("OpPlayAudio: not muting track:%d usage:%d for service UID %d", id, attr.usage,
+        const auto res = thread->afThreadCallback()->getPermissionProvider().getPackagesForUid(uid);
+        if (res.ok() && res->empty()) {
+            ALOGW("OpPlayAudio: not muting track:%d usage:%d for service UID %d", id, attr.usage,
               uid);
+        }
         return nullptr;
     }
     // stream type has been filtered by audio policy to indicate whether it can be muted
@@ -721,6 +741,13 @@ sp<OpPlayAudioMonitor> OpPlayAudioMonitor::createIfNeeded(
         ALOGD("OpPlayAudio: not muting track:%d flags %#x have FLAG_BYPASS_INTERRUPTION_POLICY",
             id, attr.flags);
         return nullptr;
+    }
+    if (com_android_media_audio_ring_my_car()) {
+        if ((attr.flags & AUDIO_FLAG_BYPASS_MUTE) == AUDIO_FLAG_BYPASS_MUTE) {
+            ALOGD("OpPlayAudio: not muting track:%d flags %#x have FLAG_BYPASS_MUTE",
+                  id, attr.flags);
+            return nullptr;
+        }
     }
     return sp<OpPlayAudioMonitor>::make(thread, attributionSource, attr.usage, id, uid);
 }
@@ -1380,18 +1407,6 @@ status_t Track::start(AudioSystem::sync_event_t event __unused,
 
     const sp<IAfThreadBase> thread = mThread.promote();
     if (thread != 0) {
-        if (isOffloaded()) {
-            audio_utils::lock_guard _laf(thread->afThreadCallback()->mutex());
-            const bool nonOffloadableGlobalEffectEnabled =
-                    thread->afThreadCallback()->isNonOffloadableGlobalEffectEnabled_l();
-            audio_utils::lock_guard _lth(thread->mutex());
-            sp<IAfEffectChain> ec = thread->getEffectChain_l(mSessionId);
-            if (nonOffloadableGlobalEffectEnabled ||
-                    (ec != 0 && ec->isNonOffloadableEnabled())) {
-                invalidate();
-                return PERMISSION_DENIED;
-            }
-        }
         audio_utils::unique_lock ul(thread->mutex());
         thread->waitWhileThreadBusy_l(ul);
 
@@ -1807,7 +1822,7 @@ void Track::copyMetadataTo(MetadataInserter& backInserter) const
 
     std::string tagStr(mAttr.tags);
     const sp<IAfThreadBase> thread = mThread.promote();
-    if (audioserver_flags::enable_gmap_mode() && mAttr.usage == AUDIO_USAGE_GAME
+    if (mAttr.usage == AUDIO_USAGE_GAME
             && thread != nullptr && thread->afThreadCallback()->hasAlreadyCaptured(uid())
             && (tagStr.size() + strlen(AUDIO_ATTRIBUTES_TAG_GMAP_BIDIRECTIONAL)
                 + (tagStr.size() ? 1 : 0))
@@ -2132,7 +2147,8 @@ status_t Track::getPlaybackRateParameters(
         if (thread != nullptr) {
             auto* const t = thread->asIAfPlaybackThread().get();
             audio_utils::lock_guard lock(t->mutex());
-            if (auto* const output = t->getOutput_l()) {
+            auto* const output = t->getOutput_l();
+            if (output && t->isStreamInitialized_l()) {
                 status = output->stream->getPlaybackRateParameters(playbackRate);
             }
             ALOGD_IF((status == NO_ERROR) &&
@@ -2445,7 +2461,7 @@ ssize_t OutputTrack::write(void* data, uint32_t frames)
     while (true) {
         // First write pending buffers, then new data
         if (mBufferQueue.size()) {
-            pInBuffer = mBufferQueue.itemAt(0);
+            pInBuffer = mBufferQueue.front();
         } else {
             pInBuffer = &inBuffer;
         }
@@ -2491,7 +2507,7 @@ ssize_t OutputTrack::write(void* data, uint32_t frames)
 
         if (pInBuffer->frameCount == 0) {
             if (mBufferQueue.size()) {
-                mBufferQueue.removeAt(0);
+                mBufferQueue.pop_front();
                 free(pInBuffer->mBuffer);
                 if (pInBuffer != &inBuffer) {
                     delete pInBuffer;
@@ -2518,7 +2534,7 @@ ssize_t OutputTrack::write(void* data, uint32_t frames)
 
     // Calling write() with a 0 length buffer means that no more data will be written:
     // We rely on stop() to set the appropriate flags to allow the remaining frames to play out.
-    if (frames == 0 && mBufferQueue.size() == 0 && mActive) {
+    if (frames == 0 && mBufferQueue.empty() && mActive) {
         stop();
     }
 
@@ -2536,7 +2552,7 @@ void OutputTrack::queueBuffer(Buffer& inBuffer) {
         pInBuffer->frameCount = inBuffer.frameCount;
         pInBuffer->raw = pInBuffer->mBuffer;
         memcpy(pInBuffer->raw, inBuffer.raw, inBuffer.frameCount * mFrameSize);
-        mBufferQueue.add(pInBuffer);
+        mBufferQueue.push_back(pInBuffer);
         ALOGV("%s(%d): thread %d adding overflow buffer %zu", __func__, mId,
                 (int)mThreadIoHandle, mBufferQueue.size());
         // audio data is consumed (stored locally); set frameCount to 0.
@@ -2579,12 +2595,9 @@ status_t OutputTrack::obtainBuffer(
 
 void OutputTrack::clearBufferQueue()
 {
-    size_t size = mBufferQueue.size();
-
-    for (size_t i = 0; i < size; i++) {
-        Buffer *pBuffer = mBufferQueue.itemAt(i);
-        free(pBuffer->mBuffer);
-        delete pBuffer;
+    for (auto* buffer : mBufferQueue) {
+        free(buffer->mBuffer);
+        delete buffer;
     }
     mBufferQueue.clear();
 }
@@ -3282,22 +3295,14 @@ status_t RecordTrack::shareAudioHistory(
     attributionSource.pid = VALUE_OR_RETURN_STATUS(legacy2aidl_uid_t_int32_t(callingPid));
     attributionSource.token = sp<BBinder>::make();
     const sp<IAfThreadBase> thread = mThread.promote();
-    if (audioserver_permissions()) {
-        const auto res = thread->afThreadCallback()->getPermissionProvider().checkPermission(
-                    CAPTURE_AUDIO_HOTWORD,
-                    attributionSource.uid);
-            if (!res.ok()) {
-                return aidl_utils::statusTFromBinderStatus(res.error());
-            }
-            if (!res.value()) {
-                return PERMISSION_DENIED;
-            }
-    } else {
-        if (!captureHotwordAllowed(attributionSource)) {
-            return PERMISSION_DENIED;
-        }
+    const auto res = thread->afThreadCallback()->getPermissionProvider().checkPermission(
+            CAPTURE_AUDIO_HOTWORD, attributionSource.uid);
+    if (!res.ok()) {
+        return aidl_utils::statusTFromBinderStatus(res.error());
     }
-
+    if (!res.value()) {
+        return PERMISSION_DENIED;
+    }
     if (thread != 0) {
         auto* const recordThread = thread->asIAfRecordThread().get();
         status_t status = recordThread->shareAudioHistory(
@@ -3722,47 +3727,45 @@ AfPlaybackCommon::AfPlaybackCommon(IAfTrackBase& self, IAfThreadBase& thread,
     using media::permission::skipOpsForUid;
     using media::permission::ValidatedAttributionSourceState;
 
-    if (hardening_impl()) {
-        // Don't bother for trusted uids
-        if (!skipOpsForUid(attributionSource.uid) && shouldPlaybackHarden) {
-            if (isOffloadOrMmap) {
-                mExecutor.emplace();
-            }
-            auto thread_wp = wp<IAfThreadBase>::fromExisting(&thread);
-            mOpControlPartialSession.emplace(
-                    ValidatedAttributionSourceState::createFromTrustedSource(attributionSource),
-                    Ops{.attributedOp = OP_CONTROL_AUDIO_PARTIAL},
-                    [this, isOffloadOrMmap, thread_wp](bool isPermitted) {
-                        mHasOpControlPartial.store(isPermitted, std::memory_order_release);
-                        if (isOffloadOrMmap) {
-                            mExecutor->enqueue(mediautils::Runnable{[thread_wp]() {
-                                auto thread = thread_wp.promote();
-                                if (thread != nullptr) {
-                                    audio_utils::lock_guard l {thread->mutex()};
-                                    thread->broadcast_l();
-                                }
-                            }});
-                        }
-                    }
-            );
-            // Same as previous but for mHasOpControlFull, OP_CONTROL_AUDIO
-            mOpControlFullSession.emplace(
-                    ValidatedAttributionSourceState::createFromTrustedSource(attributionSource),
-                    Ops{.attributedOp = OP_CONTROL_AUDIO},
-                    [this, isOffloadOrMmap, thread_wp](bool isPermitted) {
-                        mHasOpControlFull.store(isPermitted, std::memory_order_release);
-                        if (isOffloadOrMmap) {
-                            mExecutor->enqueue(mediautils::Runnable{[thread_wp]() {
-                                auto thread = thread_wp.promote();
-                                if (thread != nullptr) {
-                                    audio_utils::lock_guard l {thread->mutex()};
-                                    thread->broadcast_l();
-                                }
-                            }});
-                        }
-                    }
-            );
+    // Don't bother for trusted uids
+    if (!skipOpsForUid(attributionSource.uid) && shouldPlaybackHarden) {
+        if (isOffloadOrMmap) {
+            mExecutor.emplace();
         }
+        auto thread_wp = wp<IAfThreadBase>::fromExisting(&thread);
+        mOpControlPartialSession.emplace(
+                ValidatedAttributionSourceState::createFromTrustedSource(attributionSource),
+                Ops{.attributedOp = OP_CONTROL_AUDIO_PARTIAL},
+                [this, isOffloadOrMmap, thread_wp](bool isPermitted) {
+                    mHasOpControlPartial.store(isPermitted, std::memory_order_release);
+                    if (isOffloadOrMmap) {
+                        mExecutor->enqueue(mediautils::Runnable{[thread_wp]() {
+                            auto thread = thread_wp.promote();
+                            if (thread != nullptr) {
+                                audio_utils::lock_guard l {thread->mutex()};
+                                thread->broadcast_l();
+                            }
+                        }});
+                    }
+                }
+        );
+        // Same as previous but for mHasOpControlFull, OP_CONTROL_AUDIO
+        mOpControlFullSession.emplace(
+                ValidatedAttributionSourceState::createFromTrustedSource(attributionSource),
+                Ops{.attributedOp = OP_CONTROL_AUDIO},
+                [this, isOffloadOrMmap, thread_wp](bool isPermitted) {
+                    mHasOpControlFull.store(isPermitted, std::memory_order_release);
+                    if (isOffloadOrMmap) {
+                        mExecutor->enqueue(mediautils::Runnable{[thread_wp]() {
+                            auto thread = thread_wp.promote();
+                            if (thread != nullptr) {
+                                audio_utils::lock_guard l {thread->mutex()};
+                                thread->broadcast_l();
+                            }
+                        }});
+                    }
+                }
+        );
     }
 }
 
@@ -3839,6 +3842,7 @@ sp<IAfMmapTrack> IAfMmapTrack::create(IAfThreadBase* thread,
           audio_format_t format,
           audio_channel_mask_t channelMask,
           audio_session_t sessionId,
+          std::variant<audio_input_flags_t, audio_output_flags_t> flags,
           bool isOut,
           const android::content::AttributionSourceState& attributionSource,
           pid_t creatorPid,
@@ -3851,6 +3855,7 @@ sp<IAfMmapTrack> IAfMmapTrack::create(IAfThreadBase* thread,
             format,
             channelMask,
             sessionId,
+            flags,
             isOut,
             attributionSource,
             creatorPid,
@@ -3863,6 +3868,7 @@ MmapTrack::MmapTrack(IAfThreadBase* thread,
         audio_format_t format,
         audio_channel_mask_t channelMask,
         audio_session_t sessionId,
+        std::variant<audio_input_flags_t, audio_output_flags_t> flags,
         bool isOut,
         const AttributionSourceState& attributionSource,
         pid_t creatorPid,
@@ -3880,6 +3886,7 @@ MmapTrack::MmapTrack(IAfThreadBase* thread,
                   std::string(AMEDIAMETRICS_KEY_PREFIX_AUDIO_MMAP) + std::to_string(portId)),
         mPid(VALUE_OR_FATAL(aidl2legacy_int32_t_uid_t(attributionSource.pid))),
         mUid(VALUE_OR_FATAL(aidl2legacy_int32_t_uid_t(attributionSource.uid))),
+        mFlags(flags),
             mSilenced(false), mSilencedNotified(false)
 {
     // Once this item is logged by the server, the client can add properties.

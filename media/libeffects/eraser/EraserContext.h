@@ -23,6 +23,7 @@
 #include <aidl/android/hardware/audio/effect/Eraser.h>
 #include <aidl/android/media/audio/eraser/Capability.h>
 #include <aidl/android/media/audio/eraser/Configuration.h>
+#include <aidl/android/media/audio/eraser/IEraserCallback.h>
 
 #include "effect-impl/EffectContext.h"
 #include "LiteRTInstance.h"
@@ -41,12 +42,28 @@ class EraserContext final : public EffectContext {
     std::optional<Eraser> getParam(Eraser::Tag tag);
     ndk::ScopedAStatus setParam(Eraser eraser);
     IEffect::Status process(float* in, float* out, int samples);
+
     using EraserConfiguration = android::media::audio::eraser::Configuration;
     using EraserCapability = android::media::audio::eraser::Capability;
 
+    static const EraserCapability& getCapability();
+
   private:
+
+    // supported default configurations for the eraser implementation
+    static constexpr int kClassifierSampleRate = 16000;
+    // 1 second classifier window
+    static constexpr int kClassifierWindowSizeMs = 1000;
+    // max number of sounds can be separated
+    static constexpr int kSeparatorMaxSoundNum = 8;
+    // max gain factor for the remixer
+    static constexpr float kRemixerGainFactorMax = 1.2f;
+
     static const EraserConfiguration kDefaultConfig;
 
+    static const android::media::audio::eraser::ClassifierCapability kClassifierCapability;
+    static const android::media::audio::eraser::SeparatorCapability kSeparatorCapability;
+    static const android::media::audio::eraser::RemixerCapability kRemixerCapability;
     static const EraserCapability kCapability;
 
     // yamnet model was used for classifier:
@@ -59,12 +76,15 @@ class EraserContext final : public EffectContext {
     const std::string kSeparatorModelPath =
             "/apex/com.android.hardware.audio/etc/models/separator.tflite";
 
-    int mChannelCount;
+    int mChannelCount = 0;
     Parameter::Common mCommon;
     EraserConfiguration mConfig;
+    int mSoundId = 0;
+    std::shared_ptr<android::media::audio::eraser::IEraserCallback> mCallback;
 
     std::unique_ptr<LiteRTInstance> mClassifierInstance;
     std::unique_ptr<LiteRTInstance> mSeparatorInstance;
+    std::vector<float> mWorkBuffer;
 
     void init();
 };

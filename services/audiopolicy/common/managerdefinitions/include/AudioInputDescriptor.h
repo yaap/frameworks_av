@@ -51,7 +51,7 @@ public:
     audio_devices_t getDeviceType() const { return (mDevice != nullptr) ?
                     mDevice->type() : AUDIO_DEVICE_NONE; }
     sp<DeviceDescriptor> getDevice() const { return mDevice; }
-    void setDevice(const sp<DeviceDescriptor> &device) { mDevice = device; }
+    void setDevice(const sp<DeviceDescriptor> &device);
     DeviceVector supportedDevices() const  {
         return mProfile != nullptr ? mProfile->getSupportedDevices() : DeviceVector(); }
     DeviceVector routableDevices() const  {

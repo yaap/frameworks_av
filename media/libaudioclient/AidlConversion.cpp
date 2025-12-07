@@ -882,4 +882,16 @@ legacy2aidl_audio_microphone_characteristic_t_MicrophoneInfoFw(
     return aidl;
 }
 
+ConversionResult<audio_utils::TimerQueue::handle_t>
+aidl2legacy_TimerQueueHandle_timer_queue_handle_t(media::TimerQueueHandle aidl) {
+    return convertReinterpret<audio_utils::TimerQueue::handle_t>(aidl.handle);
+}
+
+ConversionResult<media::TimerQueueHandle>
+legacy2aidl_timer_queue_handle_t_TimerQueueHandle(audio_utils::TimerQueue::handle_t legacy) {
+    media::TimerQueueHandle aidl;
+    aidl.handle = VALUE_OR_RETURN(convertReinterpret<int64_t>(legacy));
+    return aidl;
+}
+
 }  // namespace android

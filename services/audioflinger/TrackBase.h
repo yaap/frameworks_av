@@ -260,6 +260,8 @@ public:
      */
     void endBatteryAttribution() final;
 
+    AudioBufferProvider* asAudioBufferProvider() final { return this; }
+
 protected:
     DISALLOW_COPY_AND_ASSIGN(TrackBase);
 
@@ -347,6 +349,14 @@ protected:
     virtual std::string trackFlagsAsString() const = 0;
 
     audio_utils::trace::Object createDeviceIntervalTrace(const std::string& devices);
+
+    virtual bool isOffloaded() const { return false; }
+
+    bool isNonOffloadableEffectEnabled_l() const final
+            REQUIRES(audio_utils::AudioFlinger_Mutex);
+
+    bool isNonOffloadableEffectEnabled() const final
+            EXCLUDES(audio_utils::AudioFlinger_Mutex);
 
     const wp<IAfThreadBase> mThread;
     const alloc_type     mAllocType;

@@ -260,7 +260,8 @@ engineConfig::ParsingResult EngineBase::processParsingResult(
         loadVolumeConfig(mVolumeGroups, volumeConfig);
     }
     for (auto& strategyConfig : result.parsedConfig->productStrategies) {
-        sp<ProductStrategy> strategy = new ProductStrategy(strategyConfig.name, strategyConfig.id);
+        sp<ProductStrategy> strategy = new ProductStrategy(strategyConfig.name, strategyConfig.id,
+                strategyConfig.zoneId);
         for (const auto &group : strategyConfig.attributesGroups) {
             const auto &iter = std::find_if(begin(mVolumeGroups), end(mVolumeGroups),
                                          [&group](const auto &volumeGroup) {
@@ -312,23 +313,25 @@ StrategyVector EngineBase::getOrderedProductStrategies() const
         });
     };
 
-    auto strategies = mOrderedStrategyMap;
+    const auto& strategies = mOrderedStrategyMap;
 
     auto enforcedAudibleStrategyIter = findByFlag(strategies, AUDIO_FLAG_AUDIBILITY_ENFORCED);
-
-    if (getForceUse(AUDIO_POLICY_FORCE_FOR_SYSTEM) == AUDIO_POLICY_FORCE_SYSTEM_ENFORCED &&
-            enforcedAudibleStrategyIter != strategies.end()) {
-        auto enforcedAudibleStrategy = *enforcedAudibleStrategyIter;
-        strategies.erase(enforcedAudibleStrategyIter);
-        strategies.insert(begin(strategies), enforcedAudibleStrategy);
-    }
+    const bool isSystemEnforced =
+            (getForceUse(AUDIO_POLICY_FORCE_FOR_SYSTEM) == AUDIO_POLICY_FORCE_SYSTEM_ENFORCED &&
+             enforcedAudibleStrategyIter != strategies.end());
 
     StrategyVector orderedStrategies;
-    for (const auto &iter : strategies) {
-        if (iter.second->isPatchStrategy()) {
+    if (isSystemEnforced) {
+        orderedStrategies.push_back(enforcedAudibleStrategyIter->second->getId());
+    }
+    for (auto iter = strategies.begin(); iter != strategies.end(); ++iter) {
+        if (iter->second->isPatchStrategy() ||
+            (isSystemEnforced && iter == enforcedAudibleStrategyIter)) {
+            // Skip patch strategies.
+            // Skip the enforced strategy if it is already added at the beginning of the list.
             continue;
         }
-        orderedStrategies.push_back(iter.second->getId());
+        orderedStrategies.push_back(iter->second->getId());
     }
 
     return orderedStrategies;
@@ -354,7 +357,7 @@ status_t EngineBase::listAudioProductStrategies(AudioProductStrategyVector &stra
         const auto &productStrategy = iter.second;
         strategies.push_back(
         {productStrategy->getName(), productStrategy->listVolumeGroupAttributes(),
-         productStrategy->getId()});
+         productStrategy->getId(), productStrategy->getZoneId()});
     }
     return NO_ERROR;
 }
@@ -807,6 +810,25 @@ DeviceVector EngineBase::getPreferredAvailableDevicesForProductStrategy(
         if (preferredAvailableDevVec.size() == preferredStrategyDevices.size()) {
             ALOGV("%s using pref device %s for strategy %u",
                    __func__, preferredAvailableDevVec.toString().c_str(), strategy);
+            return preferredAvailableDevVec;
+        }
+    }
+    return preferredAvailableDevVec;
+}
+
+DeviceVector EngineBase::getPreferredAvailableDevicesForInputSource(
+        const DeviceVector& availableInputDevices, audio_source_t inputSource) const {
+    DeviceVector preferredAvailableDevVec = {};
+    AudioDeviceTypeAddrVector preferredDevices;
+    const status_t status =
+            getDevicesForRoleAndCapturePreset(inputSource, DEVICE_ROLE_PREFERRED, preferredDevices);
+    if (status == NO_ERROR) {
+        // Only use preferred devices when they are all available.
+        preferredAvailableDevVec =
+                availableInputDevices.getDevicesFromDeviceTypeAddrVec(preferredDevices);
+        if (preferredAvailableDevVec.size() == preferredDevices.size()) {
+            ALOGV("%s using pref device %s for source %u", __func__,
+                  preferredAvailableDevVec.toString().c_str(), inputSource);
             return preferredAvailableDevVec;
         }
     }

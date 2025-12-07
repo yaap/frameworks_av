@@ -71,6 +71,7 @@ cc_defaults {
         "libprocessgroup",
         "libprocinfo",
         "libsensorprivacy",
+        "libcameracompatbilityinfo",
         "libstagefright",
         "libstagefright_foundation",
         "libtinyxml2",
@@ -94,6 +95,7 @@ cc_defaults {
         "camera_platform_flags_c_lib",
         "com.android.window.flags.window-aconfig_flags_c_lib",
         "media_permission-aidl-cpp",
+        "process_info_service_aidl-cpp",
     ],
 
     static_libs: [

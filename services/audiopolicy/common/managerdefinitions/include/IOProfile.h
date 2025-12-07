@@ -19,7 +19,6 @@
 #include "DeviceDescriptor.h"
 #include "PolicyAudioPort.h"
 #include "policy.h"
-#include <com_android_media_audioserver.h>
 #include <media/AudioContainers.h>
 #include <utils/String8.h>
 #include <system/audio.h>
@@ -184,20 +183,7 @@ public:
      * @return true if the device is routable as indicated by the HAL.
      *         false otherwise.
      */
-    bool routesToDevice(const sp<DeviceDescriptor> &device) const
-    {
-        if (!com::android::media::audioserver::enable_strict_port_routing_checks()) {
-            return supportsDevice(device);
-        }
-
-        // If profile does not contain ID, this is most likely indicating HIDL.
-        // Return routable so as to follow the legacy behavior.
-        if (getHalId() == AUDIO_PORT_HANDLE_NONE) {
-            return supportsDevice(device);
-        }
-
-        return mRoutableDevices.contains(device);
-    }
+    bool routesToDevice(const sp<DeviceDescriptor> &device) const;
 
     bool devicesSupportEncodedFormats(DeviceTypeSet deviceTypes) const
     {

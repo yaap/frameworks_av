@@ -25,13 +25,13 @@
 #include <binder/IServiceManager.h>
 
 #include <aaudio/AAudio.h>
+#include <aaudio/IAAudioClientCallback.h>
 #include <cutils/properties.h>
-
 #include <media/AudioParameter.h>
 #include <media/AudioSystem.h>
 #include <media/MediaMetricsItem.h>
-#include <utils/Trace.h>
 #include <mediautils/SchedulingPolicyService.h>
+#include <utils/Trace.h>
 
 #include "AudioEndpointParcelable.h"
 #include "binding/AAudioBinderClient.h"
@@ -128,6 +128,7 @@ aaudio_result_t AudioStreamInternal::open(const AudioStreamBuilder &builder) {
     attributionSource.token = sp<android::BBinder>::make();
 
     // Build the request to send to the server.
+    request.setCallback(this);
     request.setAttributionSource(attributionSource);
     request.setSharingModeMatchRequired(isSharingModeMatchRequired());
     request.setInService(isInService());
@@ -149,6 +150,7 @@ aaudio_result_t AudioStreamInternal::open(const AudioStreamBuilder &builder) {
     request.getConfiguration().setBufferCapacity(builder.getBufferCapacity());
 
     request.getConfiguration().setPerformanceMode(getPerformanceMode());
+    request.getConfiguration().setSessionId(builder.getSessionId());
 
     mServiceStreamHandleInfo = mServiceInterface.openStream(request, configurationOutput);
     if (getServiceHandle() < 0
@@ -353,7 +355,7 @@ aaudio_result_t AudioStreamInternal::configureDataInformation(int32_t callbackFr
     return AAUDIO_OK;
 }
 
-// This must be called under mStreamLock.
+// This must be called under mStreamMutex.
 aaudio_result_t AudioStreamInternal::release_l() {
     aaudio_result_t result = AAUDIO_OK;
     ALOGD("%s(): mServiceStreamHandle = 0x%08X", __func__, getServiceHandle());
@@ -544,13 +546,13 @@ int64_t AudioStreamInternal::calculateReasonableTimeout() {
     return calculateReasonableTimeout(getFramesPerBurst());
 }
 
-// This must be called under mStreamLock.
+// This must be called under mStreamMutex.
 aaudio_result_t AudioStreamInternal::stopCallback_l()
 {
     if (isDataCallbackSet() && (isActive() || isDisconnected())) {
         mCallbackEnabled.store(false);
-        wakeupCallbackThread();
-        aaudio_result_t result = joinThread_l(nullptr); // may temporarily unlock mStreamLock
+        wakeupCallbackThread_l();
+        aaudio_result_t result = joinThread_l(nullptr); // may temporarily unlock mStreamMutex
         if (result == AAUDIO_ERROR_INVALID_HANDLE) {
             ALOGD("%s() INVALID_HANDLE, stream was probably stolen", __func__);
             result = AAUDIO_OK;
@@ -889,6 +891,10 @@ aaudio_result_t AudioStreamInternal::processData(void *buffer, int32_t numFrames
         framesLeft -= (int32_t) framesProcessed;
         audioData += framesProcessed * getBytesPerFrame();
 
+        if (mayNeedToDrain() && framesLeft <= 0) {
+            break;
+        }
+
         // Should we block?
         if (timeoutNanoseconds == 0) {
             break; // don't block
@@ -1012,4 +1018,20 @@ int32_t AudioStreamInternal::getDeviceBufferCapacity() const {
 
 bool AudioStreamInternal::isClockModelInControl() const {
     return isActive() && mAudioEndpoint->isFreeRunning() && mClockModel.isRunning();
+}
+
+//------------------------------------------------------------------------------
+// Implementation of AAudioClientCallback
+
+android::binder::Status AudioStreamInternal::onWakeUp(
+        const android::media::TimerQueueHandle& handle) {
+    if (getPerformanceMode() != AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED) {
+        ALOGW("%s on a non-offload stream", __func__);
+        return android::binder::Status::fromStatusT(STATUS_INVALID_OPERATION);
+    }
+    android::audio_utils::TimerQueue::handle_t legacy = VALUE_OR_RETURN_BINDER_STATUS(
+            android::aidl2legacy_TimerQueueHandle_timer_queue_handle_t(handle));
+    std::lock_guard _l(mStreamMutex);
+    onWakeUp_l(legacy);
+    return android::binder::Status::ok();
 }

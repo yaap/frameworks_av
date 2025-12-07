@@ -51,6 +51,7 @@ cc_library_shared {
         ":effectCommonFile",
         "Eraser.cpp",
         "EraserContext.cpp",
+        "EraserUtils.cpp",
         "LiteRTInstance.cpp",
     ],
     defaults: [

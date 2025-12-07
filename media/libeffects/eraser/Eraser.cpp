@@ -23,6 +23,7 @@
 #include "Eraser.h"
 #include "EraserContext.h"
 
+#include <cstddef>
 #include <optional>
 
 using aidl::android::hardware::audio::common::getChannelCount;
@@ -32,11 +33,11 @@ using aidl::android::hardware::audio::effect::getEffectImplUuidEraser;
 using aidl::android::hardware::audio::effect::getEffectTypeUuidEraser;
 using aidl::android::hardware::audio::effect::IEffect;
 using aidl::android::hardware::audio::effect::State;
-using aidl::android::media::audio::common::AudioChannelLayout;
 using aidl::android::media::audio::common::AudioUuid;
 
 extern "C" binder_exception_t createEffect(const AudioUuid* in_impl_uuid,
                                            std::shared_ptr<IEffect>* instanceSpp) {
+    android::base::InitLogging(nullptr);
     if (!in_impl_uuid || *in_impl_uuid != getEffectImplUuidEraser()) {
         LOG(ERROR) << __func__ << "uuid not supported";
         return EX_ILLEGAL_ARGUMENT;
@@ -64,6 +65,8 @@ extern "C" binder_exception_t queryEffect(const AudioUuid* in_impl_uuid, Descrip
 namespace aidl::android::hardware::audio::effect {
 
 const std::string EraserImpl::kEffectName = "AOSP Audio Eraser";
+const EraserImpl::EraserCapability EraserImpl::kCapability = EraserContext::getCapability();
+
 const Descriptor EraserImpl::kDescriptor = {
         .common = {.id = {.type = getEffectTypeUuidEraser(), .uuid = getEffectImplUuidEraser()},
                    .flags = {.hwAcceleratorMode = Flags::HardwareAccelerator::NONE},
@@ -117,6 +120,26 @@ std::shared_ptr<EffectContext> EraserImpl::createContext(const Parameter::Common
     if (mContext) {
         LOG(DEBUG) << __func__ << " context already exist";
     } else {
+        const auto& supportedLayouts = kCapability.channelLayouts;
+        const auto& supportedSampleRates = kCapability.sampleRates;
+        if (common.input.base != common.output.base) {
+            LOG(ERROR) << __func__
+                       << " input/output not supported, input: " << common.input.base.toString()
+                       << " output: " << common.output.base.toString();
+            return nullptr;
+        }
+        if (supportedLayouts.end() == std::find(supportedLayouts.begin(), supportedLayouts.end(),
+                                                common.input.base.channelMask)) {
+            LOG(ERROR) << __func__ << " channelMask not supported: "
+                       << common.input.base.channelMask.toString();
+            return nullptr;
+        }
+        if (supportedSampleRates.end() == std::find(supportedSampleRates.begin(),
+                                                    supportedSampleRates.end(),
+                                                    common.input.base.sampleRate)) {
+            LOG(ERROR) << __func__
+                       << " sampleRate not supported: " << common.input.base.sampleRate;
+        }
         mContext = std::make_shared<EraserContext>(1 /* statusFmqDepth */, common);
     }
     return mContext;

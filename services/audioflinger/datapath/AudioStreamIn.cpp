@@ -35,9 +35,9 @@ AudioStreamIn::AudioStreamIn(AudioHwDevice *dev, audio_input_flags_t flags)
 {
 }
 
-// This must be defined here together with the HAL includes above and
-// not solely in the header.
-AudioStreamIn::~AudioStreamIn() = default;
+AudioStreamIn::~AudioStreamIn() {
+    if (stream != nullptr) stream->close();
+}
 
 sp<DeviceHalInterface> AudioStreamIn::hwDev() const
 {

@@ -155,6 +155,9 @@ bool AAudioServiceEndpoint::matches(const AAudioStreamConfiguration& configurati
     if (configuration.getDirection() != getDirection()) {
         return false;
     }
+    if (configuration.getPerformanceMode() != getPerformanceMode()) {
+        return false;
+    }
     if (!configuration.getDeviceIds().empty() &&
         !android::areDeviceIdsEqual(configuration.getDeviceIds(), getDeviceIds())) {
         return false;

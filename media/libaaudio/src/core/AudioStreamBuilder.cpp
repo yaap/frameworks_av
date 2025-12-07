@@ -184,8 +184,9 @@ aaudio_result_t AudioStreamBuilder::build(AudioStream** streamPtr) {
         allowMMap = false;
     }
 
-    // SessionID and Effects are only supported in Legacy mode.
-    if (getSessionId() != AAUDIO_SESSION_ID_NONE) {
+    // SessionID and Effects are only supported in legacy mode and mmap offload mode.
+    if (getSessionId() != AAUDIO_SESSION_ID_NONE &&
+        getPerformanceMode() != AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED) {
         ALOGD("%s() MMAP not used because sessionId specified.", __func__);
         allowMMap = false;
     }

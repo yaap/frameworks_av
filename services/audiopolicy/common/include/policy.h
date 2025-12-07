@@ -46,12 +46,13 @@ using StreamTypeVector = std::vector<audio_stream_type_t>;
     V(STRATEGY_ENFORCED_AUDIBLE, 2)            \
     V(STRATEGY_ACCESSIBILITY, 3)               \
     V(STRATEGY_SONIFICATION_RESPECTFUL, 4)     \
-    V(STRATEGY_MEDIA, 5)                       \
-    V(STRATEGY_DTMF, 6)                        \
-    V(STRATEGY_CALL_ASSISTANT, 7)              \
-    V(STRATEGY_TRANSMITTED_THROUGH_SPEAKER, 8) \
-    V(STRATEGY_REROUTING, 9)                   \
-    V(STRATEGY_PATCH, 10)
+    V(STRATEGY_ASSISTANT, 5)                   \
+    V(STRATEGY_MEDIA, 6)                       \
+    V(STRATEGY_DTMF, 7)                        \
+    V(STRATEGY_CALL_ASSISTANT, 8)              \
+    V(STRATEGY_TRANSMITTED_THROUGH_SPEAKER, 9) \
+    V(STRATEGY_REROUTING, 10)                  \
+    V(STRATEGY_PATCH, 11)
 
 enum legacy_strategy {
     AUDIO_LEGACY_STRATEGY_LIST_DEF(AUDIO_DEFINE_ENUM_SYMBOL_V)

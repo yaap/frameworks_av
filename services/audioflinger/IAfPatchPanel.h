@@ -88,7 +88,7 @@ public:
             int32_t mixPortHalId) REQUIRES(mutex()) = 0;
     virtual audio_utils::mutex& mutex() const
             RETURN_CAPABILITY(audio_utils::AudioFlinger_Mutex) = 0;
-    virtual const DefaultKeyedVector<audio_module_handle_t, AudioHwDevice*>&
+    virtual const std::map<audio_module_handle_t, AudioHwDevice*>&
             getAudioHwDevs_l() const REQUIRES(mutex()) = 0;
     virtual audio_unique_id_t nextUniqueId(audio_unique_id_use_t use) = 0;
     virtual const sp<PatchCommandThread>& getPatchCommandThread() = 0;

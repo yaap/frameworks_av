@@ -281,6 +281,8 @@ void AudioCapabilities::applyLevelLimits() {
                     maxChannels = 28;
                     break;
                 default:
+                    // Set maxChannels to the max known for unknown profiles.
+                    maxChannels = 28;
                     ALOGW("Unrecognized IAMF profile %d for %s", iamfProfile, mMediaType.c_str());
                     mError |= ERROR_CAPABILITIES_UNRECOGNIZED;
             }
@@ -289,12 +291,12 @@ void AudioCapabilities::applyLevelLimits() {
             switch (iamfEncoding) {
                 case IAMF_CODEC_OPUS:
                     sampleRates = {48000};
-                    bitRates = Range<int32_t>(6000, 510000);
+                    bitRates = Range<int32_t>(6000, 128000 * maxChannels);
                     break;
                 case IAMF_CODEC_AAC:
                     sampleRates = {7350,  8000,  11025, 12000, 16000, 22050, 24000,
                                    32000, 44100, 48000, 64000, 88200, 96000};
-                    bitRates = Range<int32_t>(8000, 510000);
+                    bitRates = Range<int32_t>(6000, 128000 * maxChannels);
                     break;
                 case IAMF_CODEC_FLAC:
                     sampleRateRange = Range<int32_t>(1, 655350);

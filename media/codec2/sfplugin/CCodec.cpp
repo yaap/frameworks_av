@@ -34,12 +34,12 @@
 #include <aidl/android/media/IAidlGraphicBufferSource.h>
 #include <aidl/android/media/IAidlBufferSource.h>
 #include <android/IOMXBufferSource.h>
-#include <android/hardware/media/c2/1.0/IInputSurface.h>
 #include <android/hardware/media/omx/1.0/IGraphicBufferSource.h>
 #include <android/hardware/media/omx/1.0/IOmx.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <cutils/properties.h>
+#include <gui/Flags.h> // Remove with mediaflagtools::
 #include <gui/IGraphicBufferProducer.h>
 #include <gui/Surface.h>
 #include <gui/bufferqueue/1.0/H2BGraphicBufferProducer.h>
@@ -75,7 +75,6 @@ namespace android {
 using namespace std::chrono_literals;
 using ::android::hardware::graphics::bufferqueue::V1_0::utils::H2BGraphicBufferProducer;
 using android::base::StringPrintf;
-using ::android::hardware::media::c2::V1_0::IInputSurface;
 using ::aidl::android::media::IAidlBufferSource;
 using ::aidl::android::media::IAidlNode;
 using ::android::media::AidlGraphicBufferSource;
@@ -169,7 +168,8 @@ public:
             uint32_t width,
             uint32_t height,
             uint64_t usage)
-        : mSurface(surface), mWidth(width), mHeight(height), mInputDoneCount(0) {
+        : mSurface(surface), mWidth(width), mHeight(height),
+        mInputDoneCount(0), mInputEmptyCount(0) {
         // Configurations are not passed until connect().
         mDataSpace = HAL_DATASPACE_BT709;
         mConfig.mUsage = usage;
@@ -178,6 +178,7 @@ public:
     ~C2InputSurfaceWrapper() override = default;
 
     status_t connect(const std::shared_ptr<Codec2Client::Component> &comp) override {
+        ALOGV("C2IS connect");
         if (mConnection != nullptr) {
             return ALREADY_EXISTS;
         }
@@ -197,6 +198,7 @@ public:
     }
 
     void disconnect() override {
+        ALOGV("C2IS disconnect");
         if (mConnection) {
             mConnection->disconnect();
             mConnection.reset();
@@ -206,12 +208,23 @@ public:
     }
 
     status_t start() override {
-        // InputSurface starts when connect().
-        // no-op here.
+        ALOGV("C2IS start");
+        if (mConnection == nullptr) {
+            ALOGE("InputSurface start requested without connection");
+            return UNKNOWN_ERROR;
+        }
+        std::vector<std::unique_ptr<C2SettingResult>> failures;
+        C2InputSurfaceStartTuning start{C2_TRUE};
+        c2_status_t err = mSurface->config({&start}, C2_MAY_BLOCK, &failures);
+        if (err != C2_OK) {
+            ALOGE("InputSurface start error from HAL %d", err);
+            return UNKNOWN_ERROR;
+        }
         return OK;
     }
 
     status_t signalEndOfInputStream() override {
+        ALOGV("C2IS signalEoS");
         if (mConnection) {
             if (mConnection->signalEos() != C2_OK) {
                 return UNKNOWN_ERROR;
@@ -223,6 +236,7 @@ public:
     status_t configure(Config &config) {
         std::vector<C2Param*> params;
         std::vector<std::unique_ptr<C2SettingResult>> failures;
+        std::stringstream status;
 
         std::shared_ptr<C2PortMinFrameRateTuning::output> minFps;
         std::shared_ptr<C2PortMaxFrameRateTuning::output> maxFps;
@@ -236,6 +250,7 @@ public:
         std::shared_ptr<C2PortTimestampGapTuning::output> gap;
 
         if (config.mMinFps > 0 && config.mMinFps != mConfig.mMinFps) {
+            status << " minFps=" << config.mMinFps;
             minFps = std::make_shared<C2PortMinFrameRateTuning::output>(config.mMinFps);
             params.push_back(minFps.get());
             mConfig.mMinFps = config.mMinFps;
@@ -250,7 +265,7 @@ public:
                 params.push_back(gap.get());
                 mConfig.mMinAdjustedFps = config.mMinAdjustedFps;
             } else {
-                bool fixedFpsMode = true;
+                fixedFpsMode = true;
                 float fixedGap = c2_max(0. - INT32_MAX, -1e6 / config.mFixedAdjustedFps - 0.5);
                 uint64_t gapUs = int32_t(fixedGap);
                 gap = std::make_shared<C2PortTimestampGapTuning::output>(
@@ -261,16 +276,19 @@ public:
         }
         if ((config.mMaxFps > 0 || (fixedFpsMode && config.mMaxFps == -1))
                 && config.mMaxFps != mConfig.mMaxFps) {
+            status << " maxFps=" << config.mMaxFps;
             maxFps = std::make_shared<C2PortMaxFrameRateTuning::output>(config.mMaxFps);
             params.push_back(maxFps.get());
             mConfig.mMaxFps = config.mMaxFps;
         }
         if (config.mTimeOffsetUs != mConfig.mTimeOffsetUs) {
+            status << " timeOffset " << config.mTimeOffsetUs << "us";
             timeOffset = std::make_shared<C2ComponentTimeOffsetTuning>(config.mTimeOffsetUs);
             params.push_back(timeOffset.get());
             mConfig.mTimeOffsetUs = config.mTimeOffsetUs;
         }
         if (config.mCaptureFps != mConfig.mCaptureFps || config.mCodedFps != mConfig.mCodedFps) {
+            status << " timeLapse " << config.mCaptureFps << "fps as " << config.mCodedFps << "fps";
             captureFps = std::make_shared<C2PortCaptureFrameRateTuning::output>(
                     config.mCaptureFps);
             codedFps = std::make_shared<C2StreamFrameRateInfo::output>(0u, config.mCodedFps);
@@ -282,6 +300,7 @@ public:
 
         if (config.mStartAtUs != mConfig.mStartAtUs
                 || (config.mStopped != mConfig.mStopped && !config.mStopped)) {
+            status << " start at " << config.mStartAtUs << "us";
             started = std::make_shared<C2PortStartTimestampTuning::output>(config.mStartAtUs);
             stopped = std::make_shared<C2PortStopTimestampTuning::output>();
             params.push_back(started.get());
@@ -290,9 +309,11 @@ public:
             mConfig.mStopped = config.mStopped;
         }
         if (config.mSuspended != mConfig.mSuspended) {
+            status << " " << (config.mSuspended ? "suspend" : "resume")
+                    << " at " << config.mSuspendAtUs << "us";
             if (config.mSuspended) {
                 suspended = std::make_shared<C2PortSuspendTimestampTuning::output>(
-                        mConfig.mSuspendAtUs);
+                        config.mSuspendAtUs);
                 resumed = std::make_shared<C2PortResumeTimestampTuning::output>();
             } else {
                 suspended = std::make_shared<C2PortSuspendTimestampTuning::output>();
@@ -304,18 +325,32 @@ public:
             mConfig.mSuspended = config.mSuspended;
             mConfig.mSuspendAtUs = config.mSuspendAtUs;
         }
+        bool stopRequested = false;
         if (config.mStopped != mConfig.mStopped && config.mStopped) {
+            status << " stop at " << config.mStopAtUs << "us";
             started = std::make_shared<C2PortStartTimestampTuning::output>();
             stopped = std::make_shared<C2PortStopTimestampTuning::output>(config.mStopAtUs);
             params.push_back(started.get());
             params.push_back(stopped.get());
             mConfig.mStopAtUs = config.mStopAtUs;
             mConfig.mStopped = config.mStopped;
+            stopRequested = true;
         }
         c2_status_t err = mSurface->config(params, C2_MAY_BLOCK, &failures);
         if (err != C2_OK) {
             ALOGE("C2InputSurfaceWrapper::config err(%d)", err);
             return UNKNOWN_ERROR;
+        }
+        if (stopRequested) {
+            C2PortStopTimeOffset::output offsetDelay(0);
+            c2_status_t err = mSurface->query({&offsetDelay}, {}, C2_DONT_BLOCK, nullptr);
+            if (err == C2_OK) {
+                status << " delaUs = " << offsetDelay.value << "us";
+                mConfig.mInputDelayUs = offsetDelay.value;
+            }
+        }
+        if (!status.str().empty()) {
+            ALOGV("C2IS config:%s", status.str().c_str());
         }
         return OK;
     }
@@ -2120,7 +2155,9 @@ sp<PersistentSurface> CCodec::CreateOmxInputSurface() {
                 gbs = source;
             });
     if (transStatus.isOk() && s == OmxStatus::OK) {
-        return new PersistentSurface(new H2BGraphicBufferProducer(gbp), gbs);
+        // This should be changed to a Surface in a follow up CL.
+        auto bgpb = new H2BGraphicBufferProducer(gbp);
+        return new PersistentSurface(mediaflagtools::igbpToSurfaceType(bgpb), gbs);
     }
 
     return nullptr;
@@ -2138,7 +2175,7 @@ sp<PersistentSurface> CCodec::CreateCompatibleInputSurface() {
 
 void CCodec::createInputSurface() {
     status_t err;
-    sp<IGraphicBufferProducer> bufferProducer;
+    sp<MediaSurfaceType> surface;
 
     sp<AMessage> outputFormat;
     uint64_t usage = 0;
@@ -2150,7 +2187,8 @@ void CCodec::createInputSurface() {
     }
 
     sp<PersistentSurface> persistentSurface = CreateCompatibleInputSurface();
-    if (persistentSurface->isTargetAidl()) {
+    PersistentSurface::SurfaceType surfaceType = persistentSurface->getType();
+    if (surfaceType == PersistentSurface::TYPE_AIDLSOURCE) {
         ::ndk::SpAIBinder aidlTarget = persistentSurface->getAidlTarget();
         std::shared_ptr<AGraphicBufferSource> gbs = AGraphicBufferSource::fromBinder(aidlTarget);
         if (gbs) {
@@ -2160,15 +2198,14 @@ void CCodec::createInputSurface() {
             (void)outputFormat->findInt32("height", &height);
             err = setupInputSurface(std::make_shared<AGraphicBufferSourceWrapper>(
                     gbs, width, height, usage));
-            bufferProducer = persistentSurface->getBufferProducer();
+            surface = persistentSurface->getSurface();
         } else {
             ALOGE("Corrupted input surface(aidl)");
             mCallback->onInputSurfaceCreationFailed(UNKNOWN_ERROR);
             return;
         }
-    } else {
+    } else if (surfaceType == PersistentSurface::TYPE_HIDLSOURCE) {
         sp<hidl::base::V1_0::IBase> hidlTarget = persistentSurface->getHidlTarget();
-        sp<IInputSurface> hidlInputSurface = IInputSurface::castFrom(hidlTarget);
         sp<HGraphicBufferSource> gbs = HGraphicBufferSource::castFrom(hidlTarget);
 
         if (gbs) {
@@ -2178,13 +2215,34 @@ void CCodec::createInputSurface() {
             (void)outputFormat->findInt32("height", &height);
             err = setupInputSurface(std::make_shared<HGraphicBufferSourceWrapper>(
                     gbs, width, height, usage));
-            bufferProducer = persistentSurface->getBufferProducer();
+            surface = persistentSurface->getSurface();
         } else {
-            ALOGE("Corrupted input surface");
+            ALOGE("Corrupted input surface(hidl)");
             mCallback->onInputSurfaceCreationFailed(UNKNOWN_ERROR);
             return;
         }
-    }
+    } else if (surfaceType == PersistentSurface::TYPE_INPUTSURFACE) {
+        ::ndk::SpAIBinder interface = persistentSurface->getHalInputSurface();
+        if (interface.get()) {
+            int32_t width = 0;
+            (void)outputFormat->findInt32("width", &width);
+            int32_t height = 0;
+            (void)outputFormat->findInt32("height", &height);
+            std::shared_ptr<Codec2Client::InputSurface> inputSurface =
+                    Codec2Client::CreateInputSurfaceFromInterface(interface);
+            err = setupInputSurface(std::make_shared<C2InputSurfaceWrapper>(
+                    inputSurface, width, height, usage));
+            surface = persistentSurface->getSurface();
+        } else {
+            ALOGE("Corrupted input surface(inputsurface)");
+            mCallback->onInputSurfaceCreationFailed(UNKNOWN_ERROR);
+            return;
+        }
+    } else {
+        ALOGE("Corrupted input surface(invalid %d)", (int)surfaceType);
+        mCallback->onInputSurfaceCreationFailed(UNKNOWN_ERROR);
+        return;
+   }
 
     if (err != OK) {
         ALOGE("Failed to set up input surface: %d", err);
@@ -2200,10 +2258,17 @@ void CCodec::createInputSurface() {
         inputFormat = config->mInputFormat;
         outputFormat = config->mOutputFormat;
     }
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
     mCallback->onInputSurfaceCreated(
             inputFormat,
             outputFormat,
-            new BufferProducerWrapper(bufferProducer));
+            surface);
+#else
+    mCallback->onInputSurfaceCreated(
+            inputFormat,
+            outputFormat,
+            new BufferProducerWrapper(surface));
+#endif
 }
 
 status_t CCodec::setupInputSurface(const std::shared_ptr<InputSurfaceWrapper> &surface) {
@@ -2278,7 +2343,8 @@ void CCodec::setInputSurface(const sp<PersistentSurface> &surface) {
         outputFormat = config->mOutputFormat;
         usage = config->mISConfig ? config->mISConfig->mUsage : 0;
     }
-    if (surface->isTargetAidl()) {
+    PersistentSurface::SurfaceType surfaceType = surface->getType();
+    if (surfaceType == PersistentSurface::TYPE_AIDLSOURCE) {
         ::ndk::SpAIBinder aidlTarget = surface->getAidlTarget();
         std::shared_ptr<AGraphicBufferSource> gbs = AGraphicBufferSource::fromBinder(aidlTarget);
         if (gbs) {
@@ -2299,9 +2365,8 @@ void CCodec::setInputSurface(const sp<PersistentSurface> &surface) {
             mCallback->onInputSurfaceDeclined(UNKNOWN_ERROR);
             return;
         }
-    } else {
+    } else if (surfaceType == PersistentSurface::TYPE_HIDLSOURCE) {
         sp<hidl::base::V1_0::IBase> hidlTarget = surface->getHidlTarget();
-        sp<IInputSurface> inputSurface = IInputSurface::castFrom(hidlTarget);
         sp<HGraphicBufferSource> gbs = HGraphicBufferSource::castFrom(hidlTarget);
         if (gbs) {
             int32_t width = 0;
@@ -2311,15 +2376,40 @@ void CCodec::setInputSurface(const sp<PersistentSurface> &surface) {
             status_t err = setupInputSurface(std::make_shared<HGraphicBufferSourceWrapper>(
                     gbs, width, height, usage));
             if (err != OK) {
-                ALOGE("Failed to set up input surface: %d", err);
+                ALOGE("Failed to set up input surface(hidl): %d", err);
                 mCallback->onInputSurfaceDeclined(err);
                 return;
             }
         } else {
-            ALOGE("Failed to set input surface: Corrupted surface.");
+            ALOGE("Failed to set input surface(hidl): Corrupted surface.");
             mCallback->onInputSurfaceDeclined(UNKNOWN_ERROR);
             return;
         }
+    } else if (surfaceType == PersistentSurface::TYPE_INPUTSURFACE) {
+        ::ndk::SpAIBinder interface = surface->getHalInputSurface();
+        if (interface.get()) {
+            int32_t width = 0;
+            (void)outputFormat->findInt32("width", &width);
+            int32_t height = 0;
+            (void)outputFormat->findInt32("height", &height);
+            std::shared_ptr<Codec2Client::InputSurface> inputSurface =
+                    Codec2Client::CreateInputSurfaceFromInterface(interface);
+            status_t err = setupInputSurface(std::make_shared<C2InputSurfaceWrapper>(
+                    inputSurface, width, height, usage));
+            if (err != OK) {
+                ALOGE("Failed to set up input surface(inputsurface): %d", err);
+                mCallback->onInputSurfaceDeclined(err);
+                return;
+            }
+        } else {
+            ALOGE("Failed to set input surface(inputsurface): Corrupted surface.");
+            mCallback->onInputSurfaceDeclined(UNKNOWN_ERROR);
+            return;
+        }
+    } else {
+        ALOGE("Failed to set input surface(invalid %d): Corrupted surface.", (int)surfaceType);
+        mCallback->onInputSurfaceDeclined(UNKNOWN_ERROR);
+        return;
     }
     // Formats can change after setupInputSurface
     sp<AMessage> inputFormat;
@@ -3316,6 +3406,15 @@ void CCodec::initiateReleaseIfStuck() {
 // static
 PersistentSurface *CCodec::CreateInputSurface() {
     using namespace android;
+    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
+            Codec2Client::CreateInputSurface();
+    if (inputSurface) {
+        ::ndk::SpAIBinder interface = inputSurface->getHalInterface();
+        ANativeWindow *window = inputSurface->getNativeWindow();
+        return new PersistentSurface(PersistentSurface::TYPE_INPUTSURFACE,
+                mediaflagtools::nativeWindowToSurfaceType(window),
+                interface);
+    }
     if (property_get_int32("debug.stagefright.c2inputsurface", 0) == -1) {
         sp<IGraphicBufferProducer> gbp;
         sp<AidlGraphicBufferSource> gbs = new AidlGraphicBufferSource();
@@ -3328,8 +3427,11 @@ PersistentSurface *CCodec::CreateInputSurface() {
         std::shared_ptr<WAidlGraphicBufferSource> wrapper =
                 ::ndk::SharedRefBase::make<WAidlGraphicBufferSource>(gbs);
 
+        // Update this to use a MediaSurfaceType in a follow up CL.
         return new PersistentSurface(
-              gbs->getIGraphicBufferProducer(), wrapper->asBinder());
+              PersistentSurface::TYPE_AIDLSOURCE,
+              mediaflagtools::igbpToSurfaceType(gbs->getIGraphicBufferProducer()),
+              wrapper->asBinder());
     } else {
         return nullptr;
     }

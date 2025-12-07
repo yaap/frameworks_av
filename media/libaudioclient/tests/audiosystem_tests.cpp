@@ -210,10 +210,12 @@ TEST_F(AudioSystemTest, GetSetMasterBalance) {
 TEST_F(AudioSystemTest, StartAndStopAudioSource) {
     std::vector<struct audio_port_v7> ports;
     audio_port_config sourcePortConfig;
-    audio_attributes_t attributes = AudioSystem::streamTypeToAttributes(AUDIO_STREAM_MUSIC);
+    audio_attributes_t attributes;
+    status_t status = AudioSystem::getAttributesForStreamType(AUDIO_STREAM_MUSIC, attributes);
+    ASSERT_EQ(OK, status);
     audio_port_handle_t sourcePortHandle = AUDIO_PORT_HANDLE_NONE;
 
-    status_t status = listAudioPorts(ports);
+    status = listAudioPorts(ports);
     ASSERT_EQ(OK, status);
     if (ports.empty()) {
         GTEST_SKIP() << "No ports returned by the audio system";
@@ -447,7 +449,8 @@ TEST_F(AudioSystemTest, VolumeIndexForAttributes) {
         if (group.getAudioAttributes().empty()) continue;
         const audio_attributes_t attr = group.getAudioAttributes()[0];
         if (attr == AUDIO_ATTRIBUTES_INITIALIZER) continue;
-        audio_stream_type_t streamType = AudioSystem::attributesToStreamType(attr);
+        audio_stream_type_t streamType;
+        AudioSystem::getStreamTypeForAttributes(attr, streamType);
         if (streamType >= AUDIO_STREAM_PUBLIC_CNT) continue;
 
         volume_group_t vg;

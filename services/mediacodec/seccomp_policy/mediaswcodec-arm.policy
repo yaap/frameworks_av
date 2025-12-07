@@ -21,6 +21,7 @@ ppoll: 1
 mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 mmap2: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 memfd_create: 1
+fsetxattr: 1
 ftruncate: 1
 ftruncate64: 1
 
@@ -68,6 +69,16 @@ madvise: 1
 getpid: 1
 gettid: 1
 sched_yield: 1
+
+# Android profiler (heapprofd, traced_perf) additions, where not already
+# covered by the rest of the file, or by builtin minijail allow-listing of
+# logging-related syscalls.
+# TODO(b/197184220): this is a targeted addition for a specific investigation,
+# and addresses just the arm64 framework av service policies. In the future, we
+# should make this more general (e.g. a central file that can be @included in
+# other policy files).
+setsockopt: 1
+sendmsg: 1
 
 # The mmap2/mprotect/prctl rules in this file are less restrictive than the rules
 # in the crash_dump policy file. Therefore, include a version of the crash_dump

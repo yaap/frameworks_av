@@ -33,7 +33,8 @@ class EraserImpl final : public EffectImpl {
     ~EraserImpl() final;
 
     static const std::string kEffectName;
-    static const Capability kCapability;
+    using EraserCapability = android::media::audio::eraser::Capability;
+    static const EraserCapability kCapability;
     static const Descriptor kDescriptor;
 
     ndk::ScopedAStatus getDescriptor(Descriptor* _aidl_return) final;

@@ -16,6 +16,7 @@ cc_defaults {
         "libbase",
         "libbinder",
         "libbinder_ndk",
+        "libcamera_client",
         "libcamera_metadata",
         "libcutils",
         "libexif",
@@ -48,6 +49,7 @@ cc_defaults {
 cc_library_static {
     name: "libvirtualcamera_utils",
     srcs: [
+        "util/AidlUtil.cc",
         "util/EglDisplayContext.cc",
         "util/EglFramebuffer.cc",
         "util/EglProgram.cc",

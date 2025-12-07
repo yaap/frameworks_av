@@ -534,10 +534,20 @@ void VirtualCameraRenderThread::processTask(
         captureTimestamp.count());
   }
 
+  const camera_metadata_t* customMetadata =
+      mSessionContext.getCaptureResultMetadataForTimestamp(
+          captureTimestamp.count());
+
   std::unique_ptr<CaptureResult> captureResult = createCaptureResult(
       request.getFrameNumber(),
       createCaptureResultMetadata(
-          captureTimestamp, request.getRequestSettings(), mReportedSensorSize));
+          captureTimestamp, request.getRequestSettings(), mReportedSensorSize,
+          customMetadata));
+
+  if (customMetadata != nullptr) {
+    free_camera_metadata(const_cast<camera_metadata_t*>(customMetadata));
+  }
+
   renderOutputBuffers(request, *captureResult);
 
   auto status = notifyShutter(request, *captureResult, captureTimestamp);
@@ -600,7 +610,7 @@ std::chrono::nanoseconds VirtualCameraRenderThread::getSurfaceTimestamp(
       surfaceTimestamp.count() <= lastSurfaceTimestamp) {
     // The timestamps were provided by the producer but we are
     // repeating the last frame, so we increase the previous timestamp by
-    // the elapsed time sinced its capture, otherwise the camera framework
+    // the elapsed time since its capture, otherwise the camera framework
     // will discard the frame.
     surfaceTimestamp = std::chrono::nanoseconds(lastSurfaceTimestamp +
                                                 timeSinceLastFrame.count());

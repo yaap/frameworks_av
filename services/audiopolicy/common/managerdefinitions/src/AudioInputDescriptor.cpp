@@ -306,6 +306,9 @@ void AudioInputDescriptor::close()
                 "%s(%d): mProfile->curOpenCount %d < mProfile->curActiveCount %d.",
                 __func__, mId, mProfile->curOpenCount, mProfile->curActiveCount);
         mIoHandle = AUDIO_IO_HANDLE_NONE;
+        if (mDevice != nullptr) {
+            mDevice->setPreferredConfig(nullptr);
+        }
     }
 }
 
@@ -513,6 +516,22 @@ void AudioInputDescriptor::checkSuspendEffects()
                                                  effect->mSession,
                                                  effect->mSuspended);
         }
+    }
+}
+
+void AudioInputDescriptor::setDevice(const sp<DeviceDescriptor> &device) {
+    mDevice = device;
+    if (mDevice == nullptr) {
+        return;
+    }
+    audio_config_base_t config = {
+            .sample_rate = mSamplingRate,
+            .channel_mask = mChannelMask,
+            .format = mFormat
+    };
+    if (!mDevice->setPreferredConfig(&config)) {
+        ALOGE("%s failed to set preferred config for device %s",
+              __func__, device->toString().c_str());
     }
 }
 

@@ -255,13 +255,7 @@ void CodecHandler::onMessageReceived(const sp<AMessage> &msg) {
                          break;
                      }
 
-                     // Here format is MediaCodec's internal copy of output format.
-                     // Make a copy since the client might modify it.
-                     sp<AMessage> copy;
-                     if (format != nullptr) {
-                         copy = format->dup();
-                     }
-                     AMediaFormat *aMediaFormat = AMediaFormat_fromMsg(&copy);
+                     AMediaFormat *aMediaFormat = AMediaFormat_fromMsg(&format);
 
                      Mutex::Autolock _l(mCodec->mAsyncCallbackLock);
                      if (mCodec->mAsyncCallback.onAsyncFormatChanged != NULL) {
@@ -872,25 +866,25 @@ media_status_t AMediaCodec_setOutputSurface(AMediaCodec *mData, ANativeWindow* w
 }
 
 EXPORT
-media_status_t AMediaCodec_createInputSurface(AMediaCodec *mData, ANativeWindow **surface) {
-    if (surface == NULL || mData == NULL) {
+media_status_t AMediaCodec_createInputSurface(AMediaCodec *mData, ANativeWindow **anw) {
+    if (anw == NULL || mData == NULL) {
         return AMEDIA_ERROR_INVALID_PARAMETER;
     }
-    *surface = NULL;
+    *anw = NULL;
 
-    sp<IGraphicBufferProducer> igbp = NULL;
-    status_t err = mData->mCodec->createInputSurface(&igbp);
+    sp<MediaSurfaceType> surface = nullptr;
+    status_t err = mData->mCodec->createInputSurface(&surface);
     if (err != NO_ERROR) {
         return translate_error(err);
     }
 
     // This will increment default strongCount on construction.  It will be decremented
     // on function exit.
-    auto spSurface = sp<Surface>::make(igbp);
-    *surface = spSurface.get();
+    auto spSurface = android::mediaflagtools::surfaceTypeToSurface(surface);
+    *anw = spSurface.get();
     // This will increment a private strongCount.  It will be decremented in
     // ANativeWindow_release.
-    ANativeWindow_acquire(*surface);
+    ANativeWindow_acquire(*anw);
     return AMEDIA_OK;
 }
 
@@ -906,7 +900,7 @@ media_status_t AMediaCodec_createPersistentInputSurface(ANativeWindow **surface)
         return AMEDIA_ERROR_UNKNOWN;
     }
 
-    sp<MediaSurfaceType> s = mediaflagtools::igbpToSurfaceType(ps->getBufferProducer());
+    sp<MediaSurfaceType> s = ps->getSurface();
     if (s == NULL) {
         return AMEDIA_ERROR_UNKNOWN;
     }

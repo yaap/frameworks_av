@@ -172,7 +172,7 @@ aaudio_result_t AudioStream::systemStart() {
         return AAUDIO_ERROR_INVALID_STATE;
     }
 
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
 
     if (isDisconnected()) {
         ALOGW("%s() stream is disconnected", __func__);
@@ -232,7 +232,7 @@ aaudio_result_t AudioStream::systemPause() {
         return AAUDIO_ERROR_INVALID_STATE;
     }
 
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     switch (getState()) {
         // Proceed with pausing.
         case AAUDIO_STREAM_STATE_STARTING:
@@ -286,7 +286,7 @@ aaudio_result_t AudioStream::safeFlush() {
         return AAUDIO_ERROR_INVALID_STATE;
     }
 
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     aaudio_result_t result = AAudio_isFlushAllowed(getState());
     if (result != AAUDIO_OK) {
         return result;
@@ -296,7 +296,7 @@ aaudio_result_t AudioStream::safeFlush() {
 }
 
 aaudio_result_t AudioStream::systemStopInternal() {
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     return systemStopInternal_l();
 }
 
@@ -362,7 +362,7 @@ aaudio_result_t AudioStream::safeRelease() {
         return AAUDIO_ERROR_INVALID_STATE;
     }
     // This may get temporarily unlocked in the MMAP release() when joining callback threads.
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     if (getState() == AAUDIO_STREAM_STATE_CLOSING) { // already released?
         return AAUDIO_OK;
     }
@@ -379,7 +379,7 @@ aaudio_result_t AudioStream::safeReleaseClose() {
 
 aaudio_result_t AudioStream::safeReleaseCloseInternal() {
     // This get temporarily unlocked in the MMAP release() when joining callback threads.
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     releaseCloseFinal_l();
     return AAUDIO_OK;
 }
@@ -558,11 +558,11 @@ aaudio_result_t AudioStream::createThread_l(int64_t periodNanoseconds,
 
 aaudio_result_t AudioStream::joinThread(void** returnArg) {
     // This may get temporarily unlocked in the MMAP release() when joining callback threads.
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     return joinThread_l(returnArg);
 }
 
-// This must be called under mStreamLock.
+// This must be called under mStreamMutex.
 aaudio_result_t AudioStream::joinThread_l(void** returnArg) {
     if (!mHasThread) {
         ALOGD("joinThread() - but has no thread or already join()ed");
@@ -572,11 +572,14 @@ aaudio_result_t AudioStream::joinThread_l(void** returnArg) {
     // If the callback is stopping the stream because the app passed back STOP
     // then we don't need to join(). The thread is already about to exit.
     if (!pthread_equal(pthread_self(), mThread)) {
+        // Copy mThread to a temporary variable as it can only be accessed while holding the stream
+        // mutex, joining the thread will also need to acquire the same mutex.
+        pthread_t t = mThread;
         // Called from an app thread. Not the callback.
         // Unlock because the callback may be trying to stop the stream but is blocked.
-        mStreamLock.unlock();
-        int err = pthread_join(mThread, returnArg);
-        mStreamLock.lock();
+        mStreamMutex.unlock();
+        int err = pthread_join(t, returnArg);
+        mStreamMutex.lock();
         if (err) {
             ALOGE("%s() pthread_join() returns err = %d", __func__, err);
             result = AAudioConvert_androidToAAudioResult(-err);
@@ -654,7 +657,7 @@ bool AudioStream::collidesWithCallback() const {
 
 void AudioStream::setDuckAndMuteVolume(float duckAndMuteVolume) {
     ALOGD("%s() to %f", __func__, duckAndMuteVolume);
-    std::lock_guard<std::mutex> lock(mStreamLock);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     mDuckAndMuteVolume = duckAndMuteVolume;
     doSetVolume(); // apply this change
 }
@@ -685,11 +688,35 @@ aaudio_result_t AudioStream::flushFromFrame(AAudio_FlushFromAccuracy accuracy, i
         return AAUDIO_ERROR_OUT_OF_RANGE;
     }
     const int64_t requestedPosition = *position;
-    std::lock_guard lock(mStreamLock);
+    std::lock_guard lock(mStreamMutex);
     const aaudio_result_t result = flushFromFrame_l(accuracy, position);
     ALOGD("%s(%d, %jd), actual position = %jd, result = %d",
           __func__, accuracy, requestedPosition, *position, result);
     return result;
+}
+
+aaudio_result_t AudioStream::setPlaybackParameters(const AAudioPlaybackParameters* parameters) {
+    ALOGD("%s, fallbackMode=%d, stretchMode=%d, pitch=%f, speed=%f", __func__,
+          parameters->fallbackMode, parameters->stretchMode, parameters->pitch, parameters->speed);
+    if (!com_android_media_audioserver_mmap_pcm_offload_support()) {
+        return AAUDIO_ERROR_UNIMPLEMENTED;
+    }
+    if (getDirection() != AAUDIO_DIRECTION_OUTPUT) {
+        return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    }
+    std::lock_guard lock(mStreamMutex);
+    return setPlaybackParameters_l(parameters);
+}
+
+aaudio_result_t AudioStream::getPlaybackParameters(AAudioPlaybackParameters* parameters) {
+    if (!com_android_media_audioserver_mmap_pcm_offload_support()) {
+        return AAUDIO_ERROR_UNIMPLEMENTED;
+    }
+    if (getDirection() != AAUDIO_DIRECTION_OUTPUT) {
+        return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    }
+    std::lock_guard lock(mStreamMutex);
+    return getPlaybackParameters_l(parameters);
 }
 
 int AudioStream::dataCallbackInternal(void *audioData, int32_t numFrames) {

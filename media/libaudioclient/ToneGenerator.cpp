@@ -1321,7 +1321,7 @@ bool ToneGenerator::initAudioTrack() {
     if (mStreamType == AUDIO_STREAM_VOICE_CALL || mStreamType == AUDIO_STREAM_BLUETOOTH_SCO) {
         streamType = AUDIO_STREAM_DTMF;
     }
-    attr = AudioSystem::streamTypeToAttributes(streamType);
+    AudioSystem::getAttributesForStreamType(streamType, attr);
     attr.flags = static_cast<audio_flags_mask_t>(attr.flags | AUDIO_FLAG_LOW_LATENCY);
     size_t frameCount = 0;
     if (AudioSystem::getOutputSamplingRate(&mSamplingRate, streamType) == NO_ERROR) {

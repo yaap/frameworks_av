@@ -33,6 +33,7 @@ public:
                             audio_format_t format,
                             audio_channel_mask_t channelMask,
                             audio_session_t sessionId,
+                            std::variant<audio_input_flags_t, audio_output_flags_t> flags,
                             bool isOut,
                             const android::content::AttributionSourceState& attributionSource,
                             pid_t creatorPid,
@@ -72,8 +73,14 @@ private:
     int64_t framesReleased() const final;
     void onTimestamp(const ExtendedTimestamp &timestamp) final;
 
+    bool isOffloaded() const final {
+        return std::holds_alternative<audio_output_flags_t>(mFlags) &&
+                (std::get<audio_output_flags_t>(mFlags) & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD)
+                != 0;
+    }
     const pid_t mPid;
     const uid_t mUid;
+    const std::variant<audio_input_flags_t, audio_output_flags_t> mFlags;
     bool  mSilenced;            // protected by MMapThread::mLock
     bool  mSilencedNotified;    // protected by MMapThread::mLock
 };  // end of Track

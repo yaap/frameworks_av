@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 #include <aaudio/AAudio.h>
+#include <aaudio/BnAAudioClientCallback.h>
 
 #include "binding/AudioEndpointParcelable.h"
 #include "binding/AAudioServiceInterface.h"
@@ -39,7 +40,8 @@ namespace aaudio {
     constexpr int32_t MAX_BUFFER_CAPACITY_IN_FRAMES = 32 * 1024 * 1024;  // arbitrary
 
 // A stream that talks to the AAudioService or directly to a HAL.
-class AudioStreamInternal : public AudioStream {
+class AudioStreamInternal : public virtual AudioStream,
+                            public virtual BnAAudioClientCallback {
 
 public:
     AudioStreamInternal(AAudioServiceInterface  &serviceInterface, bool inService);
@@ -95,11 +97,14 @@ public:
         return mServiceStreamHandleInfo.getServiceLifetimeId();
     }
 
-protected:
-    aaudio_result_t requestStart_l() REQUIRES(mStreamLock) override;
-    aaudio_result_t requestStop_l() REQUIRES(mStreamLock) override;
+    // AAudioClientCallback interfaces
+    android::binder::Status onWakeUp(const android::media::TimerQueueHandle& handle) override;
 
-    aaudio_result_t release_l() REQUIRES(mStreamLock) override;
+protected:
+    aaudio_result_t requestStart_l() REQUIRES(mStreamMutex) override;
+    aaudio_result_t requestStop_l() REQUIRES(mStreamMutex) override;
+
+    aaudio_result_t release_l() REQUIRES(mStreamMutex) override;
 
     aaudio_result_t processData(void *buffer,
                          int32_t numFrames,
@@ -119,7 +124,7 @@ protected:
 
     aaudio_result_t drainTimestampsFromService();
 
-    aaudio_result_t stopCallback_l();
+    aaudio_result_t stopCallback_l() REQUIRES(mStreamMutex);
 
     virtual void prepareBuffersForStart() {}
 
@@ -129,7 +134,7 @@ protected:
 
     virtual void onFlushFromServer() {}
 
-    virtual void wakeupCallbackThread() {}
+    virtual void wakeupCallbackThread_l() REQUIRES(mStreamMutex) {}
 
     aaudio_result_t onEventFromServer(AAudioServiceMessage *message);
 
@@ -155,7 +160,12 @@ protected:
      */
     bool isClockModelInControl() const;
 
-    aaudio_result_t startCallback_l() REQUIRES(mStreamLock);
+    aaudio_result_t startCallback_l() REQUIRES(mStreamMutex);
+
+    virtual bool mayNeedToDrain() const { return false; }
+
+    virtual void onWakeUp_l(android::audio_utils::TimerQueue::handle_t handle)
+            REQUIRES(mStreamMutex) {}
 
     IsochronousClockModel    mClockModel;      // timing model for chasing the HAL
 
@@ -199,7 +209,7 @@ private:
                                      int32_t numFrames);
 
     // Exit the stream from standby, will reconstruct data path.
-    aaudio_result_t exitStandby_l() REQUIRES(mStreamLock);
+    aaudio_result_t exitStandby_l() REQUIRES(mStreamMutex);
 
     // Adjust timing model based on timestamp from service.
     void processTimestamp(uint64_t position, int64_t time);

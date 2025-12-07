@@ -320,6 +320,7 @@ aaudio_result_t AAudioStreamParameters::validateChannelMask() const {
             case AAUDIO_CHANNEL_7POINT1:
             case AAUDIO_CHANNEL_7POINT1POINT2:
             case AAUDIO_CHANNEL_7POINT1POINT4:
+            case AAUDIO_CHANNEL_13POINT0:
             case AAUDIO_CHANNEL_9POINT1POINT4:
             case AAUDIO_CHANNEL_9POINT1POINT6:
                 return AAUDIO_OK;

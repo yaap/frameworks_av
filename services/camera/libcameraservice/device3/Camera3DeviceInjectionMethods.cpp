@@ -107,6 +107,10 @@ status_t Camera3Device::Camera3DeviceInjectionMethods::injectCamera(
 status_t Camera3Device::Camera3DeviceInjectionMethods::stopInjection() {
     status_t res = NO_ERROR;
 
+    if (!isInjecting()) {
+        return OK;
+    }
+
     sp<Camera3Device> parent = mParent.promote();
     if (parent == nullptr) {
         ALOGE("%s: parent does not exist!", __FUNCTION__);
@@ -127,11 +131,13 @@ status_t Camera3Device::Camera3DeviceInjectionMethods::stopInjection() {
         wasActive = true;
     }
 
-    res = parent->mRequestThread->setHalInterface(mBackupHalInterface);
-    if (res != OK) {
-        ALOGE("%s: Failed to restore the HalInterface in RequestThread!", __FUNCTION__);
-        injectionDisconnectImpl();
-        return res;
+    if (parent->mRequestThread != nullptr) {
+        res = parent->mRequestThread->setHalInterface(mBackupHalInterface);
+        if (res != OK) {
+            ALOGE("%s: Failed to restore the HalInterface in RequestThread!", __FUNCTION__);
+            injectionDisconnectImpl();
+            return res;
+        }
     }
 
     res = replaceHalInterface(mBackupHalInterface, false);
@@ -270,7 +276,7 @@ status_t Camera3Device::Camera3DeviceInjectionMethods::injectionConfigureStreams
 
 void Camera3Device::Camera3DeviceInjectionMethods::injectionDisconnectImpl() {
     ATRACE_CALL();
-    ALOGI("%s: Injection camera disconnect", __FUNCTION__);
+    ALOGV("%s: Injection camera disconnect", __FUNCTION__);
     mIsStreamConfigCompleteButNotInjected = false;
     mInjectionStreams.clear();
     mInjectionConfig.streams = nullptr;

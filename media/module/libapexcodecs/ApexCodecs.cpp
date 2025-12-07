@@ -15,7 +15,7 @@
  */
 
 #define LOG_TAG "ApexCodecs"
-// #define LOG_NDEBUG 0
+//#define LOG_NDEBUG 0
 #include <android-base/logging.h>
 
 #include <new>
@@ -26,20 +26,20 @@
 #include <C2ParamInternal.h>
 #include <C2Work.h>
 #include <android_media_swcodec_flags.h>
+#include <media/stagefright/foundation/AUtils.h>
 
 #include <android-base/no_destructor.h>
 #include <apex/ApexCodecs.h>
 #include <apex/ApexCodecsImpl.h>
 #include <apex/ApexCodecsParam.h>
 
-// TODO: remove when we have real implementations
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-parameter"
-
 using ::android::apexcodecs::ApexComponentIntf;
 using ::android::apexcodecs::ApexComponentStoreIntf;
 using ::android::apexcodecs::ApexConfigurableIntf;
 using ::android::base::ERROR;
+
+// 64-bit alignment
+constexpr size_t PARAMS_ALIGNMENT = 8;
 
 struct ApexCodec_Configurable {
     ApexCodec_Configurable(
@@ -277,127 +277,111 @@ ApexCodec_Configurable *ApexCodec_Component_getConfigurable(
     return comp->getConfigurable();
 }
 
-struct ApexCodec_Buffer {
-public:
-    ApexCodec_Buffer()
-          : mType(APEXCODEC_BUFFER_TYPE_EMPTY) {
+ApexCodec_Buffer::ApexCodec_Buffer()
+        : mType(APEXCODEC_BUFFER_TYPE_EMPTY) {
+}
+
+ApexCodec_Buffer::~ApexCodec_Buffer() {
+}
+
+void ApexCodec_Buffer::clear() {
+    mType = APEXCODEC_BUFFER_TYPE_EMPTY;
+    mBufferInfo.reset();
+    mLinearBuffer = {};
+    mGraphicBuffer = nullptr;
+    mConfigUpdates.reset();
+    mOwnedConfigUpdates.reset();
+}
+
+ApexCodec_BufferType ApexCodec_Buffer::getType() const {
+    return mType;
+}
+
+void ApexCodec_Buffer::setBufferInfo(
+        ApexCodec_BufferFlags flags, uint64_t frameIndex, uint64_t timestampUs) {
+    mBufferInfo.emplace(BufferInfo{flags, frameIndex, timestampUs});
+}
+
+ApexCodec_Status ApexCodec_Buffer::setLinearBuffer(const ApexCodec_LinearBuffer *linearBuffer) {
+    if (mType != APEXCODEC_BUFFER_TYPE_EMPTY) {
+        return APEXCODEC_STATUS_BAD_STATE;
     }
-
-    ~ApexCodec_Buffer() {
+    mType = APEXCODEC_BUFFER_TYPE_LINEAR;
+    if (linearBuffer == nullptr) {
+        mLinearBuffer.data = nullptr;
+        mLinearBuffer.size = 0;
+    } else {
+        mLinearBuffer = *linearBuffer;
     }
+    return APEXCODEC_STATUS_OK;
+}
 
-    void clear() {
-        mType = APEXCODEC_BUFFER_TYPE_EMPTY;
-        mBufferInfo.reset();
-        mLinearBuffer = {};
-        mGraphicBuffer = nullptr;
-        mConfigUpdates.reset();
-        mOwnedConfigUpdates.reset();
+ApexCodec_Status ApexCodec_Buffer::setGraphicBuffer(AHardwareBuffer *graphicBuffer) {
+    if (mType != APEXCODEC_BUFFER_TYPE_EMPTY) {
+        return APEXCODEC_STATUS_BAD_STATE;
     }
+    mType = APEXCODEC_BUFFER_TYPE_GRAPHIC;
+    mGraphicBuffer = graphicBuffer;
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_BufferType getType() const {
-        return mType;
+ApexCodec_Status ApexCodec_Buffer::setConfigUpdates(const ApexCodec_LinearBuffer *configUpdates) {
+    if (configUpdates == nullptr) {
+        return APEXCODEC_STATUS_BAD_VALUE;
     }
-
-    void setBufferInfo(ApexCodec_BufferFlags flags, uint64_t frameIndex, uint64_t timestampUs) {
-        mBufferInfo.emplace(BufferInfo{flags, frameIndex, timestampUs});
+    if (mConfigUpdates.has_value()) {
+        return APEXCODEC_STATUS_BAD_STATE;
     }
+    mOwnedConfigUpdates.reset();
+    mConfigUpdates.emplace(*configUpdates);
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_Status setLinearBuffer(const ApexCodec_LinearBuffer *linearBuffer) {
-        if (mType != APEXCODEC_BUFFER_TYPE_EMPTY) {
-            return APEXCODEC_STATUS_BAD_STATE;
-        }
-        mType = APEXCODEC_BUFFER_TYPE_LINEAR;
-        if (linearBuffer == nullptr) {
-            mLinearBuffer.data = nullptr;
-            mLinearBuffer.size = 0;
-        } else {
-            mLinearBuffer = *linearBuffer;
-        }
-        return APEXCODEC_STATUS_OK;
+ApexCodec_Status ApexCodec_Buffer::getBufferInfo(
+        ApexCodec_BufferFlags *outFlags,
+        uint64_t *outFrameIndex,
+        uint64_t *outTimestampUs) const {
+    if (!mBufferInfo.has_value()) {
+        return APEXCODEC_STATUS_BAD_STATE;
     }
+    *outFlags = mBufferInfo->flags;
+    *outFrameIndex = mBufferInfo->frameIndex;
+    *outTimestampUs = mBufferInfo->timestampUs;
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_Status setGraphicBuffer(AHardwareBuffer *graphicBuffer) {
-        if (mType != APEXCODEC_BUFFER_TYPE_EMPTY) {
-            return APEXCODEC_STATUS_BAD_STATE;
-        }
-        mType = APEXCODEC_BUFFER_TYPE_GRAPHIC;
-        mGraphicBuffer = graphicBuffer;
-        return APEXCODEC_STATUS_OK;
+ApexCodec_Status ApexCodec_Buffer::getLinearBuffer(ApexCodec_LinearBuffer *outLinearBuffer) const {
+    if (mType != APEXCODEC_BUFFER_TYPE_LINEAR) {
+        return APEXCODEC_STATUS_BAD_STATE;
     }
+    *outLinearBuffer = mLinearBuffer;
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_Status setConfigUpdates(const ApexCodec_LinearBuffer *configUpdates) {
-        if (configUpdates == nullptr) {
-            return APEXCODEC_STATUS_BAD_VALUE;
-        }
-        if (mConfigUpdates.has_value()) {
-            return APEXCODEC_STATUS_BAD_STATE;
-        }
-        mOwnedConfigUpdates.reset();
-        mConfigUpdates.emplace(*configUpdates);
-        return APEXCODEC_STATUS_OK;
+ApexCodec_Status ApexCodec_Buffer::getGraphicBuffer(AHardwareBuffer **outGraphicBuffer) const {
+    if (mType != APEXCODEC_BUFFER_TYPE_GRAPHIC) {
+        return APEXCODEC_STATUS_BAD_STATE;
     }
+    *outGraphicBuffer = mGraphicBuffer;
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_Status getBufferInfo(
-            ApexCodec_BufferFlags *outFlags,
-            uint64_t *outFrameIndex,
-            uint64_t *outTimestampUs) const {
-        if (!mBufferInfo.has_value()) {
-            return APEXCODEC_STATUS_BAD_STATE;
-        }
-        *outFlags = mBufferInfo->flags;
-        *outFrameIndex = mBufferInfo->frameIndex;
-        *outTimestampUs = mBufferInfo->timestampUs;
-        return APEXCODEC_STATUS_OK;
+ApexCodec_Status ApexCodec_Buffer::getConfigUpdates(
+        ApexCodec_LinearBuffer *outConfigUpdates,
+        bool *outOwnedByClient) const {
+    if (!mConfigUpdates.has_value()) {
+        return APEXCODEC_STATUS_NOT_FOUND;
     }
+    *outConfigUpdates = mConfigUpdates.value();
+    *outOwnedByClient = !mOwnedConfigUpdates.has_value();
+    return APEXCODEC_STATUS_OK;
+}
 
-    ApexCodec_Status getLinearBuffer(ApexCodec_LinearBuffer *outLinearBuffer) const {
-        if (mType != APEXCODEC_BUFFER_TYPE_LINEAR) {
-            return APEXCODEC_STATUS_BAD_STATE;
-        }
-        *outLinearBuffer = mLinearBuffer;
-        return APEXCODEC_STATUS_OK;
-    }
-
-    ApexCodec_Status getGraphicBuffer(AHardwareBuffer **outGraphicBuffer) const {
-        if (mType != APEXCODEC_BUFFER_TYPE_GRAPHIC) {
-            return APEXCODEC_STATUS_BAD_STATE;
-        }
-        *outGraphicBuffer = mGraphicBuffer;
-        return APEXCODEC_STATUS_OK;
-    }
-
-    ApexCodec_Status getConfigUpdates(
-            ApexCodec_LinearBuffer *outConfigUpdates,
-            bool *outOwnedByClient) const {
-        if (!mConfigUpdates.has_value()) {
-            return APEXCODEC_STATUS_NOT_FOUND;
-        }
-        *outConfigUpdates = mConfigUpdates.value();
-        *outOwnedByClient = mOwnedConfigUpdates.has_value();
-        return APEXCODEC_STATUS_OK;
-    }
-
-    void setOwnedConfigUpdates(std::vector<uint8_t> &&configUpdates) {
-        mOwnedConfigUpdates = std::move(configUpdates);
-        mConfigUpdates.emplace(
-                ApexCodec_LinearBuffer{ configUpdates.data(), configUpdates.size() });
-    }
-
-private:
-    struct BufferInfo {
-        ApexCodec_BufferFlags flags;
-        uint64_t frameIndex;
-        uint64_t timestampUs;
-    };
-
-    ApexCodec_BufferType mType;
-    std::optional<BufferInfo> mBufferInfo;
-    ApexCodec_LinearBuffer mLinearBuffer;
-    AHardwareBuffer *mGraphicBuffer;
-    std::optional<ApexCodec_LinearBuffer> mConfigUpdates;
-    std::optional<std::vector<uint8_t>> mOwnedConfigUpdates;
-};
+void ApexCodec_Buffer::setOwnedConfigUpdates(std::vector<uint8_t> &&configUpdates) {
+    mConfigUpdates.emplace(
+            ApexCodec_LinearBuffer{ configUpdates.data(), configUpdates.size() });
+    mOwnedConfigUpdates = std::move(configUpdates);
+}
 
 ApexCodec_Buffer *ApexCodec_Buffer_create() {
     return new ApexCodec_Buffer;
@@ -606,6 +590,9 @@ public:
             const C2ParamField& field) {
         std::unique_ptr<C2StructDescriptor> desc = reflector->describe(
                 _C2ParamInspector::GetIndex(field));
+        if (!desc) {
+            return C2Value::NO_INIT;
+        }
 
         for (const C2FieldDescriptor &fieldDesc : *desc) {
             if (_C2ParamInspector::GetOffset(fieldDesc) == _C2ParamInspector::GetOffset(field)) {
@@ -778,8 +765,8 @@ ApexCodec_Status ApexCodec_Configurable::config(
             return APEXCODEC_STATUS_BAD_VALUE;
         }
         c2Params.emplace_back(C2Param::From(data, paramSize));
-        data += paramSize;
-        size -= paramSize;
+        data += align(paramSize, PARAMS_ALIGNMENT);
+        size -= align(paramSize, PARAMS_ALIGNMENT);
     }
     std::vector<std::unique_ptr<C2SettingResult>> c2Results;
     ApexCodec_Status status = mConfigurable->config(c2Params, &c2Results);
@@ -804,25 +791,37 @@ ApexCodec_Status ApexCodec_Configurable::query(
     *writtenOrRequired = 0;
     std::vector<C2Param::Index> heapParamIndices;
     for (size_t i = 0; i < numIndices; ++i) {
+        LOG(VERBOSE) << "query: input index=0x"
+                     << std::hex << indices[i] << std::dec << " aka " << indices[i];
         heapParamIndices.push_back(indices[i]);
     }
     std::vector<std::unique_ptr<C2Param>> params;
     ApexCodec_Status status = mConfigurable->query(heapParamIndices, &params);
-    if (status != APEXCODEC_STATUS_OK) {
+    if (status != APEXCODEC_STATUS_OK && status != APEXCODEC_STATUS_BAD_INDEX) {
         return status;
     }
+    LOG(VERBOSE) << "query: " << params.size() << " params";
     for (const std::unique_ptr<C2Param> &param : params) {
-        *writtenOrRequired += param->size();
+        if (!param || !(*param)) {
+            continue;
+        }
+        LOG(VERBOSE) << "query: output index=0x"
+                     << std::hex << param->index() << std::dec << " aka " << param->index();
+        *writtenOrRequired += align(param->size(), PARAMS_ALIGNMENT);
     }
+    LOG(VERBOSE) << "query: *writtenOrRequired: " << *writtenOrRequired;
     if (*writtenOrRequired > config->size) {
         return APEXCODEC_STATUS_NO_MEMORY;
     }
     size_t offset = 0;
     for (const std::unique_ptr<C2Param> &param : params) {
+        if (!param || !(*param)) {
+            continue;
+        }
         memcpy(config->data + offset, param.get(), param->size());
-        offset += param->size();
+        offset = align(offset + param->size(), PARAMS_ALIGNMENT);
     }
-    return APEXCODEC_STATUS_OK;
+    return status;
 }
 
 ApexCodec_Status ApexCodec_Configurable::querySupportedParams(
@@ -994,5 +993,3 @@ ApexCodec_Status ApexCodec_Configurable_querySupportedValues(
     }
     return comp->querySupportedValues(queries, numQueries);
 }
-
-#pragma clang diagnostic pop

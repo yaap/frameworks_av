@@ -22,7 +22,7 @@
 #include <memory>
 #include <vector>
 
-#include <gui/IGraphicBufferProducer.h>
+#include <gui/Flags.h> // Remove with MediaSurfaceType
 #include <media/hardware/CryptoAPI.h>
 #include <media/MediaCodecInfo.h>
 #include <media/MediaMetrics.h>
@@ -200,7 +200,7 @@ struct MediaCodec : public AHandler {
 
     status_t setOnFirstTunnelFrameReadyNotification(const sp<AMessage> &notify);
 
-    status_t createInputSurface(sp<IGraphicBufferProducer>* bufferProducer);
+    status_t createInputSurface(sp<MediaSurfaceType>* bufferProducer);
 
     status_t setInputSurface(const sp<PersistentSurface> &surface);
 
