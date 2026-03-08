@@ -145,6 +145,11 @@ cc_library {
         "libstagefright_bufferpool@2.0.1",
         "libui",
     ],
+
+    cflags: [] + select(soong_config_variable("codec2", "target_ships_dolby"), {
+        any @ value: ["-DTARGET_SHIPS_DOLBY"],
+        default: [],
+    }),
 }
 
 // public dependency for Codec 2.0 HAL service implementations
