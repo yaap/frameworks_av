@@ -139,8 +139,10 @@ protected:
     std::shared_ptr<C2ComponentStore> mStore;
     std::vector<std::shared_ptr<C2ParamReflector>> mParamReflectors;
 
+#ifndef TARGET_SHIPS_DOLBY
     // Reflector helper for MultiAccessUnitHelper
     std::shared_ptr<C2ReflectorHelper> mMultiAccessUnitReflector;
+#endif
 
     std::map<C2Param::CoreIndex, std::shared_ptr<C2StructDescriptor>> mStructDescriptors;
     std::set<C2Param::CoreIndex> mUnsupportedStructDescriptors;
