@@ -614,7 +614,11 @@ binder::Status CameraDeviceClient::submitRequestList(
             if (streamIdSetIt != mHighResolutionCameraIdToStreamIdSet.end()) {
                 std::list<int> streamIdsUsedInRequest = getIntersection(streamIdSetIt->second,
                         outputStreamIds);
+#ifndef BYPASS_PIXELMODE
                 if (!request.mIsReprocess &&
+#else
+                if (!request.mIsReprocess && !mPrivilegedClient &&
+#endif
                         !isSensorPixelModeConsistent(streamIdsUsedInRequest, it.settings)) {
                      ALOGE("%s: Camera %s: Request settings CONTROL_SENSOR_PIXEL_MODE not "
                             "consistent with configured streams. Rejecting request.",
