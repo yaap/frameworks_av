@@ -31,6 +31,7 @@ cc_defaults {
     name: "mediametrics_service_fuzzer_defaults",
     static_libs: [
         "libmediametrics",
+        "libmediametrics_allowlist",
         "libmediametricsservice",
         "libplatformprotos",
     ],
@@ -51,7 +52,7 @@ cc_defaults {
         "libstatspull",
         "libstatssocket",
         "libutils",
-        "mediametricsservice-aidl-cpp",
+        "mediametricsservice-aidl-V1-cpp",
         "packagemanager_aidl-cpp",
     ],
 

@@ -110,7 +110,7 @@ status_t Camera3InputStream::returnBufferCheckedLocked(
             [[maybe_unused]] nsecs_t timestamp,
             [[maybe_unused]] nsecs_t readoutTimestamp,
             [[maybe_unused]] bool output,
-            int32_t /*transform*/,
+            const std::vector<int32_t>& /*transforms*/,
             const std::vector<size_t>&,
             /*out*/
             sp<Fence> *releaseFenceOut) {
@@ -179,7 +179,7 @@ status_t Camera3InputStream::returnInputBufferLocked(
     ATRACE_CALL();
 
     return returnAnyBufferLocked(buffer, /*timestamp*/0, /*readoutTimestamp*/0,
-                                 /*output*/false, /*transform*/ -1);
+                                 /*output*/false, /*transforms*/ {});
 }
 
 status_t Camera3InputStream::getInputSurfaceLocked(sp<Surface> *surface) {
@@ -196,11 +196,11 @@ status_t Camera3InputStream::getInputSurfaceLocked(sp<Surface> *surface) {
     return OK;
 }
 
-status_t Camera3InputStream::disconnectLocked() {
+status_t Camera3InputStream::disconnectLocked(bool force) {
 
     status_t res;
 
-    if ((res = Camera3IOStreamBase::disconnectLocked()) != OK) {
+    if ((res = Camera3IOStreamBase::disconnectLocked(force)) != OK) {
         return res;
     }
 
@@ -303,8 +303,7 @@ status_t Camera3InputStream::getEndpointUsage(uint64_t *usage) {
     return OK;
 }
 
-void Camera3InputStream::onBufferFreed(const wp<GraphicBuffer>& gb) {
-    const sp<GraphicBuffer> buffer = gb.promote();
+void Camera3InputStream::onBufferFreed(const sp<GraphicBuffer>& buffer) {
     if (buffer != nullptr) {
         camera_stream_buffer streamBuffer =
                 {nullptr, &buffer->handle, CAMERA_BUFFER_STATUS_OK, -1, -1};
@@ -320,7 +319,7 @@ void Camera3InputStream::onBufferFreed(const wp<GraphicBuffer>& gb) {
             callback->onBufferFreed(mId, buffer->handle);
         }
     } else {
-        ALOGE("%s: GraphicBuffer is freed before onBufferFreed callback finishes!", __FUNCTION__);
+        ALOGE("%s: GraphicBuffer was null!", __FUNCTION__);
     }
 }
 

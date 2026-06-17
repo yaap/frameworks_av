@@ -36,7 +36,7 @@ import android.hardware.CameraStatus;
 import android.hardware.CameraExtensionSessionStats;
 
 /**
- * Binder interface for the native camera service running in mediaserver.
+ * Binder interface for the native camera service running in cameraserver.
  *
  * @hide
  */
@@ -404,6 +404,27 @@ interface ICameraService
             int targetSdkVersion,
             in CameraCompatibilityInfo compatInfo,
             in SessionConfiguration sessionConfiguration,
+            in AttributionSourceState clientAttribution,
+            int devicePolicy);
+
+    /**
+     * Provide a warm up hint to the camera stack.
+     *
+     * This can be used to inform the service about upcoming camera usage,
+     * so it can manage resources accordingly.
+     * For example, the camera HAL might boost clocks to reduce camera
+     * open latency or warm up pipelines to reduce session configuration latency.
+     * The camera device can then be prepared and respond faster as it gets configuration
+     * and capture requests.
+     *
+     * @param cameraId The camera id of the camera device to warm up.
+     * @param clientAttribution The AttributionSource of the client.
+     * @param devicePolicy The camera policy of the device of the associated context (default
+     *                     policy for default device context). Only virtual cameras would be
+     *                     exposed for custom policies and only real cameras would be exposed
+     *                     for the default policy.
+     */
+    oneway void warmUp(@utf8InCpp String cameraId,
             in AttributionSourceState clientAttribution,
             int devicePolicy);
 }

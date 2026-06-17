@@ -130,7 +130,7 @@ void AAudioServiceEndpoint::releaseRegisteredStreams() {
     AAudioService *aaudioService = AAudioClientTracker::getInstance().getAAudioService();
     for (const auto& serviceStream : streamsToClose) {
         ALOGD("%s() - close stream 0x%08X", __func__, serviceStream->getHandle());
-        aaudioService->closeStream(serviceStream);
+        aaudioService->closeStream(serviceStream, true /*force*/);
     }
 }
 
@@ -210,6 +210,7 @@ audio_attributes_t AAudioServiceEndpoint::getAudioAttributesFrom(
     } else {
         flags = static_cast<audio_flags_mask_t>(AUDIO_FLAG_LOW_LATENCY
                 | AAudioConvert_privacySensitiveToAudioFlagsMask(params->isPrivacySensitive()));
+        tags = params->getTagsAsString();
     }
     audio_attributes_t nativeAttributes = {
             .content_type = contentType,

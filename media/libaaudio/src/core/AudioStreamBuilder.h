@@ -17,36 +17,33 @@
 #ifndef AAUDIO_AUDIO_STREAM_BUILDER_H
 #define AAUDIO_AUDIO_STREAM_BUILDER_H
 
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
+#include <core/AAudioStreamOpenRequest.h>
+#include <core/AudioStream.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
 #include <set>
 #include <stdint.h>
-
-#include <aaudio/AAudio.h>
-
-#include "AAudioStreamParameters.h"
-#include "AudioStream.h"
+// go/keep-sorted end
 
 namespace aaudio {
 
 /**
  * Factory class for an AudioStream.
  */
-class AudioStreamBuilder : public AAudioStreamParameters {
+class AudioStreamBuilder : public AAudioStreamOpenRequest {
 public:
-    AudioStreamBuilder() = default;
+    AudioStreamBuilder()
+            : AAudioStreamOpenRequest(nullptr /*parameters*/,
+                                      false /*isSharingModeMatchRequired*/) { }
 
     ~AudioStreamBuilder() = default;
-
-    bool isSharingModeMatchRequired() const {
-        return mSharingModeMatchRequired;
-    }
 
     AudioStreamBuilder* setSharingModeMatchRequired(bool required) {
         mSharingModeMatchRequired = required;
         return this;
-    }
-
-    AAudioStream_dataCallback getDataCallbackProc() const {
-        return mDataCallbackProc;
     }
 
     AudioStreamBuilder* setDataCallbackProc(AAudioStream_dataCallback proc) {
@@ -55,31 +52,15 @@ public:
         return this;
     }
 
-    AAudioStream_partialDataCallback getPartialDataCallbackProc() const {
-        return mPartialDataCallbackProc;
-    }
-
     AudioStreamBuilder* setPartialDataCallbackProc(AAudioStream_partialDataCallback proc) {
-        mPartialDataCallbackProc = proc;
+        setPartialDataCallbackProcVoid(proc);
         mDataCallbackProc = nullptr;
         return this;
     }
 
-    bool isDataCallbackSet() const {
-        return mDataCallbackProc != nullptr || mPartialDataCallbackProc != nullptr;
-    }
-
-    void *getDataCallbackUserData() const {
-        return mDataCallbackUserData;
-    }
-
     AudioStreamBuilder* setDataCallbackUserData(void *userData) {
-        mDataCallbackUserData = userData;
+        setDataCallbackUserDataVoid(userData);
         return this;
-    }
-
-    AAudioStream_errorCallback getErrorCallbackProc() const {
-        return mErrorCallbackProc;
     }
 
     AudioStreamBuilder* setErrorCallbackProc(AAudioStream_errorCallback proc) {
@@ -92,31 +73,19 @@ public:
         return this;
     }
 
-    void *getErrorCallbackUserData() const {
-        return mErrorCallbackUserData;
-    }
-
     AudioStreamBuilder* setPresentationEndCallbackProc(AAudioStream_presentationEndCallback proc) {
-        mPresentationEndCallbackProc = proc;
+        setPresentationEndCallbackProcVoid(proc);
         return this;
-    }
-
-    AAudioStream_presentationEndCallback getPresentationEndCallbackProc() const {
-        return mPresentationEndCallbackProc;
     }
 
     AudioStreamBuilder* setPresentationEndCallbackUserData(void *userData) {
-        mPresentationEndCallbackUserData = userData;
+        setPresentationEndCallbackUserDataVoid(userData);
         return this;
     }
 
-    void *getPresentationEndCallbackUserData() const {
-        return mPresentationEndCallbackUserData;
-    }
+    AudioStreamBuilder* setRoutingChangedCallbackProc(AAudioStream_routingChangedCallback proc);
 
-    int32_t getFramesPerDataCallback() const {
-        return mFramesPerDataCallback;
-    }
+    AudioStreamBuilder* setRoutingChangedCallbackUserData(void *userData);
 
     AudioStreamBuilder* setFramesPerDataCallback(int32_t sizeInFrames) {
         mFramesPerDataCallback = sizeInFrames;
@@ -135,9 +104,6 @@ public:
 
     aaudio_result_t build(AudioStream **streamPtr);
 
-    virtual aaudio_result_t validate() const override;
-
-
     void logParameters() const;
 
     // Mark the stream so it can be deleted.
@@ -146,28 +112,6 @@ public:
 private:
     // Extract a raw pointer that we can pass to a 'C' app.
     static AudioStream *startUsingStream(android::sp<AudioStream> &spAudioStream);
-
-    bool                       mSharingModeMatchRequired = false; // must match sharing mode requested
-
-    AAudioStream_dataCallback  mDataCallbackProc = nullptr;  // external callback functions
-    void                      *mDataCallbackUserData = nullptr;
-    int32_t                    mFramesPerDataCallback = AAUDIO_UNSPECIFIED; // frames
-
-    AAudioStream_partialDataCallback mPartialDataCallbackProc = nullptr;
-
-    AAudioStream_errorCallback mErrorCallbackProc = nullptr;
-    void                      *mErrorCallbackUserData = nullptr;
-
-    AAudioStream_presentationEndCallback mPresentationEndCallbackProc = nullptr;
-    void                                *mPresentationEndCallbackUserData = nullptr;
-
-    enum {
-        PRIVACY_SENSITIVE_DEFAULT = -1,
-        PRIVACY_SENSITIVE_DISABLED = 0,
-        PRIVACY_SENSITIVE_ENABLED = 1,
-    };
-    typedef int32_t privacy_sensitive_t;
-    privacy_sensitive_t        mPrivacySensitiveReq = PRIVACY_SENSITIVE_DEFAULT;
 };
 
 } /* namespace aaudio */

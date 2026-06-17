@@ -27,13 +27,15 @@
 #include "IAfTrack.h"
 #include "MelReporter.h"
 #include "PatchCommandThread.h"
-#include "audio_utils/clock.h"
 
 // External classes
-#include <audio_utils/mutex.h>
+// go/keep-sorted start
+#include <audio_utils/CommandThread.h>
 #include <audio_utils/FdToString.h>
 #include <audio_utils/SimpleLog.h>
 #include <audio_utils/TimerQueue.h>
+#include <audio_utils/clock.h>
+#include <audio_utils/mutex.h>
 #include <com/android/media/permission/PermissionEnum.h>
 #include <media/IAudioFlinger.h>
 #include <media/IAudioPolicyServiceLocal.h>
@@ -41,6 +43,7 @@
 #include <media/audiohal/DevicesFactoryHalInterface.h>
 #include <mediautils/Synchronization.h>
 #include <psh_utils/AudioPowerManager.h>
+// go/keep-sorted end
 
 // not needed with the includes above, added to prevent transitive include dependency.
 #include <utils/KeyedVector.h>
@@ -65,6 +68,11 @@ class AudioFlinger
     friend class sp<AudioFlinger>;
 public:
     static void instantiate() ANDROID_API;
+
+    // AsyncCallbackThread is a singleton thread used for handling client
+    // callbacks through AudioSystem.  As a single thread, it avoids messages
+    // being sent out of order.
+    static audio_utils::CommandThread& getAsyncCallbackThread();
 
     status_t resetReferencesForTest();
 
@@ -275,6 +283,11 @@ private:
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) final
             EXCLUDES_AudioFlinger_Mutex;
 
+    status_t getFlushFromFrameSupport(
+            int module,
+            const media::audio::common::AudioPortConfig& config,
+            media::audio::common::FlushFromFrameSupport* support) final EXCLUDES_AudioFlinger_Mutex;
+
     status_t onTransactWrapper(TransactionCode code, const Parcel& data, uint32_t flags,
             const std::function<status_t()>& delegate) final EXCLUDES_AudioFlinger_Mutex;
 
@@ -288,6 +301,8 @@ private:
     }
     void removeClient_l(pid_t pid) REQUIRES(clientMutex()) final;
     void removeNotificationClient(pid_t pid) final EXCLUDES_AudioFlinger_Mutex;
+    void onClientUnfrozen(pid_t pid) EXCLUDES_AudioFlinger_Mutex;
+    void onClientFrozen(pid_t pid) EXCLUDES_AudioFlinger_Mutex;
     status_t moveAuxEffectToIo(
             int effectId,
             const sp<IAfPlaybackThread>& dstThread,
@@ -359,6 +374,10 @@ private:
     void updateOutDevicesForRecordThreads_l(const DeviceDescriptorBaseVector& devices) final
             REQUIRES(mutex());
 
+    IAfRecordThread* getRecordThreadForDevice_l(audio_devices_t deviceType,
+                                                const String8& address) const final
+            REQUIRES(mutex());
+
     // ---- end of IAfPatchPanelCallback interface
 
     // ----- begin IAfThreadCallback interface
@@ -420,11 +439,15 @@ private:
 
     const ::com::android::media::permission::IPermissionProvider& getPermissionProvider() final;
 
-    bool isHardeningOverrideEnabled() const final;
+    media::IAudioPolicyService::HardeningOverride getHardeningOverride() const final;
 
     bool hasAlreadyCaptured(uid_t uid) const final {
         const std::lock_guard _l(mCapturingClientsMutex);
         return mCapturingClients.contains(uid);
+    }
+
+    bool isPrimary(const AudioHwDevice* device) const final {
+        return mPrimaryHardwareDev.load() == device;
     }
 
     // ---- end of IAfThreadCallback interface
@@ -495,7 +518,10 @@ private:
         std::make_shared<audio_utils::TimerQueue>(true /* alarm */)};
 
     // --- Notification Client ---
-    class NotificationClient : public IBinder::DeathRecipient {
+    class NotificationClient
+            : public IBinder::DeathRecipient
+            , public IBinder::FrozenStateChangeCallback
+    {
     public:
                             NotificationClient(const sp<AudioFlinger>& audioFlinger,
                                                 const sp<media::IAudioFlingerClient>& client,
@@ -509,6 +535,14 @@ private:
 
                 // IBinder::DeathRecipient
                 virtual     void        binderDied(const wp<IBinder>& who);
+        // IBinder::FrozenStateChangeCallback
+        void onStateChanged(const android::wp<IBinder>& who, State state) override;
+
+        bool isFrozen() const { return mFrozen; }
+
+        std::pair<bool, int64_t> getFrozenStatus() const {
+            return { mFrozen.load(), mFreezeTime.load() };
+        }
 
     private:
         DISALLOW_COPY_AND_ASSIGN(NotificationClient);
@@ -518,6 +552,8 @@ private:
         const uid_t             mUid;
         const sp<media::IAudioFlingerClient> mAudioFlingerClient;
         const std::unique_ptr<media::psh_utils::Token> mClientToken;
+        std::atomic<bool> mFrozen = false;
+        std::atomic<int64_t> mFreezeTime = 0;
     };
 
     // Find io handle by session id.

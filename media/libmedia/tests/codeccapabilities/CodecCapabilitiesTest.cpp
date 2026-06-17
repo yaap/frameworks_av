@@ -36,6 +36,132 @@
 
 using namespace android;
 
+class AudioCapsIamfTest1 : public testing::Test {
+protected:
+    AudioCapsIamfTest1() {
+        std::string mediaType = MIMETYPE_AUDIO_IAMF;
+
+        sp<AMessage> details = new AMessage;
+
+        std::vector<ProfileLevel> profileLevel {
+            ProfileLevel(IAMF_PROFILE_SIMPLE | IAMF_CODEC_OPUS, 0),
+        };
+
+        audioCaps = AudioCapabilities::Create(mediaType, profileLevel, details);
+    }
+
+    std::shared_ptr<AudioCapabilities> audioCaps;
+};
+
+TEST_F(AudioCapsIamfTest1, AudioCaps_Iamf_Bitrate) {
+    const Range<int32_t>& bitrateRange = audioCaps->getBitrateRange();
+    EXPECT_EQ(bitrateRange.lower(), 6000);
+    EXPECT_EQ(bitrateRange.upper(), 128000 * 16);
+}
+
+// Note: This test assumes that the device does not restrict the sample rates smaller than
+// the framework limit (7350, 192000).
+TEST_F(AudioCapsIamfTest1, AudioCaps_Iamf_SupportedSampleRates) {
+    const std::vector<Range<int32_t>>& sampleRateRanges = audioCaps->getSupportedSampleRateRanges();
+    EXPECT_EQ(sampleRateRanges.size(), 1);
+    EXPECT_EQ(sampleRateRanges.at(0).lower(), 48000);
+    EXPECT_EQ(sampleRateRanges.at(0).upper(), 48000);
+}
+
+class AudioCapsIamfTest2 : public testing::Test {
+protected:
+    AudioCapsIamfTest2() {
+        std::string mediaType = MIMETYPE_AUDIO_IAMF;
+
+        sp<AMessage> details = new AMessage;
+
+        std::vector<ProfileLevel> profileLevel {
+            ProfileLevel(IAMF_PROFILE_SIMPLE | IAMF_CODEC_OPUS, 0),
+            ProfileLevel(IAMF_PROFILE_BASE | IAMF_CODEC_FLAC, 0),
+            ProfileLevel(IAMF_PROFILE_BASE_ENHANCED | IAMF_CODEC_PCM, 0),
+        };
+
+        audioCaps = AudioCapabilities::Create(mediaType, profileLevel, details);
+    }
+
+    std::shared_ptr<AudioCapabilities> audioCaps;
+};
+
+TEST_F(AudioCapsIamfTest2, AudioCaps_Iamf_Bitrate) {
+    const Range<int32_t>& bitrateRange = audioCaps->getBitrateRange();
+    EXPECT_EQ(bitrateRange.lower(), 1);
+    EXPECT_EQ(bitrateRange.upper(), 21000000);
+}
+
+// Note: This test assumes that the device does not restrict the sample rates smaller than
+// the framework limit (7350, 192000).
+TEST_F(AudioCapsIamfTest2, AudioCaps_Iamf_SupportedSampleRates) {
+    const std::vector<Range<int32_t>>& sampleRateRanges = audioCaps->getSupportedSampleRateRanges();
+    EXPECT_EQ(sampleRateRanges.size(), 1);
+    EXPECT_EQ(sampleRateRanges.at(0).lower(), 7350);
+    EXPECT_EQ(sampleRateRanges.at(0).upper(), 192000);
+}
+
+TEST_F(AudioCapsIamfTest2, AudioCaps_Iamf_InputChannelCountRanges) {
+    const std::vector<Range<int32_t>>& inputChannelCountRanges
+            = audioCaps->getInputChannelCountRanges();
+
+    EXPECT_EQ(inputChannelCountRanges.size(), 1);
+    EXPECT_EQ(inputChannelCountRanges.at(0).lower(), 1);
+    EXPECT_EQ(inputChannelCountRanges.at(0).upper(), 28);
+}
+
+class AudioCapsDtsUhdTest : public testing::Test {
+protected:
+    AudioCapsDtsUhdTest() {
+        std::string mediaType = MIMETYPE_AUDIO_DTS_UHD;
+
+        sp<AMessage> details = new AMessage;
+
+        std::vector<ProfileLevel> profileLevel {
+            ProfileLevel(DTS_UHDProfileP2, 0),
+            ProfileLevel(DTS_UHDProfileP1, 0),
+        };
+
+        audioCaps = AudioCapabilities::Create(mediaType, profileLevel, details);
+    }
+
+    std::shared_ptr<AudioCapabilities> audioCaps;
+};
+
+TEST_F(AudioCapsDtsUhdTest, AudioCaps_DtsUhd_Bitrate) {
+    const Range<int32_t>& bitrateRange = audioCaps->getBitrateRange();
+    EXPECT_EQ(bitrateRange.lower(), 96000);
+    EXPECT_EQ(bitrateRange.upper(), 24500000);
+}
+
+// Note: This test assumes that the device does not restrict the sample rates smaller than
+// the framework limit (7350, 192000).
+TEST_F(AudioCapsDtsUhdTest, AudioCaps_DtsUhd_SupportedSampleRates) {
+    const std::vector<Range<int32_t>>& sampleRateRanges = audioCaps->getSupportedSampleRateRanges();
+    EXPECT_EQ(sampleRateRanges.size(), 6);
+    EXPECT_EQ(sampleRateRanges.at(0).lower(), 44100);
+    EXPECT_EQ(sampleRateRanges.at(0).upper(), 44100);
+    EXPECT_EQ(sampleRateRanges.at(1).lower(), 48000);
+    EXPECT_EQ(sampleRateRanges.at(1).upper(), 48000);
+    EXPECT_EQ(sampleRateRanges.at(2).lower(), 88200);
+    EXPECT_EQ(sampleRateRanges.at(2).upper(), 88200);
+    EXPECT_EQ(sampleRateRanges.at(3).lower(), 96000);
+    EXPECT_EQ(sampleRateRanges.at(3).upper(), 96000);
+    EXPECT_EQ(sampleRateRanges.at(4).lower(), 176400);
+    EXPECT_EQ(sampleRateRanges.at(4).upper(), 176400);
+    EXPECT_EQ(sampleRateRanges.at(5).lower(), 192000);
+    EXPECT_EQ(sampleRateRanges.at(5).upper(), 192000);
+}
+
+TEST_F(AudioCapsDtsUhdTest, AudioCaps_DtsUhd_InputChannelCountRanges) {
+    const std::vector<Range<int32_t>>& inputChannelCountRanges
+            = audioCaps->getInputChannelCountRanges();
+    EXPECT_EQ(inputChannelCountRanges.size(), 1);
+    EXPECT_EQ(inputChannelCountRanges.at(0).lower(), 1);
+    EXPECT_EQ(inputChannelCountRanges.at(0).upper(), 30);
+}
+
 class AudioCapsAacTest : public testing::Test {
 protected:
     AudioCapsAacTest() {
@@ -339,6 +465,9 @@ protected:
         details->setString("quality-range", "0-100");
         details->setString("quality-scale", "linear");
         details->setString("size-range", "64x64-3840x2176");
+        details->setString("ts-schemas",
+                           "android.generic.2+0;android.generic.3+1;webrtc.vp8.2-layer;"
+                           "webrtc.svc.l1t2;webrtc.svc.l1t3");
 
         std::vector<ProfileLevel> profileLevel{
             ProfileLevel(1, 2097152),
@@ -370,4 +499,17 @@ TEST_F(EncoderCapsHevcTest, EncoderCaps_HEVC_SupportedBitrateMode) {
     EXPECT_TRUE(encoderCaps->isBitrateModeSupported(BITRATE_MODE_VBR));
     EXPECT_TRUE(encoderCaps->isBitrateModeSupported(BITRATE_MODE_CQ));
     EXPECT_TRUE(encoderCaps->isBitrateModeSupported(BITRATE_MODE_CBR_FD));
+}
+
+TEST_F(EncoderCapsHevcTest, EncoderCaps_HEVC_SupportedLayeringSchemas) {
+    const std::set<std::string> expectedSchemas = {
+            "android.generic.2+0", "android.generic.3+1", "webrtc.vp8.2-layer",
+            "webrtc.svc.l1t2",     "webrtc.svc.l1t3",
+    };
+    const std::vector<const char*> schemas = encoderCaps->getSupportedLayeringSchemasPointers();
+    std::set<std::string> actualSchemas;
+    for (const auto& schema : schemas) {
+        actualSchemas.insert(std::string(schema));
+    }
+    EXPECT_EQ(actualSchemas, expectedSchemas);
 }

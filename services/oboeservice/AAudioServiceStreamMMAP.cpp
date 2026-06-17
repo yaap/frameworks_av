@@ -88,8 +88,7 @@ aaudio_result_t AAudioServiceStreamMMAP::startDevice_l() {
     aaudio_result_t result = AAudioServiceStreamBase::startDevice_l();
     if (!mInService && result == AAUDIO_OK) {
         // Note that this can sometimes take 200 to 300 msec for a cold start!
-        result = startClient_l(
-                mMmapClient, nullptr /*const audio_attributes_t* */, &mClientHandle);
+        result = startClient_l(mPortHandle);
     }
     return result;
 }
@@ -102,7 +101,7 @@ aaudio_result_t AAudioServiceStreamMMAP::pause_l() {
     aaudio_result_t result = AAudioServiceStreamBase::pause_l();
     // TODO put before base::pause()?
     if (!mInService) {
-        (void) stopClient_l(mClientHandle);
+        (void) stopClient_l(mPortHandle);
     }
     return result;
 }
@@ -114,7 +113,7 @@ aaudio_result_t AAudioServiceStreamMMAP::stop_l() {
     aaudio_result_t result = AAudioServiceStreamBase::stop_l();
     // TODO put before base::stop()?
     if (!mInService) {
-        (void) stopClient_l(mClientHandle);
+        (void) stopClient_l(mPortHandle);
     }
     return result;
 }
@@ -141,6 +140,7 @@ aaudio_result_t AAudioServiceStreamMMAP::exitStandby_l(AudioEndpointParcelable* 
     aaudio_result_t result = endpoint->exitStandby(parcelable);
     if (result == AAUDIO_OK) {
         setStandby_l(false);
+        setState(AAUDIO_STREAM_STATE_OPEN);
     } else {
         ALOGE("%s failed, result %d, disconnecting stream.", __func__, result);
         disconnect_l();
@@ -148,26 +148,33 @@ aaudio_result_t AAudioServiceStreamMMAP::exitStandby_l(AudioEndpointParcelable* 
     return result;
 }
 
-aaudio_result_t AAudioServiceStreamMMAP::startClient(const android::AudioClient& client,
-                                                     const audio_attributes_t *attr,
-                                                     audio_port_handle_t *portHandlePtr) {
-    return sendStartClientCommand(client, attr, portHandlePtr);
+aaudio_result_t AAudioServiceStreamMMAP::createClient(const android::AudioClient& client,
+                                                      const audio_attributes_t& attr,
+                                                      audio_port_handle_t* clientHandle,
+                                                      audio_io_handle_t* ioHandle) {
+    return sendCreateClientCommand(client, attr, clientHandle, ioHandle);
+}
+
+aaudio_result_t AAudioServiceStreamMMAP::startClient(audio_port_handle_t clientHandle) {
+    return sendClientOperationCommand(START_CLIENT, clientHandle);
 }
 
 aaudio_result_t AAudioServiceStreamMMAP::stopClient(audio_port_handle_t clientHandle) {
-    return sendStopClientCommand(clientHandle);
+    return sendClientOperationCommand(STOP_CLIENT, clientHandle);
 }
 
-aaudio_result_t AAudioServiceStreamMMAP::startClient_l(const android::AudioClient& client,
-                                                       const audio_attributes_t *attr,
-                                                       audio_port_handle_t *clientHandle) {
+aaudio_result_t AAudioServiceStreamMMAP::releaseClient(audio_port_handle_t clientHandle) {
+    return sendClientOperationCommand(RELEASE_CLIENT, clientHandle);
+}
+
+aaudio_result_t AAudioServiceStreamMMAP::startClient_l(audio_port_handle_t clientHandle) {
     sp<AAudioServiceEndpoint> endpoint = mServiceEndpointWeak.promote();
     if (endpoint == nullptr) {
         ALOGE("%s() has no endpoint", __func__);
         return AAUDIO_ERROR_INVALID_STATE;
     }
     // Start the client on behalf of the application. Generate a new porthandle.
-    aaudio_result_t result = endpoint->startClient(client, attr, clientHandle);
+    aaudio_result_t result = endpoint->startClient(clientHandle);
     return result;
 }
 

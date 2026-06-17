@@ -59,9 +59,11 @@ struct C2Config {
     enum drc_compression_mode_t : int32_t;  ///< DRC compression mode
     enum drc_effect_type_t : int32_t;       ///< DRC effect type
     enum drc_album_mode_t : int32_t;        ///< DRC album mode
+    enum encryption_scheme_t : uint32_t;    ///< encryption scheme
     enum hdr_dynamic_metadata_type_t : uint32_t;  ///< HDR dynamic metadata type
     enum hdr_format_t : uint32_t;           ///< HDR format
     enum intra_refresh_mode_t : uint32_t;   ///< intra refresh modes
+    enum layering_scheme_t : uint32_t;      ///< layering scheme.
     enum level_t : uint32_t;                ///< coding level
     enum ordinal_key_t : uint32_t;          ///< work ordering keys
     enum pcm_encoding_t : uint32_t;         ///< PCM encoding
@@ -104,6 +106,9 @@ enum C2ParamIndexKind : C2Param::type_index_t {
     kParamIndexChromaOffset,
     kParamIndexGopLayer,
     kParamIndexSystemResource,
+    kParamIndexEncryptionPattern,    // encryption pattern struct
+    kParamIndexEncryptionSubsample,  // encryption subsample struct
+    kParamIndexEncryptionVector,     // encryption vector struct
 
     /* =================================== parameter indices =================================== */
 
@@ -174,6 +179,11 @@ enum C2ParamIndexKind : C2Param::type_index_t {
     kParamIndexResourcesCapacity,
     kParamIndexResourcesExcluded,
 
+    /* encryption info */
+    kParamIndexEncryptionInfo,  // encryption info struct
+    kParamIndexEncryptionIv,    // initialization vector struct
+    kParamIndexEncryptionKey,   // key handle struct
+
     // deprecated
     kParamIndexDelayRequest = kParamIndexDelay | C2Param::CoreIndex::IS_REQUEST_FLAG,
 
@@ -227,6 +237,7 @@ enum C2ParamIndexKind : C2Param::type_index_t {
     kParamIndexLayerIndex,
     kParamIndexLayerCount,
     kParamIndexIntraRefresh,
+    kParamIndexLayeringScheme,
 
     /* ------------------------------------ image components ------------------------------------ */
 
@@ -450,6 +461,7 @@ enum : uint32_t {
     _C2_PL_APV_BASE = 0xC000,     // APV
     _C2_PL_AC4_BASE  = 0xD000,
     _C2_PL_IAMF_START = 0xE000,
+    _C2_PL_VVC_BASE = 0xF000,     // VVC
     C2_PROFILE_LEVEL_VENDOR_START = 0x70000000,
 };
 
@@ -649,6 +661,24 @@ enum C2Config::profile_t : uint32_t {
     PROFILE_IAMF_BASE_ENHANCED_FLAC,             ///< IAMF Base Enhanced with FLAC
     PROFILE_IAMF_BASE_ENHANCED_OPUS,             ///< IAMF Base Enhanced with Opus
     PROFILE_IAMF_BASE_ENHANCED_PCM,              ///< IAMF Base Enhanced with PCM
+
+    // VVC profiles
+    PROFILE_VVC_MAIN_10 = _C2_PL_VVC_BASE,       ///< VVC (H.266) Main 10
+    PROFILE_VVC_MAIN_10_STILL,                   ///< VVC (H.266) Main 10 Still Picture
+    PROFILE_VVC_MAIN_10_444,                     ///< VVC (H.266) Main 10 4:4:4
+    PROFILE_VVC_MAIN_10_444_STILL,               ///< VVC (H.266) Main 10 4:4:4 Still Picture
+    PROFILE_VVC_MULTILAYER_MAIN_10,              ///< VVC (H.266) Multilayer Main 10
+    PROFILE_VVC_MULTILAYER_MAIN_10_444,          ///< VVC (H.266) Multilayer Main 10 4:4:4
+    PROFILE_VVC_MAIN_12,                         ///< VVC (H.266) Main 12
+    PROFILE_VVC_MAIN_12_444,                     ///< VVC (H.266) Main 12 4:4:4
+    PROFILE_VVC_MAIN_16_444,                     ///< VVC (H.266) Main 16 4:4:4
+    PROFILE_VVC_MAIN_12_INTRA,                   ///< VVC (H.266) Main 12 Intra
+    PROFILE_VVC_MAIN_12_444_INTRA,               ///< VVC (H.266) Main 12 4:4:4 Intra
+    PROFILE_VVC_MAIN_16_444_INTRA,               ///< VVC (H.266) Main 16 4:4:4 Intra
+    PROFILE_VVC_MAIN_12_STILL,                   ///< VVC (H.266) Main 12 Still Picture
+    PROFILE_VVC_MAIN_12_444_STILL,               ///< VVC (H.266) Main 12 4:4:4 Still Picture
+    PROFILE_VVC_MAIN_16_444_STILL,               ///< VVC (H.266) Main 16 4:4:4 Still Picture
+
 };
 
 enum C2Config::level_t : uint32_t {
@@ -875,6 +905,33 @@ enum C2Config::level_t : uint32_t {
     LEVEL_AC4_2,                                ///< AC-4 Level 02
     LEVEL_AC4_3,                                ///< AC-4 Level 03
     LEVEL_AC4_4,                                ///< AC-4 Level 04
+
+    // VVC (H.266) tiers and levels
+    LEVEL_VVC_MAIN_1_0 = _C2_PL_VVC_BASE,           ///< VVC (H.266) Main Tier Level 1.0
+    LEVEL_VVC_MAIN_2_0,                             ///< VVC (H.266) Main Tier Level 2.0
+    LEVEL_VVC_MAIN_2_1,                             ///< VVC (H.266) Main Tier Level 2.1
+    LEVEL_VVC_MAIN_3_0,                             ///< VVC (H.266) Main Tier Level 3.0
+    LEVEL_VVC_MAIN_3_1,                             ///< VVC (H.266) Main Tier Level 3.1
+    LEVEL_VVC_MAIN_4_0,                             ///< VVC (H.266) Main Tier Level 4.0
+    LEVEL_VVC_MAIN_4_1,                             ///< VVC (H.266) Main Tier Level 4.1
+    LEVEL_VVC_MAIN_5_0,                             ///< VVC (H.266) Main Tier Level 5.0
+    LEVEL_VVC_MAIN_5_1,                             ///< VVC (H.266) Main Tier Level 5.1
+    LEVEL_VVC_MAIN_5_2,                             ///< VVC (H.266) Main Tier Level 5.2
+    LEVEL_VVC_MAIN_6_0,                             ///< VVC (H.266) Main Tier Level 6.0
+    LEVEL_VVC_MAIN_6_1,                             ///< VVC (H.266) Main Tier Level 6.1
+    LEVEL_VVC_MAIN_6_2,                             ///< VVC (H.266) Main Tier Level 6.2
+    LEVEL_VVC_MAIN_6_3,                             ///< VVC (H.266) Main Tier Level 6.3
+
+    LEVEL_VVC_HIGH_4_0 = _C2_PL_VVC_BASE + 0x100,   ///< VVC (H.266) High Tier Level 4.0
+    LEVEL_VVC_HIGH_4_1,                             ///< VVC (H.266) High Tier Level 4.1
+    LEVEL_VVC_HIGH_5_0,                             ///< VVC (H.266) High Tier Level 5.0
+    LEVEL_VVC_HIGH_5_1,                             ///< VVC (H.266) High Tier Level 5.1
+    LEVEL_VVC_HIGH_5_2,                             ///< VVC (H.266) High Tier Level 5.2
+    LEVEL_VVC_HIGH_6_0,                             ///< VVC (H.266) High Tier Level 6.0
+    LEVEL_VVC_HIGH_6_1,                             ///< VVC (H.266) High Tier Level 6.1
+    LEVEL_VVC_HIGH_6_2,                             ///< VVC (H.266) High Tier Level 6.2
+    LEVEL_VVC_HIGH_6_3,                             ///< VVC (H.266) High Tier Level 6.3
+
 };
 
 struct C2ProfileLevelStruct {
@@ -1459,15 +1516,117 @@ constexpr char C2_PARAMKEY_PRIORITY[] = "algo.priority";
  * Secure mode.
  */
 C2ENUM(C2Config::secure_mode_t, uint32_t,
-    SM_UNPROTECTED,    ///< no content protection
-    SM_READ_PROTECTED, ///< input and output buffers shall be protected from reading
+    SM_UNPROTECTED,     ///< no content protection
+    SM_READ_PROTECTED,  ///< input and output buffers shall be protected from reading
     /// both read protected and readable encrypted buffers are used
     SM_READ_PROTECTED_WITH_ENCRYPTED,
+    /// the decryption is executed in Codec2 HAL. C2Work::input::buffers are readable encrypted
+    /// buffers.
+    SM_ENCRYPTED_WITH_KEY,
 )
 
 typedef C2GlobalParam<C2Tuning, C2SimpleValueStruct<C2Config::secure_mode_t>, kParamIndexSecureMode>
         C2SecureModeTuning;
 constexpr char C2_PARAMKEY_SECURE_MODE[] = "algo.secure-mode";
+
+C2ENUM(C2Config::encryption_scheme_t, uint32_t,
+       UNENCRYPTED,  ///< unencrypted.
+       AES_CTR,      ///< Advanced Encryption Standard (AES) with Counter (CTR) mode.
+       AES_CBC,      ///< Advanced Encryption Standard (AES) with Cipher Block Chaining (CBC) mode.
+)
+
+/**
+ * Encryption pattern.
+ *
+ * This structure describes the pattern encryption scheme per ISO/IEC 23001-7 section 9.6.
+ * If skip is zero, pattern encryption is inoperative. Otherwise, the encryption pattern is crypt
+ * encrypted blocks followed by skip clear (skipped) blocks.
+ */
+struct C2EncryptionPatternStruct {
+    uint16_t skip;   ///< the number of blocks to skip in a sample encryption pattern.
+    uint16_t crypt;  ///< the number of blocks to encrypt in a sample encryption pattern.
+
+    DEFINE_AND_DESCRIBE_C2STRUCT(EncryptionPattern)
+    C2FIELD(skip, "skip")
+    C2FIELD(crypt, "crypt")
+};
+
+/**
+ * Encryption subsample.
+ *
+ * This structure describes a subsample as specified by ISO/IEC 23001-7 section 9.5.
+ */
+struct C2EncryptionSubsampleStruct {
+    /// The index of the initialization vector and opaque key handle to use for this subsample.
+    /// If this index is larger than the number of whole initialization vectors or the keys
+    /// provided, all bytes are unencrypted in this subsample.
+    uint16_t vector;
+    uint16_t clear;     ///< The number of leading unencrypted bytes in a subsample.
+    uint32_t ciphered;  ///< The number of trailing encrypted bytes in a subsample.
+
+    DEFINE_AND_DESCRIBE_C2STRUCT(EncryptionSubsample)
+    C2FIELD(vector, "vector")
+    C2FIELD(clear, "clear")
+    C2FIELD(ciphered, "ciphered")
+};
+
+/**
+ * Encryption information for the access unit.
+ *
+ * This structure describes the sample encryption scheme as specified in ISO/IEC 23001-7.
+ */
+struct C2EncryptionInfoStruct {
+    C2Config::encryption_scheme_t scheme;      ///< the encryption scheme.
+    C2EncryptionPatternStruct pattern;         ///< the encryption pattern.
+    C2EncryptionSubsampleStruct subsamples[];  ///< the encryption subsamples.
+
+    C2EncryptionInfoStruct() : scheme(C2Config::UNENCRYPTED) {}
+
+    C2EncryptionInfoStruct(size_t flexCount, C2Config::encryption_scheme_t scheme_,
+                           C2EncryptionPatternStruct pattern_,
+                           const std::vector<C2EncryptionSubsampleStruct>& subsamples_)
+        : scheme(scheme_), pattern(pattern_) {
+        for (size_t i = 0; i < c2_min(subsamples_.size(), flexCount); ++i) {
+            subsamples[i] = subsamples_[i];
+        }
+    }
+
+    DEFINE_AND_DESCRIBE_FLEX_C2STRUCT(EncryptionInfo, subsamples)
+    C2FIELD(scheme, "scheme")
+    C2FIELD(pattern, "pattern")
+    C2FIELD(subsamples, "subsamples")
+};
+
+typedef C2StreamParam<C2Info, C2EncryptionInfoStruct, kParamIndexEncryptionInfo>
+        C2StreamEncryptionInfo;
+constexpr char C2_PARAMKEY_ENCRYPTION_INFO[] = "input.encryption-info";
+
+/**
+ * Variable length vector structure used for IV(s) and key handle(s).
+ */
+struct C2EncryptionVectorStruct {
+    uint32_t length;    ///< The length of a single vector.
+    uint8_t vectors[];  ///< The vector(s).
+
+    C2EncryptionVectorStruct() : length(0) {}
+    C2EncryptionVectorStruct(size_t flexCount, uint32_t length_,
+                             const std::vector<uint8_t>& vectors_)
+        : length(length_) {
+        memcpy(vectors, vectors_.data(), c2_min(vectors_.size(), flexCount));
+    }
+
+    DEFINE_AND_DESCRIBE_FLEX_C2STRUCT(EncryptionVector, vectors)
+    C2FIELD(length, "length")
+    C2FIELD(vectors, "vectors")
+};
+
+typedef C2StreamParam<C2Info, C2EncryptionVectorStruct, kParamIndexEncryptionIv>
+        C2StreamEncryptionIvInfo;
+constexpr char C2_PARAMKEY_ENCRYPTION_IV[] = "input.encryption-iv";
+
+typedef C2StreamParam<C2Info, C2EncryptionVectorStruct, kParamIndexEncryptionKey>
+        C2StreamEncryptionKeyInfo;
+constexpr char C2_PARAMKEY_ENCRYPTION_KEY[] = "input.encryption-key";
 
 /* ===================================== ENCODER COMPONENTS ===================================== */
 
@@ -1944,6 +2103,7 @@ constexpr char C2_PARAMKEY_OUTPUT_HDR10_PLUS_INFO[] = "output.hdr10-plus-info"; 
 C2ENUM(C2Config::hdr_dynamic_metadata_type_t, uint32_t,
     HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_10,  ///< SMPTE ST 2094-10
     HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40,  ///< SMPTE ST 2094-40
+    HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_50,  ///< SMPTE ST 2094-50
 )
 
 struct C2HdrDynamicMetadataStruct {
@@ -2222,6 +2382,16 @@ struct C2TemporalLayeringStruct {
 typedef C2StreamParam<C2Tuning, C2TemporalLayeringStruct, kParamIndexTemporalLayering>
         C2StreamTemporalLayeringTuning;
 constexpr char C2_PARAMKEY_TEMPORAL_LAYERING[] = "coding.temporal-layering";
+
+C2ENUM(C2Config::layering_scheme_t, uint32_t,
+    LS_UNSPECIFIED = 0, // No restriction on the layering structure.
+    LS_WEBRTC = 1, // The layering structure must conform https://www.w3.org/TR/webrtc-svc/.
+);
+
+typedef C2StreamParam<C2Tuning, C2SimpleValueStruct<C2Config::layering_scheme_t>,
+                      kParamIndexLayeringScheme>
+        C2StreamLayeringSchemeTuning;
+constexpr char C2_PARAMKEY_LAYERING_SCHEME[] = "coding.svc-scheme";
 
 /**
  * Intra-refresh.

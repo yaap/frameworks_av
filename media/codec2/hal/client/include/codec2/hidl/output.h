@@ -59,6 +59,10 @@ struct OutputBufferQueue {
     // perform anymore.
     void stop();
 
+    // Return a HGraphicBufferProducer for the configured surface. If the surface
+    // is not configured, return nullptr.
+    sp<::android::hardware::graphics::bufferqueue::V2_0::IGraphicBufferProducer> getHgbp() const;
+
     // Render a graphic block to current surface.
     status_t outputBuffer(
             const C2ConstGraphicBlock& block,
@@ -87,11 +91,12 @@ struct OutputBufferQueue {
     // via shared memory between HAL and framework, Update # of max dequeued buffer
     // and synchronize.
     void updateMaxDequeueBufferCount(int maxDequeueBufferCount);
+    // TODO: make this as a private class
+    class SurfaceWrapper;
 
 private:
-
     std::mutex mMutex;
-    sp<IGraphicBufferProducer> mIgbp;
+    std::shared_ptr<SurfaceWrapper> mSurface;
     uint32_t mGeneration;
     uint64_t mBqId;
     int32_t mMaxDequeueBufferCount;

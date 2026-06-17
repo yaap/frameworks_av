@@ -51,20 +51,21 @@ private:
       public:
         CameraSessionStatsWrapper(const std::string& cameraId, int facing, int newCameraState,
                                   const std::string& clientName, int apiLevel, bool isNdk,
-                                  int32_t latencyMs, int64_t logId)
+                                  bool sharedMode, int32_t latencyMs, int64_t logId)
             : mSessionStats(cameraId, facing, newCameraState, clientName, apiLevel, isNdk,
-                            latencyMs, logId) {}
+                            sharedMode, latencyMs, logId) {}
 
         void onOpen(sp<hardware::ICameraServiceProxy>& proxyBinder);
         void onClose(sp<hardware::ICameraServiceProxy>& proxyBinder, int32_t latencyMs,
-                bool deviceError);
-        void onStreamConfigured(int operatingMode, bool internalReconfig, int32_t latencyMs);
+                bool deviceError, int32_t errorState);
+        void onStreamConfigured(int operatingMode, bool internalReconfig,
+                                int32_t latencyMs, int32_t inputFormat);
         void onActive(sp<hardware::ICameraServiceProxy>& proxyBinder, float maxPreviewFps);
         void onIdle(sp<hardware::ICameraServiceProxy>& proxyBinder,
                 int64_t requestCount, int64_t resultErrorCount, bool deviceError,
                 const std::string& userTag, int32_t videoStabilizationMode, bool usedUltraWide,
                 bool usedZoomOverride, std::pair<int32_t, int32_t> mostRequestedFpsRange,
-                const std::vector<hardware::CameraStreamStats>& streamStats);
+                const std::vector<hardware::CameraStreamStats>& streamStats, int32_t errorState);
 
         std::string updateExtensionSessionStats(
                 const hardware::CameraExtensionSessionStats& extStats);
@@ -102,14 +103,14 @@ public:
     // Open
     void logOpen(const std::string& id, int facing,
             const std::string& clientPackageName, int apiLevel, bool isNdk,
-            int32_t latencyMs);
+            bool sharedMode, int32_t latencyMs);
 
     // Close
-    void logClose(const std::string& id, int32_t latencyMs, bool deviceError);
+    void logClose(const std::string& id, int32_t latencyMs, bool deviceError, int32_t errorState);
 
     // Stream configuration
     void logStreamConfigured(const std::string& id, int operatingMode, bool internalReconfig,
-            int32_t latencyMs);
+            int32_t latencyMs, int32_t inputFormat);
 
     // Session state becomes active
     void logActive(const std::string& id, float maxPreviewFps);
@@ -119,7 +120,7 @@ public:
             int64_t requestCount, int64_t resultErrorCount, bool deviceError,
             const std::string& userTag, int32_t videoStabilizationMode, bool usedUltraWide,
             bool usedZoomOverride, std::pair<int32_t, int32_t> mostRequestedFpsRange,
-            const std::vector<hardware::CameraStreamStats>& streamStats);
+            const std::vector<hardware::CameraStreamStats>& streamStats, int32_t errorState);
 
     // Feature combination query
     void logFeatureCombinationQuery(const std::string &id, int clientUid,
@@ -157,6 +158,10 @@ public:
 
     // notify CameraServiceProxy that watchdog is to be triggered
     void notifyWatchdog(pid_t clientPid, bool isNativePid);
+
+    // notify CameraServiceProxy about sound/vibration/light muting state.
+    void notifyCameraDistractionRestriction(
+            hardware::camera2::ICameraDeviceUser::AudioRestriction mode);
 };
 
 } // android

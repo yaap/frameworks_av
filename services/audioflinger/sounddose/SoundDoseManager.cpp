@@ -20,14 +20,17 @@
 
 #include "SoundDoseManager.h"
 
+// go/keep-sorted start
 #include "android/media/SoundDoseRecord.h"
 #include <algorithm>
 #include <android-base/stringprintf.h>
+#include <audio_utils/threads.h>
 #include <cinttypes>
 #include <ctime>
 #include <functional>
 #include <media/AidlConversionCppNdk.h>
 #include <utils/Log.h>
+// go/keep-sorted end
 
 namespace android {
 
@@ -330,6 +333,7 @@ ndk::ScopedAStatus SoundDoseManager::HalSoundDoseCallback::onNewMelValues(
 }
 
 void SoundDoseManager::SoundDose::binderDied(__unused const wp<IBinder>& who) {
+    audio_utils::set_priority_for_binder_callback(__func__);
     ALOGV("%s", __func__);
 
     auto soundDoseManager = mSoundDoseManager.promote();
@@ -556,6 +560,7 @@ bool SoundDoseManager::shouldComputeCsdForDeviceType(audio_devices_t device) {
         case AUDIO_DEVICE_OUT_USB_HEADSET:
         case AUDIO_DEVICE_OUT_BLE_HEADSET:
         case AUDIO_DEVICE_OUT_BLE_BROADCAST:
+        case AUDIO_DEVICE_OUT_BLE_HEARING_AID:
             return true;
         default:
             return false;

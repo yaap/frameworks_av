@@ -17,17 +17,18 @@
 #ifndef LEGACY_AUDIO_STREAM_LEGACY_H
 #define LEGACY_AUDIO_STREAM_LEGACY_H
 
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
+#include <core/AudioStream.h>
 #include <media/AudioRecord.h>
 #include <media/AudioSystem.h>
 #include <media/AudioTimestamp.h>
 #include <media/AudioTrack.h>
+#include <utility/AAudioUtilities.h>
+#include <utility/FixedBlockAdapter.h>
+// go/keep-sorted end
 
-#include <aaudio/AAudio.h>
-
-#include "AudioStream.h"
 #include "AAudioLegacy.h"
-#include "utility/AAudioUtilities.h"
-#include "utility/FixedBlockAdapter.h"
 
 namespace aaudio {
 
@@ -59,7 +60,8 @@ typedef int32_t aaudio_callback_operation_t;
 class AudioStreamLegacy : public AudioStream,
                           public FixedBlockProcessor,
                           protected android::AudioTrack::IAudioTrackCallback,
-                          protected android::AudioRecord::IAudioRecordCallback {
+                          protected android::AudioRecord::IAudioRecordCallback,
+                          public android::AudioSystem::AudioDeviceCallback {
 public:
     AudioStreamLegacy();
 

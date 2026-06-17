@@ -22,6 +22,7 @@
 #include <binder/Parcelable.h>
 
 #include <camera/CameraMetadata.h>
+#include <camera/camera2/OutputConfiguration.h>
 #include <android/hardware/CameraExtensionSessionStats.h>
 
 namespace android {
@@ -73,23 +74,34 @@ public:
     // Color space
     int32_t mColorSpace;
 
+    // Current surface ID for this stream
+    int32_t mCurrentSurfaceId;
+
+    // MultiResolution output mode
+    int32_t mMultiResMode;
+
+
     CameraStreamStats() :
             mWidth(0), mHeight(0), mFormat(0), mMaxPreviewFps(0), mDataSpace(0), mUsage(0),
             mRequestCount(0), mErrorCount(0), mStartLatencyMs(0),
             mMaxHalBuffers(0), mMaxAppBuffers(0), mHistogramType(HISTOGRAM_TYPE_UNKNOWN),
             mDynamicRangeProfile(ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD),
             mStreamUseCase(ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT),
-            mColorSpace(ANDROID_REQUEST_AVAILABLE_COLOR_SPACE_PROFILES_MAP_UNSPECIFIED) {}
+            mColorSpace(ANDROID_REQUEST_AVAILABLE_COLOR_SPACE_PROFILES_MAP_UNSPECIFIED),
+            mCurrentSurfaceId(0), mMultiResMode(OutputConfiguration::MULTI_RES_OFF) {}
     CameraStreamStats(int width, int height, int format, float maxPreviewFps, int dataSpace,
             int64_t usage, int maxHalBuffers, int maxAppBuffers, int dynamicRangeProfile,
-            int streamUseCase, int32_t colorSpace)
+            int streamUseCase, int32_t colorSpace, uint32_t currentSurfaceId, int32_t multiResMode)
             : mWidth(width), mHeight(height), mFormat(format), mMaxPreviewFps(maxPreviewFps),
               mDataSpace(dataSpace), mUsage(usage), mRequestCount(0), mErrorCount(0),
-              mStartLatencyMs(0), mMaxHalBuffers(maxHalBuffers), mMaxAppBuffers(maxAppBuffers),
+              mStartLatencyMs(0), mMaxHalBuffers(maxHalBuffers),
+              mMaxAppBuffers(maxAppBuffers),
               mHistogramType(HISTOGRAM_TYPE_UNKNOWN),
               mDynamicRangeProfile(dynamicRangeProfile),
               mStreamUseCase(streamUseCase),
-              mColorSpace(colorSpace) {}
+              mColorSpace(colorSpace),
+              mCurrentSurfaceId(currentSurfaceId),
+              mMultiResMode(multiResMode) {}
 
     virtual status_t readFromParcel(const android::Parcel* parcel) override;
     virtual status_t writeToParcel(android::Parcel* parcel) const override;
@@ -129,8 +141,11 @@ public:
     std::string mClientName;
     int mApiLevel;
     bool mIsNdk;
+    bool mSharedMode;
     // latency in ms for camera open, close, or session creation.
     int mLatencyMs;
+    // Input stream format
+    int32_t mInputFormat;
 
     /*
      * A randomly generated identifier to map the open/active/idle/close stats to each other after
@@ -164,6 +179,7 @@ public:
     bool mUsedUltraWide;
     bool mUsedZoomOverride;
     int mSessionIndex;
+    int32_t mErrorState;
 
     CameraExtensionSessionStats mCameraExtensionSessionStats;
 
@@ -172,8 +188,8 @@ public:
     // Constructors
     CameraSessionStats();
     CameraSessionStats(const std::string& cameraId, int facing, int newCameraState,
-                       const std::string& clientName, int apiLevel, bool isNdk, int32_t latencyMs,
-                       int64_t logId);
+                       const std::string& clientName, int apiLevel, bool isNdk, bool sharedMode,
+                       int32_t latencyMs, int64_t logId);
 
     virtual status_t readFromParcel(const android::Parcel* parcel) override;
     virtual status_t writeToParcel(android::Parcel* parcel) const override;

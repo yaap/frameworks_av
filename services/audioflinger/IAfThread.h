@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <android/media/IAudioPolicyService.h>
 #include <android/media/IAudioTrackCallback.h>
 #include <android/media/IEffectClient.h>
 #include <android/media/audio/common/AudioPlaybackRate.h>
@@ -33,11 +34,11 @@
 #include <media/DeviceDescriptorBase.h>
 #include <media/MmapStreamInterface.h>
 #include <media/audiohal/StreamHalInterface.h>
-#include <media/nblog/NBLog.h>
 #include <timing/SyncEvent.h>
 #include <utils/RefBase.h>
 #include <vibrator/ExternalVibration.h>
 
+#include <chrono>
 #include <optional>
 
 namespace com::android::media::permission {
@@ -63,6 +64,7 @@ class IAfTrack;
 class IAfTrackBase;
 class Client;
 class MelReporter;
+class AudioHwDevice;
 
 // Note this is exposed through IAfThreadBase::afThreadCallback()
 // and hence may be used by the Effect / Track framework.
@@ -125,9 +127,11 @@ public:
     virtual const ::com::android::media::permission::IPermissionProvider&
             getPermissionProvider() = 0;
 
-    virtual bool isHardeningOverrideEnabled() const = 0;
+    virtual media::IAudioPolicyService::HardeningOverride getHardeningOverride() const = 0;
 
     virtual bool hasAlreadyCaptured(uid_t uid) const = 0;
+
+    virtual bool isPrimary(const AudioHwDevice* device) const = 0;
 };
 
 class IAfThreadBase : public virtual RefBase {
@@ -205,10 +209,6 @@ public:
             EXCLUDES_ThreadBase_Mutex = 0;
     virtual status_t sendReleaseAudioPatchConfigEvent(audio_patch_handle_t handle)
             EXCLUDES_ThreadBase_Mutex = 0;
-    virtual status_t sendUpdateOutDeviceConfigEvent(
-            const DeviceDescriptorBaseVector& outDevices) EXCLUDES_ThreadBase_Mutex = 0;
-    virtual void sendResizeBufferConfigEvent_l(int32_t maxSharedAudioHistoryMs)
-            REQUIRES(mutex()) = 0;
     virtual void sendCheckOutputStageEffectsEvent() EXCLUDES_ThreadBase_Mutex = 0;
     virtual void sendCheckOutputStageEffectsEvent_l()
             REQUIRES(mutex()) = 0;
@@ -362,6 +362,11 @@ public:
 
     virtual void broadcast_l() REQUIRES(mutex()) = 0;
 
+    // asyncBroadcast() signals the Thread asynchronously via a separate thread.
+    // It may be called without holding the ThreadBase mutex and is used to avoid
+    // deadlocks in complex call stacks.
+    virtual void asyncBroadcast(std::chrono::nanoseconds delay = std::chrono::nanoseconds(0)) = 0;
+
     virtual bool isTimestampCorrectionEnabled_l() const REQUIRES(mutex()) = 0;
 
     virtual bool isMsdDevice() const = 0;
@@ -373,6 +378,9 @@ public:
 
     virtual audio_utils::mutex& mutex() const
             RETURN_CAPABILITY(audio_utils::ThreadBase_Mutex) = 0;
+
+    virtual void onClientUnfrozen(pid_t pid) EXCLUDES_ThreadBase_Mutex = 0;
+    virtual void onClientFrozen(pid_t pid) EXCLUDES_ThreadBase_Mutex = 0;
 
     virtual void onEffectEnable(const sp<IAfEffectModule>& effect) EXCLUDES_ThreadBase_Mutex = 0;
     virtual void onEffectDisable(const sp<IAfEffectModule>& effect) EXCLUDES_ThreadBase_Mutex = 0;
@@ -386,12 +394,10 @@ public:
 
     virtual bool isStreamInitialized_l() const REQUIRES(mutex()) = 0;
     virtual bool isStreamInitialized() const EXCLUDES_ThreadBase_Mutex = 0;
-    virtual void startMelComputation_l(const sp<audio_utils::MelProcessor>& processor)
-            REQUIRES(audio_utils::AudioFlinger_Mutex) = 0;
-    virtual void stopMelComputation_l()
-            REQUIRES(audio_utils::AudioFlinger_Mutex) = 0;
+    virtual void asyncStartMelComputation(const sp<audio_utils::MelProcessor>& processor) = 0;
+    virtual void asyncStopMelComputation() = 0;
 
-    virtual product_strategy_t getStrategyForStream(audio_stream_type_t stream) const
+    virtual product_strategy_t getStrategyForStream(audio_stream_type_t stream, uid_t uid) const
             EXCLUDES_AUDIO_ALL = 0;
 
     virtual void setEffectSuspended_l(
@@ -515,7 +521,8 @@ public:
             const sp<media::IAudioTrackCallback>& callback,
             bool isSpatialized,
             bool isBitPerfect,
-            audio_output_flags_t* afTrackFlags)
+            audio_output_flags_t* afTrackFlags,
+            const std::string& codecProvenance)
             REQUIRES(audio_utils::AudioFlinger_Mutex) = 0;
 
     virtual status_t addTrack_l(const sp<IAfTrack>& track) REQUIRES(mutex()) = 0;
@@ -591,9 +598,11 @@ class IAfDuplicatingThread : public virtual IAfPlaybackThread {
 public:
     static sp<IAfDuplicatingThread> create(
             const sp<IAfThreadCallback>& afThreadCallback, IAfPlaybackThread* mainThread,
-            audio_io_handle_t id, bool systemReady);
+            audio_io_handle_t id, bool systemReady)
+            REQUIRES(audio_utils::AudioFlinger_Mutex) EXCLUDES_ThreadBase_Mutex;
 
-    virtual void addOutputTrack(IAfPlaybackThread* thread) EXCLUDES_ThreadBase_Mutex = 0;
+    virtual void addOutputTrack(IAfPlaybackThread* thread) EXCLUDES_ThreadBase_Mutex
+            REQUIRES(audio_utils::AudioFlinger_Mutex) EXCLUDES_ThreadBase_Mutex = 0;
     virtual uint32_t waitTimeMs() const = 0;
     virtual void removeOutputTrack(IAfPlaybackThread* thread) EXCLUDES_ThreadBase_Mutex = 0;
 };
@@ -623,6 +632,8 @@ public:
             REQUIRES(audio_utils::AudioFlinger_Mutex) EXCLUDES_ThreadBase_Mutex = 0;
     virtual void destroyTrack_l(const sp<IAfRecordTrack>& track) REQUIRES(mutex()) = 0;
     virtual void removeTrack_l(const sp<IAfRecordTrack>& track) REQUIRES(mutex()) = 0;
+    virtual void sendResizeBufferConfigEvent_l(int32_t maxSharedAudioHistoryMs)
+            REQUIRES(mutex()) = 0;
 
     virtual status_t start(
             IAfRecordTrack* recordTrack, AudioSystem::sync_event_t event,
@@ -697,10 +708,13 @@ public:
             EXCLUDES_ThreadBase_Mutex = 0;
     virtual status_t getMmapPosition(struct audio_mmap_position* position) const
             EXCLUDES_ThreadBase_Mutex = 0;
-    virtual status_t start(
-            const AudioClient& client, const audio_attributes_t* attr,
-            audio_port_handle_t* handle) EXCLUDES_ThreadBase_Mutex = 0;
-    virtual status_t stop(audio_port_handle_t handle) EXCLUDES_ThreadBase_Mutex = 0;
+    virtual status_t createTrack(
+            const AudioClient& client, const audio_attributes_t& attr,
+            audio_port_handle_t* portId, audio_io_handle_t* ioHandle)
+            EXCLUDES_ThreadBase_Mutex = 0;
+    virtual status_t startTrack(audio_port_handle_t portId) EXCLUDES_ThreadBase_Mutex = 0;
+    virtual status_t stopTrack(audio_port_handle_t portId) EXCLUDES_ThreadBase_Mutex = 0;
+    virtual status_t releaseTrack(audio_port_handle_t portId) EXCLUDES_ThreadBase_Mutex = 0;
     virtual status_t standby() EXCLUDES_ThreadBase_Mutex = 0;
     virtual status_t getObservablePosition(uint64_t* position, int64_t* timeNanos) const
             EXCLUDES_ThreadBase_Mutex = 0;

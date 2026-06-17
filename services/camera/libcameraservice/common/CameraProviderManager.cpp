@@ -2123,7 +2123,7 @@ status_t CameraProviderManager::ProviderInfo::DeviceInfo3::addSessionConfigQuery
     }
 
     int deviceVersion = HARDWARE_DEVICE_API_VERSION(mVersion.get_major(), mVersion.get_minor());
-    if (deviceVersion == CAMERA_DEVICE_API_VERSION_1_3) {
+    if (deviceVersion >= CAMERA_DEVICE_API_VERSION_1_3) {
         versionCode = ANDROID_INFO_SESSION_CONFIGURATION_QUERY_VERSION_VANILLA_ICE_CREAM;
         if (getVNDKVersion() > 35) {
             versionCode = ANDROID_INFO_SESSION_CONFIGURATION_QUERY_VERSION_BAKLAVA;
@@ -2145,70 +2145,68 @@ bool CameraProviderManager::ProviderInfo::DeviceInfo3::isAutomotiveDevice() {
 status_t CameraProviderManager::ProviderInfo::DeviceInfo3::addSharedSessionConfigurationTags(
         const std::string &cameraId) {
     status_t res = OK;
-    if (flags::camera_multi_client()) {
-        SharedSessionConfigReader configReader;
-        ErrorCode status =
-                configReader.parseSharedSessionConfig(
-                                    (std::string(SHARED_SESSION_FILE_PATH)
-                                     + std::string(SHARED_SESSION_FILE_NAME)).c_str());
-        if (status != 0) {
-            ALOGE("%s: failed to initialize SharedSessionConfigReader with ErrorCode %s",
-                  __FUNCTION__, SharedSessionConfigUtils::toString(status));
-            return BAD_VALUE;
-        }
-        const int32_t sharedColorSpaceTag = ANDROID_SHARED_SESSION_COLOR_SPACE;
-        const int32_t sharedOutputConfigurationsTag = ANDROID_SHARED_SESSION_OUTPUT_CONFIGURATIONS;
-        auto& c = mCameraCharacteristics;
-        int32_t colorSpace = ANDROID_REQUEST_AVAILABLE_COLOR_SPACE_PROFILES_MAP_UNSPECIFIED;
-
-        status = configReader.getColorSpace(&colorSpace);
-        if (status != 0) {
-            ALOGE("%s: failed to get color space from config reader with ErrorCode %s",
-                  __FUNCTION__, SharedSessionConfigUtils::toString(status));
-            return BAD_VALUE;
-        }
-
-        res = c.update(sharedColorSpaceTag, &colorSpace, 1);
-        if (res != OK) {
-            ALOGE("%s: failed to update sharedColorSpaceTag with error %d", __FUNCTION__, res);
-            return res;
-        }
-
-        std::vector<SharedSessionConfigReader::SharedSessionConfig> outputConfigurations;
-        status = configReader.getAvailableSharedSessionConfigs(cameraId.c_str(),
-                                                               &outputConfigurations);
-        if (status != 0) {
-            ALOGE("%s: failed to get output configurations from config reader with ErrorCode %s",
-                  __FUNCTION__, SharedSessionConfigUtils::toString(status));
-            return BAD_VALUE;
-        }
-
-        std::vector<int64_t> sharedOutputConfigEntries;
-
-        for (auto outputConfig : outputConfigurations) {
-            sharedOutputConfigEntries.push_back(outputConfig.surfaceType);
-            sharedOutputConfigEntries.push_back(outputConfig.width);
-            sharedOutputConfigEntries.push_back(outputConfig.height);
-            sharedOutputConfigEntries.push_back(outputConfig.format);
-            sharedOutputConfigEntries.push_back(outputConfig.mirrorMode);
-            sharedOutputConfigEntries.push_back(outputConfig.useReadoutTimestamp);
-            sharedOutputConfigEntries.push_back(outputConfig.timestampBase);
-            sharedOutputConfigEntries.push_back(outputConfig.dataSpace);
-            sharedOutputConfigEntries.push_back(outputConfig.usage);
-            sharedOutputConfigEntries.push_back(outputConfig.streamUseCase);
-            if (strcmp(outputConfig.physicalCameraId.c_str(), "")) {
-                sharedOutputConfigEntries.push_back(outputConfig.physicalCameraId.length());
-                for (char c : outputConfig.physicalCameraId) {
-                    sharedOutputConfigEntries.push_back(c);
-                }
-            } else {
-                sharedOutputConfigEntries.push_back(/* physical camera id len */ 0);
-            }
-        }
-
-        res = c.update(sharedOutputConfigurationsTag, sharedOutputConfigEntries.data(),
-                       sharedOutputConfigEntries.size());
+    SharedSessionConfigReader configReader;
+    ErrorCode status =
+            configReader.parseSharedSessionConfig(
+                                (std::string(SHARED_SESSION_FILE_PATH)
+                                  + std::string(SHARED_SESSION_FILE_NAME)).c_str());
+    if (status != 0) {
+        ALOGE("%s: failed to initialize SharedSessionConfigReader with ErrorCode %s",
+              __FUNCTION__, SharedSessionConfigUtils::toString(status));
+        return BAD_VALUE;
     }
+    const int32_t sharedColorSpaceTag = ANDROID_SHARED_SESSION_COLOR_SPACE;
+    const int32_t sharedOutputConfigurationsTag = ANDROID_SHARED_SESSION_OUTPUT_CONFIGURATIONS;
+    auto& c = mCameraCharacteristics;
+    int32_t colorSpace = ANDROID_REQUEST_AVAILABLE_COLOR_SPACE_PROFILES_MAP_UNSPECIFIED;
+
+    status = configReader.getColorSpace(&colorSpace);
+    if (status != 0) {
+        ALOGE("%s: failed to get color space from config reader with ErrorCode %s",
+              __FUNCTION__, SharedSessionConfigUtils::toString(status));
+        return BAD_VALUE;
+    }
+
+    res = c.update(sharedColorSpaceTag, &colorSpace, 1);
+    if (res != OK) {
+        ALOGE("%s: failed to update sharedColorSpaceTag with error %d", __FUNCTION__, res);
+        return res;
+    }
+
+    std::vector<SharedSessionConfigReader::SharedSessionConfig> outputConfigurations;
+    status = configReader.getAvailableSharedSessionConfigs(cameraId.c_str(),
+                                                            &outputConfigurations);
+    if (status != 0) {
+        ALOGE("%s: failed to get output configurations from config reader with ErrorCode %s",
+              __FUNCTION__, SharedSessionConfigUtils::toString(status));
+        return BAD_VALUE;
+    }
+
+    std::vector<int64_t> sharedOutputConfigEntries;
+
+    for (auto outputConfig : outputConfigurations) {
+        sharedOutputConfigEntries.push_back(outputConfig.surfaceType);
+        sharedOutputConfigEntries.push_back(outputConfig.width);
+        sharedOutputConfigEntries.push_back(outputConfig.height);
+        sharedOutputConfigEntries.push_back(outputConfig.format);
+        sharedOutputConfigEntries.push_back(outputConfig.mirrorMode);
+        sharedOutputConfigEntries.push_back(outputConfig.useReadoutTimestamp);
+        sharedOutputConfigEntries.push_back(outputConfig.timestampBase);
+        sharedOutputConfigEntries.push_back(outputConfig.dataSpace);
+        sharedOutputConfigEntries.push_back(outputConfig.usage);
+        sharedOutputConfigEntries.push_back(outputConfig.streamUseCase);
+        if (strcmp(outputConfig.physicalCameraId.c_str(), "")) {
+            sharedOutputConfigEntries.push_back(outputConfig.physicalCameraId.length());
+            for (char c : outputConfig.physicalCameraId) {
+                sharedOutputConfigEntries.push_back(c);
+            }
+        } else {
+            sharedOutputConfigEntries.push_back(/* physical camera id len */ 0);
+        }
+    }
+
+    res = c.update(sharedOutputConfigurationsTag, sharedOutputConfigEntries.data(),
+                    sharedOutputConfigEntries.size());
     return res;
 }
 
@@ -3150,6 +3148,68 @@ void CameraProviderManager::ProviderInfo::DeviceInfo3::notifyDeviceStateChange(i
     }
 }
 
+status_t CameraProviderManager::ProviderInfo::DeviceInfo3::addAvailableKeyIfMissing(
+    CameraMetadata& characteristics, int32_t availableTag, int32_t keyToAdd) {
+    status_t res = OK;
+
+    auto availableEntry = characteristics.find(availableTag);
+    if (availableEntry.count == 0) {
+        ALOGE("%s: No supported availability tag key %d!", __FUNCTION__, availableTag);
+        return BAD_VALUE;
+    }
+    bool hasKeyToAdd = std::find(availableEntry.data.i32,
+            availableEntry.data.i32 + availableEntry.count, keyToAdd) !=
+            (availableEntry.data.i32 + availableEntry.count);
+
+    if (!hasKeyToAdd) {
+        std::vector<int32_t> supportedTags;
+        supportedTags.reserve(availableEntry.count + 1);
+        supportedTags.insert(supportedTags.end(), availableEntry.data.i32,
+                availableEntry.data.i32 + availableEntry.count);
+        supportedTags.push_back(keyToAdd);
+
+        res = characteristics.update(availableTag, supportedTags.data(),
+                supportedTags.size());
+        if (res != OK) {
+            ALOGE("%s: Failed to update availability tag key %d for key %d: %s(%d)",
+                    __FUNCTION__, availableTag, keyToAdd, strerror(-res), res);
+            return res;
+        }
+    }
+
+    return res;
+}
+
+status_t CameraProviderManager::ProviderInfo::DeviceInfo3::addDeviceTypeTag(CameraMetadata& c) {
+    if (!flags::camera_device_type_api()) return OK;
+    status_t res = OK;
+    auto entry = c.find(ANDROID_INFO_DEVICE_TYPE);
+    if (entry.count == 0) {
+        auto levelEntry = c.find(ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL);
+        bool isExternalLevel = levelEntry.count > 0 &&
+                levelEntry.data.u8[0] == ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL;
+
+        uint8_t deviceType = isExternalLevel ?
+                ANDROID_INFO_DEVICE_TYPE_EXTERNAL :
+                ANDROID_INFO_DEVICE_TYPE_BUILT_IN;
+        res = c.update(ANDROID_INFO_DEVICE_TYPE, &deviceType, 1);
+        if (res != OK) {
+            ALOGE("%s: Failed to update ANDROID_INFO_DEVICE_TYPE: %s (%d)",
+                    __FUNCTION__, strerror(-res), res);
+            return res;
+        }
+
+        res = addAvailableKeyIfMissing(c, ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,
+                ANDROID_INFO_DEVICE_TYPE);
+        if (res != OK) return res;
+
+        res = addAvailableKeyIfMissing(c, ANDROID_REQUEST_AVAILABLE_RESULT_KEYS,
+                ANDROID_INFO_DEVICE_TYPE);
+        if (res != OK) return res;
+    }
+    return res;
+}
+
 status_t CameraProviderManager::ProviderInfo::DeviceInfo3::getCameraInfo(
         const CameraCompatibilityInfo& compatInfo, int *portraitRotation,
         hardware::CameraInfo *info) const {
@@ -3182,8 +3242,14 @@ status_t CameraProviderManager::ProviderInfo::DeviceInfo3::getCameraInfo(
         return NAME_NOT_FOUND;
     }
 
+    *portraitRotation = 0;
+    // TODO(b/432651608): checking info->orientation is needed when a static
+    //  CameraManager#sLandscapeToPortrait override is used. Find a way to performantly check camera
+    //  orientation before requesting static rotate and crop.
+    //  Note: this doesn't impact dynamic camera compat request from WM, as WM takes into the
+    //  account camera's orientation before requesting rotate and crop.
     if (compatInfo.shouldRotateAndCrop() && compatInfo.shouldOverrideSensorOrientation()
-            && (info->orientation == 0 || info->orientation == 180)) {
+        && (info->orientation == 0 || info->orientation == 180)) {
         *portraitRotation = 90;
         if (info->facing == hardware::CAMERA_FACING_FRONT) {
             info->orientation = (360 + info->orientation - 90) % 360;
@@ -3198,12 +3264,11 @@ status_t CameraProviderManager::ProviderInfo::DeviceInfo3::getCameraInfo(
                 compatInfo.getRotateAndCropRotation().value()) * 90;
         *portraitRotation = info->facing == hardware::CAMERA_FACING_BACK ? rotateAndCropDegrees
                 : 360 - rotateAndCropDegrees;
-    } else {
-        *portraitRotation = 0;
     }
 
     return OK;
 }
+
 bool CameraProviderManager::ProviderInfo::DeviceInfo3::isAPI1Compatible() const {
     // Do not advertise NIR cameras to API1 camera app.
     camera_metadata_ro_entry cfa = mCameraCharacteristics.find(
@@ -3353,6 +3418,41 @@ status_t CameraProviderManager::ProviderInfo::DeviceInfo3::filterSmallJpegSizes(
     }
     if (newStallDurations.size() == 0 || largeJpegCount == 0) {
         return BAD_VALUE;
+    }
+
+    // Make sure RECOMMENDED stream configurations do not contain small JPEG
+    // sizes
+    camera_metadata_entry recommendedStreams =
+            mCameraCharacteristics.find(ANDROID_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS);
+    if (recommendedStreams.count > 0) {
+        std::vector<int32_t> newRecommendedStreams;
+        largeJpegCount = 0;
+        for (size_t i = 0; i < recommendedStreams.count; i += 5) {
+            int32_t width = recommendedStreams.data.i32[i];
+            int32_t height = recommendedStreams.data.i32[i+1];
+            int32_t format = recommendedStreams.data.i32[i+2];
+            if (format == HAL_PIXEL_FORMAT_BLOB) {
+                if (width * height < thresholdW * thresholdH) {
+                    continue;
+                } else {
+                    largeJpegCount++;
+                }
+            }
+            newRecommendedStreams.insert(newRecommendedStreams.end(),
+                                         recommendedStreams.data.i32 + i,
+                                         recommendedStreams.data.i32 + i + 5);
+        }
+        if (largeJpegCount == 0) {
+            ALOGE("%s: AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS do not contain large JPEG size."
+                  " Removing!", __FUNCTION__);
+            mCameraCharacteristics.erase(
+                    ANDROID_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS);
+        } else {
+            mCameraCharacteristics.update(
+                    ANDROID_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS,
+                    newRecommendedStreams.data(),
+                    newRecommendedStreams.size());
+        }
     }
 
     mCameraCharacteristics.update(ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
@@ -3550,6 +3650,16 @@ CameraProviderManager::getConcurrentCameraIds() const {
         }
     }
     return deviceIdCombinations;
+}
+
+status_t CameraProviderManager::warmUp(const std::string &id) {
+    std::lock_guard<std::mutex> lock(mInterfaceMutex);
+    auto deviceInfo = findDeviceInfoLocked(id);
+    if (deviceInfo != nullptr) {
+        return deviceInfo->warmUp();
+    }
+
+    return NAME_NOT_FOUND;
 }
 
 // Checks if the containing vector of sets has any set that contains all of the

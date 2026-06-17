@@ -15,17 +15,17 @@
  */
 
 // #define LOG_NDEBUG 0
+#include <vector>
 #define LOG_TAG "VirtualCameraProvider"
-#include "VirtualCameraProvider.h"
-
-#include <atomic>
 #include <memory>
 #include <mutex>
 #include <tuple>
 #include <utility>
 
 #include "VirtualCameraDevice.h"
+#include "VirtualCameraProvider.h"
 #include "aidl/android/hardware/camera/common/Status.h"
+#include "android_companion_virtualdevice_flags.h"
 #include "log/log.h"
 #include "util/Util.h"
 
@@ -42,6 +42,8 @@ using ::aidl::android::hardware::camera::provider::CameraIdAndStreamCombination;
 using ::aidl::android::hardware::camera::provider::ConcurrentCameraIdCombination;
 using ::aidl::android::hardware::camera::provider::ICameraProviderCallback;
 
+namespace flags = ::android::companion::virtualdevice::flags;
+
 ndk::ScopedAStatus VirtualCameraProvider::setCallback(
     const std::shared_ptr<ICameraProviderCallback>& in_callback) {
   ALOGV("%s", __func__);
@@ -50,19 +52,27 @@ ndk::ScopedAStatus VirtualCameraProvider::setCallback(
     return cameraStatus(Status::ILLEGAL_ARGUMENT);
   }
 
+  // store a local copy of camera names to be notified of the status change to
+  // avoid holding the mLock while doing IPC calls
+  std::vector<std::string> cameraNames;
   {
     const std::lock_guard<std::mutex> lock(mLock);
     mCameraProviderCallback = in_callback;
 
     for (const auto& [cameraName, _] : mCameras) {
-      auto ret = mCameraProviderCallback->cameraDeviceStatusChange(
-          cameraName, CameraDeviceStatus::PRESENT);
-      if (!ret.isOk()) {
-        ALOGE("Failed to announce camera status change: %s",
-              ret.getDescription().c_str());
-      }
+      cameraNames.push_back(cameraName);
     }
   }
+
+  for (const auto& cameraName : cameraNames) {
+    auto ret = in_callback->cameraDeviceStatusChange(
+        cameraName, CameraDeviceStatus::PRESENT);
+    if (!ret.isOk()) {
+      ALOGE("Failed to announce camera status change: %s",
+            ret.getDescription().c_str());
+    }
+  }
+
   return ndk::ScopedAStatus::ok();
 }
 
@@ -191,7 +201,9 @@ std::shared_ptr<VirtualCameraDevice> VirtualCameraProvider::getCamera(
 }
 
 bool VirtualCameraProvider::removeCamera(const std::string& name) {
+  ALOGI("%s: %s", __func__, name.c_str());
   std::shared_ptr<ICameraProviderCallback> callback;
+  std::vector<std::shared_ptr<VirtualCameraDevice>> camerasToClose;
   {
     const std::lock_guard<std::mutex> lock(mLock);
     auto it = mCameras.find(name);
@@ -199,9 +211,18 @@ bool VirtualCameraProvider::removeCamera(const std::string& name) {
       ALOGE("Cannot remove camera %s: no such camera", name.c_str());
       return false;
     }
-    // TODO(b/301023410) Gracefully shut down camera.
+    if (flags::virtual_camera_stream_close_device_close()) {
+      camerasToClose.push_back(it->second);
+    }
     mCameras.erase(it);
     callback = mCameraProviderCallback;
+  }
+
+  if (flags::virtual_camera_stream_close_device_close()) {
+    for (const auto& camera : camerasToClose) {
+      camera->closeSession();
+    }
+    camerasToClose.clear();
   }
 
   if (callback != nullptr) {

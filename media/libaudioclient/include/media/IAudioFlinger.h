@@ -94,6 +94,7 @@ public:
         size_t notificationFrameCount;
         audio_port_handle_t selectedDeviceId;
         audio_session_t sessionId;
+        std::string codecProvenance;
 
         ConversionResult<media::CreateTrackRequest> toAidl() const;
         static ConversionResult<CreateTrackInput> fromAidl(const media::CreateTrackRequest& aidl);
@@ -399,6 +400,11 @@ public:
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) = 0;
 
     virtual status_t resetReferencesForTest() = 0;
+
+    virtual status_t getFlushFromFrameSupport(
+            int module,
+            const media::audio::common::AudioPortConfig& config,
+            media::audio::common::FlushFromFrameSupport* support) = 0;
 };
 
 /**
@@ -519,6 +525,10 @@ public:
     status_t setTracksInternalMute(
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) override;
     status_t resetReferencesForTest() override;
+    status_t getFlushFromFrameSupport(
+            int module,
+            const media::audio::common::AudioPortConfig& config,
+            media::audio::common::FlushFromFrameSupport *support) override;
 
 private:
     const sp<media::IAudioFlingerService> mDelegate;
@@ -621,6 +631,8 @@ public:
             SET_TRACKS_INTERNAL_MUTE = media::BnAudioFlingerService::TRANSACTION_setTracksInternalMute,
             RESET_REFERENCES_FOR_TEST =
                     media::BnAudioFlingerService::TRANSACTION_resetReferencesForTest,
+            GET_FLUSH_FROM_FRAME_SUPPORT =
+                    media::BnAudioFlingerService::TRANSACTION_getFlushFromFrameSupport,
         };
 
     protected:
@@ -759,6 +771,10 @@ public:
     Status setTracksInternalMute(
             const std::vector<media::TrackInternalMuteInfo>& tracksInternalMute) override;
     Status resetReferencesForTest() override;
+    Status getFlushFromFrameSupport(
+            int module,
+            const media::audio::common::AudioPortConfig& config,
+            media::audio::common::FlushFromFrameSupport* _aidl_return) override;
 private:
     const sp<AudioFlingerServerAdapter::Delegate> mDelegate;
 };

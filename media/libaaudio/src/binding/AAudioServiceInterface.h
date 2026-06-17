@@ -17,16 +17,21 @@
 #ifndef ANDROID_AAUDIO_BINDING_AAUDIO_SERVICE_INTERFACE_H
 #define ANDROID_AAUDIO_BINDING_AAUDIO_SERVICE_INTERFACE_H
 
+// go/keep-sorted start
+#include <aaudio/DrainType.h>
+#include <aaudio/IAAudioClient.h>
 #include <audio_utils/TimerQueue.h>
 #include <media/AudioClient.h>
 #include <media/AudioResamplerPublic.h>
 #include <utils/StrongPointer.h>
+// go/keep-sorted end
 
-#include "aaudio/IAAudioClient.h"
-#include "binding/AAudioServiceDefinitions.h"
-#include "binding/AAudioStreamRequest.h"
-#include "binding/AAudioStreamConfiguration.h"
-#include "binding/AudioEndpointParcelable.h"
+// go/keep-sorted start
+#include "AAudioServiceDefinitions.h"
+#include "AAudioStreamConfiguration.h"
+#include "AAudioStreamRequest.h"
+#include "AudioEndpointParcelable.h"
+// go/keep-sorted end
 
 /**
  * This has the same methods as IAAudioService but without the Binder features.
@@ -55,7 +60,7 @@ public:
     virtual AAudioHandleInfo openStream(const AAudioStreamRequest &request,
                                         AAudioStreamConfiguration &configuration) = 0;
 
-    virtual aaudio_result_t closeStream(const AAudioHandleInfo& streamHandleInfo) = 0;
+    virtual aaudio_result_t closeStream(const AAudioHandleInfo& streamHandleInfo, bool force) = 0;
 
     /* Get an immutable description of the in-memory queues
     * used to communicate with the underlying HAL or Service.
@@ -93,13 +98,20 @@ public:
     virtual aaudio_result_t unregisterAudioThread(const AAudioHandleInfo& streamHandleInfo,
                                                   pid_t clientThreadId) = 0;
 
+    virtual aaudio_result_t createClient(const AAudioHandleInfo& streamHandleInfo,
+                                         const android::AudioClient& client,
+                                         const audio_attributes_t& attr,
+                                         audio_port_handle_t* clientHandle,
+                                         audio_io_handle_t* ioHandle) = 0;
+
     virtual aaudio_result_t startClient(const AAudioHandleInfo& streamHandleInfo,
-                                        const android::AudioClient& client,
-                                        const audio_attributes_t *attr,
-                                        audio_port_handle_t *clientHandle) = 0;
+                                        audio_port_handle_t clientHandle) = 0;
 
     virtual aaudio_result_t stopClient(const AAudioHandleInfo& streamHandleInfo,
                                        audio_port_handle_t clientHandle) = 0;
+
+    virtual aaudio_result_t releaseClient(const AAudioHandleInfo& streamHandleInfo,
+                                         audio_port_handle_t clientHandle) = 0;
 
     /**
      * Exit the standby mode.
@@ -130,16 +142,14 @@ public:
      *
      * @param streamHandleInfo stream handle to identify the stream.
      * @param wakeUpNanos the timestamp in boottime nanoseconds that the client must be waken up.
-     * @param allowSoftWakeUp allow the service side to wake up the client even if it is not the
-     *                        requested time. This allows service side to smartly select wake up
-     *                        time instead of waiting for the exact wake up time.
+     * @param drainType the type of draining operation.
      * @param handle the handle to identify the task in TimerQueue at service side. Use this handle
      *               to remove the wake up task if the wake up task is no longer needed.
      * @return AAUDIO_OK if the service side successfully receives the drain command.
      */
     virtual aaudio_result_t drainStream(const AAudioHandleInfo& streamHandleInfo,
                                         int64_t wakeUpNanos,
-                                        bool allowSoftWakeUp,
+                                        DrainType drainType,
                                         android::audio_utils::TimerQueue::handle_t* handle) = 0;
 
     /**

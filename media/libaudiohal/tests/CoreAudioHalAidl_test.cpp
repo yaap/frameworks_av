@@ -62,6 +62,7 @@ using ::aidl::android::media::audio::common::AudioPortExt;
 using ::aidl::android::media::audio::common::AudioPortMixExt;
 using ::aidl::android::media::audio::common::AudioProfile;
 using ::aidl::android::media::audio::common::AudioSource;
+using ::aidl::android::media::audio::common::FlushFromFrameSupport;
 using ::aidl::android::media::audio::common::PcmType;
 
 class VendorParameterMock {
@@ -938,6 +939,11 @@ class ModuleMock : public ::aidl::android::hardware::audio::core::BnModule,
         return ndk::ScopedAStatus::ok();
     }
 
+    ndk::ScopedAStatus getFlushFromFrameSupport(const AudioPortConfig& /*config*/,
+                                                FlushFromFrameSupport* /*support*/) {
+        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+    }
+
     Configuration mConfig;
     bool mIsScreenTurnedOn = false;
     ScreenRotation mScreenRotation = ScreenRotation::DEG_0;
@@ -970,7 +976,7 @@ class TestHalAdapterVendorExtension
     static const std::string kStreamVendorParameterId;
 
   private:
-    ndk::ScopedAStatus parseVendorParameterIds(ParameterScope in_scope,
+    ndk::ScopedAStatus parseVendorParameterIds(const ParameterScope& in_scope,
                                                const std::string& in_rawKeys,
                                                std::vector<std::string>* _aidl_return) override {
         android::AudioParameter keys(android::String8(in_rawKeys.c_str()));
@@ -979,8 +985,8 @@ class TestHalAdapterVendorExtension
             if (android::status_t status = keys.getAt(i, key); status != android::OK) {
                 return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
             }
-            switch (in_scope) {
-                case ParameterScope::MODULE:
+            switch (in_scope.scope) {
+                case ScopeType::MODULE:
                     if (key == android::String8(kLegacyParameterKey.c_str()) ||
                         key == android::String8(kLegacyAsyncParameterKey.c_str())) {
                         _aidl_return->push_back(kModuleVendorParameterId);
@@ -988,7 +994,7 @@ class TestHalAdapterVendorExtension
                         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
                     }
                     break;
-                case ParameterScope::STREAM:
+                case ScopeType::STREAM:
                     if (key == android::String8(kLegacyParameterKey.c_str()) ||
                         key == android::String8(kLegacyAsyncParameterKey.c_str())) {
                         _aidl_return->push_back(kStreamVendorParameterId);
@@ -1001,7 +1007,7 @@ class TestHalAdapterVendorExtension
         return ndk::ScopedAStatus::ok();
     }
     ndk::ScopedAStatus parseVendorParameters(
-            ParameterScope in_scope, const std::string& in_rawKeysAndValues,
+            const ParameterScope& in_scope, const std::string& in_rawKeysAndValues,
             std::vector<VendorParameter>* out_syncParameters,
             std::vector<VendorParameter>* out_asyncParameters) override {
         android::AudioParameter legacy(android::String8(in_rawKeysAndValues.c_str()));
@@ -1015,11 +1021,11 @@ class TestHalAdapterVendorExtension
                 return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
             }
             std::string parameterId;
-            switch (in_scope) {
-                case ParameterScope::MODULE:
+            switch (in_scope.scope) {
+                case ScopeType::MODULE:
                     parameterId = kModuleVendorParameterId;
                     break;
-                case ParameterScope::STREAM:
+                case ScopeType::STREAM:
                     parameterId = kStreamVendorParameterId;
                     break;
             }
@@ -1041,14 +1047,14 @@ class TestHalAdapterVendorExtension
                                                           std::vector<VendorParameter>*) override {
         return ndk::ScopedAStatus::ok();
     }
-    ndk::ScopedAStatus processVendorParameters(ParameterScope in_scope,
+    ndk::ScopedAStatus processVendorParameters(const ParameterScope& in_scope,
                                                const std::vector<VendorParameter>& in_parameters,
                                                std::string* _aidl_return) override {
         android::AudioParameter legacy;
         for (const auto& vendorParam : in_parameters) {
-            if ((in_scope == ParameterScope::MODULE &&
+            if ((in_scope.scope == ScopeType::MODULE &&
                  vendorParam.id == kModuleVendorParameterId) ||
-                (in_scope == ParameterScope::STREAM &&
+                (in_scope.scope == ScopeType::STREAM &&
                  vendorParam.id == kStreamVendorParameterId)) {
                 int value;
                 if (android::status_t status = parseVendorParameter(vendorParam, &value);
@@ -1526,7 +1532,7 @@ class StreamHalAidlVendorParametersTest : public testing::Test {
         mVendorExt = ndk::SharedRefBase::make<TestHalAdapterVendorExtension>();
         struct audio_config config = AUDIO_CONFIG_INITIALIZER;
         ::aidl::android::hardware::audio::core::StreamDescriptor descriptor;
-        StreamContextAidl context(descriptor, false /*isAsynchronous*/, 0,
+        StreamContextAidl context(descriptor, false /*isAsynchronous*/, false /*isDirect*/, 0,
                                   false /*hasClipTransitionSupport*/);
         mStream =
                 sp<StreamHalAidlTest>::make("test", false /*isInput*/, config, 0 /*nominalLatency*/,

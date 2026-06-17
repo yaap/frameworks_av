@@ -79,7 +79,7 @@ class TestSurfaceListener : public SurfaceListener {
   public:
     virtual void onBufferReleased() override { mNumBuffersReleased++; }
     virtual bool needsReleaseNotify() { return true; }
-    virtual void onBufferDetached(int) override {}
+    virtual void onBufferDetached(uint64_t) override {}
     virtual void onBuffersDiscarded(const std::vector<sp<GraphicBuffer>>&) override {};
 
     uint32_t mNumBuffersReleased = 0;
@@ -200,11 +200,7 @@ TEST_F(Camera3StreamSplitterTest, AddingSameBufferManyTimes) {
     sp<TestSurfaceListener> surfaceListener = sp<TestSurfaceListener>::make();
     EXPECT_EQ(OK, inputSurface->connect(NATIVE_WINDOW_API_CAMERA, surfaceListener, false));
     // TODO: Do this with the surface itself once the API is available.
-#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_PLATFORM_API_IMPROVEMENTS)
     EXPECT_EQ(OK, inputSurface->allowAllocation(false));
-#else
-    EXPECT_EQ(OK, inputSurface->getIGraphicBufferProducer()->allowAllocation(false));
-#endif
 
     //
     // Create a buffer to use:

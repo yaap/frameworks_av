@@ -19,10 +19,13 @@
 #include "PowerStats.h"
 #include "PowerStatsCollector.h"
 
+// go/keep-sorted start
 #include <android-base/thread_annotations.h>
 #include <audio_utils/CommandThread.h>
+#include <deque>
 #include <memory>
 #include <set>
+// go/keep-sorted end
 
 namespace android::media::psh_utils {
 
@@ -34,6 +37,12 @@ namespace android::media::psh_utils {
  */
 class PowerClientStats {
 public:
+
+    enum class LogType {
+        kLogAll,
+        kLogForTrack,
+    };
+
     // A command thread is used for tokens to dispatch start and stop sequentially
     // with less overhead to the caller.
     static audio_utils::CommandThread& getCommandThread();
@@ -57,6 +66,20 @@ public:
     void stop(int64_t actualNs) EXCLUDES(mMutex);
 
     /**
+     * Sets the freeze state for a pid.
+     * @param pid pid of app.
+     * @param frozen true if frozen.
+     * @return true if there is an active client track and the prior state was frozen or
+     *         the current state is frozen.
+     */
+    bool setFrozen(pid_t pid, bool frozen) EXCLUDES(mMutex);
+
+    /**
+     * Returns true if the pid is currently frozen.
+     */
+    bool isFrozen(pid_t pid) const EXCLUDES(mMutex);
+
+    /**
      * Adds a pid to the App for string printing.
      */
     void addPid(pid_t pid) EXCLUDES(mMutex);
@@ -71,8 +94,8 @@ public:
      * @param stats if true returns the stats.
      * @return stat string.
      */
-    std::string toString(bool stats = false, const std::string& prefix = {})
-            const EXCLUDES(mMutex);
+    std::string toString(bool stats = false, const std::string& prefix = {},
+            LogType logType = LogType::kLogAll) const EXCLUDES(mMutex);
 
 private:
     // Snapshots are taken no more often than 500ms.
@@ -89,6 +112,9 @@ private:
     int64_t mStartNs GUARDED_BY(mMutex) = 0;
     std::shared_ptr<const PowerStats> mStartStats GUARDED_BY(mMutex);
 
+    static inline constexpr size_t kMaxHistory = 10;
+    std::deque<std::pair<int64_t, int64_t>> mLastTimes GUARDED_BY(mMutex);
+
     // Cumulative time while active: sum of deltas of (stop - start).
     int64_t mCumulativeNs GUARDED_BY(mMutex) = 0;
     // Cumulative stats while active: sum of deltas of (stop - start),
@@ -96,6 +122,9 @@ private:
     std::shared_ptr<PowerStats> mCumulativeStats GUARDED_BY(mMutex) =
             std::make_shared<PowerStats>();
     std::shared_ptr<PowerStats> mMaxStats GUARDED_BY(mMutex);
+    std::set<pid_t> mFrozenPids GUARDED_BY(mMutex);
+    int64_t mFrozenWhileActive GUARDED_BY(mMutex) = 0;
+    int64_t mLastFrozenWhileActiveRealTimeNs GUARDED_BY(mMutex) = 0;
 };
 
 } // namespace android::media::psh_utils

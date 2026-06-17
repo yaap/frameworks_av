@@ -16,6 +16,8 @@
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
+#include <android_hardware_usb_flags.h>
+#include <algorithm>
 #include <asyncio/AsyncIO.h>
 #include <dirent.h>
 #include <errno.h>
@@ -74,9 +76,19 @@ int MtpFfsHandle::getPacketSize(int ffs_fd) {
 MtpFfsHandle::MtpFfsHandle(int controlFd) {
     mControl.reset(controlFd);
     mBatchCancel = android::base::GetBoolProperty("sys.usb.mtp.batchcancel", false);
+    setClosed(true);
 }
 
-MtpFfsHandle::~MtpFfsHandle() {}
+MtpFfsHandle::~MtpFfsHandle() {
+    close();
+}
+
+void MtpFfsHandle::setClosed(bool closed) {
+    if (android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix()) {
+        std::lock_guard<std::mutex> lock(mChildThreadsLock);
+        mClosed = closed;
+    }
+}
 
 void MtpFfsHandle::closeEndpoints() {
     mIntr.reset();
@@ -292,18 +304,38 @@ int MtpFfsHandle::start(bool ptp) {
     mPollFds[1].events = POLLIN;
 
     mCanceled = false;
+    setClosed(false);
     return 0;
 }
 
 void MtpFfsHandle::close() {
-    // Join all child threads before destruction
-    int count = mChildThreads.size();
-    for (int i = 0; i < count; i++) {
-        mChildThreads[i].join();
-    }
-    mChildThreads.clear();
+    if (android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix()) {
+        std::vector<std::future<void>> futuresToJoin;
+        {
+            std::lock_guard<std::mutex> lock(mChildThreadsLock);
+            mClosed = true;
+            futuresToJoin = std::move(mChildFutures);
+        }
 
-    io_destroy(mCtx);
+        // Join all child threads before destruction
+        for (auto& f : futuresToJoin) {
+            if (f.valid()) {
+                f.wait();
+            }
+        }
+    } else {
+        // Join all child threads before destruction
+        int count = mChildThreads.size();
+        for (int i = 0; i < count; i++) {
+            mChildThreads[i].join();
+        }
+        mChildThreads.clear();
+    }
+
+    if (mCtx) {
+        io_destroy(mCtx);
+        mCtx = 0;
+    }
     closeEndpoints();
     closeConfig();
 }
@@ -340,12 +372,13 @@ int MtpFfsHandle::waitEvents(struct io_buffer *buf, int min_events, struct io_ev
             // show up as readable next iteration, but there will be fewer or no events to actually
             // wait for. Thus we never want io_getevents to block.
             int this_events = TEMP_FAILURE_RETRY(io_getevents(mCtx, 0, AIO_BUFS_MAX, events, &ZERO_TIMEOUT));
-            if (this_events == -1) {
+            if (this_events < 0) {
                 PLOG(ERROR) << "Mtp error getting events";
                 error = errno;
+                break;
             }
             // Add up the total amount of data and find errors on the way.
-            for (unsigned j = 0; j < static_cast<unsigned>(this_events); j++) {
+            for (int j = 0; j < this_events; j++) {
                 if (events[j].res < 0) {
                     errno = -events[j].res;
                     PLOG(ERROR) << "Mtp got error event at " << j << " and " << buf->actual << " total";
@@ -403,7 +436,10 @@ int MtpFfsHandle::cancelEvents(struct iocb **iocb, struct io_event *events, unsi
         errno = EIO;
     }
     int evs = TEMP_FAILURE_RETRY(io_getevents(mCtx, num_events, AIO_BUFS_MAX, events, nullptr));
-    if (static_cast<unsigned>(evs) != num_events) {
+    if (evs < 0) {
+        PLOG(ERROR) << "Mtp error getting events during cancel";
+        ret = -1;
+    } else if (static_cast<unsigned>(evs) != num_events) {
         PLOG(ERROR) << "Mtp couldn't cancel all requests, got " << evs;
         ret = -1;
     }
@@ -579,6 +615,8 @@ int MtpFfsHandle::sendFile(mtp_file_range mfr) {
     int init_read_len = std::min(
             static_cast<uint64_t>(packet_size - sizeof(mtp_data_header)), file_length);
 
+    bool io_order_improvement = android::hardware::usb::flags::mtp_download_io_order_improvement();
+
     advise(mfr.fd);
 
     struct aiocb aio;
@@ -623,13 +661,27 @@ int MtpFfsHandle::sendFile(mtp_file_range mfr) {
         }
 
         if (has_write) {
-            // Wait for usb write. Cancel unwritten portion if there's an error.
-            int num_events = 0;
-            if (waitEvents(&mIobuf[(i-1)%NUM_IO_BUFS], mIobuf[(i-1)%NUM_IO_BUFS].actual, ioevs,
-                        &num_events) != ret) {
-                error = true;
-                cancelEvents(mIobuf[(i-1)%NUM_IO_BUFS].iocb.data(), ioevs, num_events,
-                        mIobuf[(i-1)%NUM_IO_BUFS].actual, false);
+            // Avoid returning in this block because a background thread is processing aio. We need
+            // to wait until aio_suspend finishes before we can safely return.
+
+            unsigned prev_idx = (i + NUM_IO_BUFS - 1) % NUM_IO_BUFS;
+
+            if (io_order_improvement) {
+                // Queue up a write to usb.
+                if (iobufSubmit(&mIobuf[prev_idx], mBulkIn, ret, false) == -1) {
+                    error = true;
+                }
+            }
+
+            if (!error) {
+                // Wait for usb write. Cancel unwritten portion if there's an error.
+                int num_events = 0;
+                if (waitEvents(&mIobuf[prev_idx], mIobuf[prev_idx].actual, ioevs, &num_events)
+                        != ret) {
+                    error = true;
+                    cancelEvents(mIobuf[prev_idx].iocb.data(), ioevs, num_events,
+                            mIobuf[prev_idx].actual, false);
+                }
             }
             has_write = false;
         }
@@ -652,12 +704,18 @@ int MtpFfsHandle::sendFile(mtp_file_range mfr) {
                 return -1;
             }
 
-            // Queue up a write to usb.
-            if (iobufSubmit(&mIobuf[i], mBulkIn, num_read, false) == -1) {
-                return -1;
+            if (!io_order_improvement) {
+                // Queue up a write to usb.
+                if (iobufSubmit(&mIobuf[i], mBulkIn, num_read, false) == -1) {
+                    return -1;
+                }
             }
+
             has_write = true;
             ret = num_read;
+        } else if (io_order_improvement && error) {
+            // To avoid reporting success if iobufSubmit failed in the last iteration.
+            return -1;
         }
 
         i = (i + 1) % NUM_IO_BUFS;
@@ -675,6 +733,35 @@ int MtpFfsHandle::sendFile(mtp_file_range mfr) {
 int MtpFfsHandle::sendEvent(mtp_event me) {
     // Mimic the behavior of f_mtp by sending the event async.
     // Events aren't critical to the connection, so we don't need to check the return value.
+    if (android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix()) {
+        char *temp = new char[me.length];
+        memcpy(temp, me.data, me.length);
+        me.data = temp;
+
+        std::lock_guard<std::mutex> lock(mChildThreadsLock);
+        if (mClosed) {
+            delete[] temp;
+            return -1;
+        }
+
+        // Reap finished threads to prevent memory leaks
+        mChildFutures.erase(
+            std::remove_if(mChildFutures.begin(), mChildFutures.end(),
+                [](std::future<void>& f) {
+                    return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                }),
+            mChildFutures.end()
+        );
+
+        auto t = std::async(std::launch::async, [this, me]() {
+            return this->doSendEvent(me);
+        });
+
+        // Store the thread object for later joining
+        mChildFutures.emplace_back(std::move(t));
+        return 0;
+    }
+
     char *temp = new char[me.length];
     memcpy(temp, me.data, me.length);
     me.data = temp;

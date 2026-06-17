@@ -181,6 +181,8 @@ public:
      */
     void setStopTime(const sp<TrackClientDescriptor>& client, nsecs_t sysTime);
 
+    product_strategy_t getMostRecentStrategy(int inPastMs) const;
+
     /**
      * Changes the client->active() state and the output descriptor's global active count,
      * along with the stream active count and mActiveClients.
@@ -314,18 +316,17 @@ public:
                                   bool preferredDeviceOnly = false) const;
 
     // override ClientMapHandler to abort when removing a client when active.
-    void removeClient(audio_port_handle_t portId) override {
-        auto client = getClient(portId);
-        LOG_ALWAYS_FATAL_IF(client.get() == nullptr,
-                "%s(%d): nonexistent client portId %d", __func__, mId, portId);
-        // it is possible that when a client is removed, we could remove its
-        // associated active count by calling changeStreamActiveCount(),
-        // but that would be hiding a problem, so we log fatal instead.
-        auto clientIter = std::find(begin(mActiveClients), end(mActiveClients), client);
-        LOG_ALWAYS_FATAL_IF(clientIter != mActiveClients.end(),
-                            "%s(%d) removing client portId %d which is active (count %d)",
-                            __func__, mId, portId, client->getActivityCount());
-        ClientMapHandler<TrackClientDescriptor>::removeClient(portId);
+    bool removeClient(audio_port_handle_t portId, bool checkExists = true) override {
+        if (checkExists) {
+            auto client = getClient(portId);
+            LOG_ALWAYS_FATAL_IF(client.get() == nullptr,
+                    "%s(%d): nonexistent client portId %d", __func__, mId, portId);
+            auto clientIter = std::find(begin(mActiveClients), end(mActiveClients), client);
+            LOG_ALWAYS_FATAL_IF(clientIter != mActiveClients.end(),
+                    "%s(%d) removing client portId %d which is active (count %d)",
+                    __func__, mId, portId, client->getActivityCount());
+        }
+        return ClientMapHandler<TrackClientDescriptor>::removeClient(portId, checkExists);
     }
 
     const TrackClientVector& getActiveClients() const {
@@ -422,6 +423,26 @@ public:
                            uint32_t delayMs,
                            bool force,
                            bool isVoiceVolSrc = false);
+
+    /**
+     * @brief get the sw volume to be applied in AudioFlinger for the given volume source.
+     * If using HwVolume, it returns the full scale volume.
+     * @param volumeSource to be considered
+     */
+    float getVolumeAmpl(VolumeSource volumeSource) const;
+
+    /**
+     * @brief If the output is routed to a single device and this device implements a
+     * hardware gain controller, returns this device descriptor else returns nullptr.
+     * @param deviceTypes to be considered.
+     */
+    sp<DeviceDescriptor> getRoutedDeviceForHwVolumeFromTypes(
+            const DeviceTypeSet& deviceTypes) const;
+
+    /**
+     * @brief check if the output is routed to a single device supporting the HW volume.
+     */
+    bool useHwVolumeForRoutedDevices() const;
 
     virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
                            const struct audio_port_config *srcConfig = NULL) const;
@@ -554,12 +575,19 @@ public:
 
     virtual std::string info() const override;
 
+    status_t setHwGains(float volumeDb, DeviceVector devices);
+
     /**
      * Finds all ports matching the given volume source.
      * @param vs to be considered
-     * @return vector of ports following the given volume source.
+     * @return a pair of vectors:
+     *    - 1) port ID for client descriptors (AudioTrack or source device for AudioSource) when
+     *    volume is applied in software
+     *    - 2) DeviceDescriptors when volume is applied by a gain controller in the source device of
+     *    a hardware audio source.
      */
-    std::vector<audio_port_handle_t> getPortsForVolumeSource(const VolumeSource& vs);
+    std::pair<std::vector<audio_port_handle_t>, DeviceVector> getPortsForVolumeSource(
+            const VolumeSource& vs);
 
     const sp<IOProfile> mProfile;          // I/O profile this output derives from
     audio_io_handle_t mIoHandle;           // output handle

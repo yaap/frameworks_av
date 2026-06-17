@@ -81,13 +81,21 @@ tidy_errors = [
 cc_defaults {
     name: "libaaudioservice_dependencies",
 
+    defaults: [
+        "libaaudio_defaults",
+    ],
+
     shared_libs: [
         "aaudio-aidl-cpp",
+        "android.media.audio-aconfig-cc",
         "com.android.media.aaudio-aconfig-cc",
-        "com.android.media.aaudio-aconfig-cc",
+        "com.android.media.audioserver-aconfig-cc",
         "framework-permission-aidl-cpp",
-        "libaaudio_internal",
-        "libaudioclient",
+        "libaaudio_internal_core",
+        "libaaudio_internal_fifo",
+        "libaaudio_internal_mmap",
+        "libaaudio_internal_utils",
+        "libaudiobase",
         "libaudioclient_aidl_conversion",
         "libaudiofoundation",
         "libaudioutils",
@@ -97,7 +105,6 @@ cc_defaults {
         "liblog",
         "libmedia_helper",
         "libmediametrics",
-        "libmediautils",
         "libutils",
         "packagemanager_aidl-cpp",
     ],
@@ -139,11 +146,6 @@ cc_library_static {
         "-Werror",
         "-Wno-unused-parameter",
         "-Wthread-safety",
-    ],
-
-    export_shared_lib_headers: [
-        "framework-permission-aidl-cpp",
-        "libaaudio_internal",
     ],
 
     header_libs: [

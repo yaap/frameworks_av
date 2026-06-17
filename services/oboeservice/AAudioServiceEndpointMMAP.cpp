@@ -37,6 +37,7 @@
 #include "AAudioServiceEndpointPlay.h"
 #include "AAudioServiceEndpointMMAP.h"
 
+#include <android_media_audio.h>
 #include <com_android_media_aaudio.h>
 
 #define AAUDIO_BUFFER_CAPACITY_MIN    (4 * 512)
@@ -129,12 +130,7 @@ aaudio_result_t AAudioServiceEndpointMMAP::open(const aaudio::AAudioStreamReques
 
     std::set<audio_config_base_t, configComp> configsTried;
     int32_t numberOfAttempts = 0;
-    // If the performance mode is offload, it requires the stream to be opened with
-    // requested configuration. The framework do not provide conversion for offload use case.
-    const int maxOpenAttempts =
-            getPerformanceMode() == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED
-                    ? 1 : AAUDIO_MAX_OPEN_ATTEMPTS;
-    while (numberOfAttempts < maxOpenAttempts) {
+    while (numberOfAttempts < AAUDIO_MAX_OPEN_ATTEMPTS) {
         if (configsTried.find(config) != configsTried.end()) {
             // APM returning something that has already tried.
             ALOGW("Have already tried to open with format=%#x and sr=%d, but failed before",
@@ -256,7 +252,7 @@ aaudio_result_t AAudioServiceEndpointMMAP::openWithConfig(
     setSessionId(actualSessionId);
 
     ALOGD("%s(format = 0x%X) deviceIds = %s, sessionId = %d",
-          __func__, config->format, toString(getDeviceIds()).c_str(), getSessionId());
+          __func__, config->format, android::toString(getDeviceIds()).c_str(), getSessionId());
 
     ALOGD("%s bufferCapacity = %d, deviceSampleRate = %d, requestedSampleRate = %d",
           __func__, getBufferCapacity(), config->sample_rate, getSampleRate());
@@ -346,28 +342,24 @@ bool AAudioServiceEndpointMMAP::close_l() { // requires mMmapStreamLock
 }
 
 aaudio_result_t AAudioServiceEndpointMMAP::startStream(sp<AAudioServiceStreamBase> stream,
-                                                   audio_port_handle_t *clientHandle __unused) {
+                                                       audio_port_handle_t /*clientHandle*/) {
     // Start the client on behalf of the AAudio service.
     // Use the port handle that was provided by openMmapStream().
-    audio_port_handle_t tempHandle = mPortHandle;
     audio_attributes_t attr = {};
     if (stream != nullptr) {
         attr = getAudioAttributesFrom(stream.get());
     }
-    const aaudio_result_t result = startClient(
-            mMmapClient, stream == nullptr ? nullptr : &attr, &tempHandle);
-    // When AudioFlinger is passed a valid port handle then it should not change it.
-    LOG_ALWAYS_FATAL_IF(tempHandle != mPortHandle,
-                        "%s() port handle not expected to change from %d to %d",
-                        __func__, mPortHandle, tempHandle);
+    const aaudio_result_t result = startClient(mPortHandle);
     ALOGV("%s() mPortHandle = %d", __func__, mPortHandle);
+    if (result == AAUDIO_OK) {
+        std::lock_guard _l(mMmapStreamLock);
+        mNeedToCatchUp = true;
+    }
     return result;
 }
 
 aaudio_result_t AAudioServiceEndpointMMAP::stopStream(sp<AAudioServiceStreamBase> /*stream*/,
                                                       audio_port_handle_t clientHandle) {
-    mFramesTransferred.reset32();
-
     // Round 64-bit counter up to a multiple of the buffer capacity.
     // This is required because the 64-bit counter is used as an index
     // into a circular buffer and the actual HW position is reset to zero
@@ -381,9 +373,23 @@ aaudio_result_t AAudioServiceEndpointMMAP::stopStream(sp<AAudioServiceStreamBase
     return result;
 }
 
-aaudio_result_t AAudioServiceEndpointMMAP::startClient(const android::AudioClient& client,
-                                                       const audio_attributes_t *attr,
-                                                       audio_port_handle_t *portHandlePtr) {
+aaudio_result_t AAudioServiceEndpointMMAP::createClient(const android::AudioClient& client,
+                                                        const audio_attributes_t& attr,
+                                                        audio_port_handle_t* clientHandle,
+                                                        audio_io_handle_t* ioHandle) {
+    const std::lock_guard<std::mutex> lock(mMmapStreamLock);
+    if (mMmapStream == nullptr) {
+        ALOGW("%s(): called after mMmapStream set to NULL", __func__);
+        return AAUDIO_ERROR_NULL;
+    } else if (!isConnected()) {
+        ALOGD("%s(): MMAP stream was disconnected", __func__);
+        return AAUDIO_ERROR_DISCONNECTED;
+    }
+    return AAudioConvert_androidToAAudioResult(
+            mMmapStream->createTrack(client, attr, clientHandle, ioHandle));
+}
+
+aaudio_result_t AAudioServiceEndpointMMAP::startClient(audio_port_handle_t clientHandle) {
     const std::lock_guard<std::mutex> lock(mMmapStreamLock);
     if (mMmapStream == nullptr) {
         ALOGW("%s(): called after mMmapStream set to NULL", __func__);
@@ -392,32 +398,50 @@ aaudio_result_t AAudioServiceEndpointMMAP::startClient(const android::AudioClien
         ALOGD("%s(): MMAP stream was disconnected", __func__);
         return AAUDIO_ERROR_DISCONNECTED;
     } else {
-        aaudio_result_t result = AAudioConvert_androidToAAudioResult(
-                mMmapStream->start(client, attr, portHandlePtr));
-        if (!isConnected() && (portHandlePtr != nullptr)) {
+        aaudio_result_t result =
+                AAudioConvert_androidToAAudioResult(mMmapStream->startTrack(clientHandle));
+        if (!isConnected()) {
             ALOGD("%s(): MMAP stream DISCONNECTED after starting port %d, will stop it",
-                  __func__, *portHandlePtr);
-            mMmapStream->stop(*portHandlePtr);
-            *portHandlePtr = AUDIO_PORT_HANDLE_NONE;
+                  __func__, clientHandle);
+            mMmapStream->stopTrack(clientHandle);
             result = AAUDIO_ERROR_DISCONNECTED;
         }
-        ALOGD("%s(): returning port %d, result %d", __func__,
-              (portHandlePtr == nullptr) ? -1 : *portHandlePtr, result);
+        ALOGD("%s(%d): returning result %d", __func__, clientHandle, result);
         return result;
     }
 }
 
-aaudio_result_t AAudioServiceEndpointMMAP::stopClient(audio_port_handle_t portHandle) {
+aaudio_result_t AAudioServiceEndpointMMAP::stopClient(audio_port_handle_t clientHandle) {
     const std::lock_guard<std::mutex> lock(mMmapStreamLock);
     if (mMmapStream == nullptr) {
-        ALOGE("%s(%d): called after mMmapStream set to NULL", __func__, (int)portHandle);
+        ALOGE("%s(%d): called after mMmapStream set to NULL", __func__, clientHandle);
         return AAUDIO_ERROR_NULL;
     } else {
         aaudio_result_t result = AAudioConvert_androidToAAudioResult(
-                mMmapStream->stop(portHandle));
-        ALOGD("%s(%d): returning %d", __func__, (int)portHandle, result);
+                mMmapStream->stopTrack(clientHandle));
+        ALOGD("%s(%d): returning %d", __func__, clientHandle, result);
         return result;
     }
+}
+
+aaudio_result_t AAudioServiceEndpointMMAP::releaseClient(audio_port_handle_t clientHandle) {
+    const std::lock_guard<std::mutex> lock(mMmapStreamLock);
+    if (mMmapStream == nullptr) {
+        ALOGE("%s(%d): called after mMmapStream set to NULL", __func__, clientHandle);
+        return AAUDIO_ERROR_NULL;
+    } else {
+        aaudio_result_t result = AAudioConvert_androidToAAudioResult(
+                mMmapStream->releaseTrack(clientHandle));
+        ALOGD("%s(%d): returning %d", __func__, clientHandle, result);
+        return result;
+    }
+}
+
+void AAudioServiceEndpointMMAP::releaseClientWhenWakeUp(audio_port_handle_t /*clientHandle*/) {
+    // For MMAP endpoint, there should only be one client. Using a boolean value to record if
+    // the client should be released when wake up.
+    std::lock_guard _l(mLockStreams);
+    mShouldReleaseClientWhenWakeUp = true;
 }
 
 aaudio_result_t AAudioServiceEndpointMMAP::standby() {
@@ -463,13 +487,28 @@ aaudio_result_t AAudioServiceEndpointMMAP::activate(
     return AAudioConvert_androidToAAudioResult(mMmapStream->activate(handle));
 }
 
+namespace {
+
+[[clang::no_destroy]] static const std::map<android::status_t, aaudio_result_t>
+        kPlaybackParametersResultMap = {
+        {android::INVALID_OPERATION, AAUDIO_ERROR_UNIMPLEMENTED},
+};
+
+} // namespace
+
 aaudio_result_t AAudioServiceEndpointMMAP::setPlaybackParameters(
         const android::media::audio::common::AudioPlaybackRate& rate) {
     const std::lock_guard lock(mMmapStreamLock);
     if (mMmapStream == nullptr) {
         return AAUDIO_ERROR_NULL;
     }
-    return AAudioConvert_androidToAAudioResult(mMmapStream->setPlaybackParameters(rate));
+    const status_t status = mMmapStream->setPlaybackParameters(rate);
+    ALOGW_IF(status != NO_ERROR, "%s, returned status=%d", __func__, status);
+    // The internal conversion will convert INVALID_OPERATION to AAUDIO_ERROR_INVALID_STATE.
+    // When INVALID_OPERATION is returned, it indicates the HAL doesn't support playback parameters.
+    // In that case, use a customized map to convert INVALID_OPERATION to
+    // AAUDIO_ERROR_UNIMPLEMENTED.
+    return AAudioConvert_androidToAAudioResult(status, kPlaybackParametersResultMap);
 }
 
 aaudio_result_t AAudioServiceEndpointMMAP::getPlaybackParameters(
@@ -478,7 +517,13 @@ aaudio_result_t AAudioServiceEndpointMMAP::getPlaybackParameters(
     if (mMmapStream == nullptr) {
         return AAUDIO_ERROR_NULL;
     }
-    return AAudioConvert_androidToAAudioResult(mMmapStream->getPlaybackParameters(rate));
+    const status_t status = mMmapStream->getPlaybackParameters(rate);
+    ALOGW_IF(status != NO_ERROR, "%s, returned status=%d", __func__, status);
+    // The internal conversion will convert INVALID_OPERATION to AAUDIO_ERROR_INVALID_STATE.
+    // When INVALID_OPERATION is returned, it indicates the HAL doesn't support playback parameters.
+    // In that case, use a customized map to convert INVALID_OPERATION to
+    // AAUDIO_ERROR_UNIMPLEMENTED.
+    return AAudioConvert_androidToAAudioResult(status, kPlaybackParametersResultMap);
 }
 
 // Get free-running DSP or DMA hardware position from the HAL.
@@ -500,8 +545,25 @@ aaudio_result_t AAudioServiceEndpointMMAP::getFreeRunningPosition(int64_t *posit
     } else if (result != AAUDIO_OK) {
         ALOGE("%s(): getMmapPosition() returned status %d", __func__, status);
     } else {
-        // Convert 32-bit position to 64-bit position.
-        mFramesTransferred.update32(position.position_frames);
+        if (mNeedToCatchUp) {
+            // This only happens for the first position report from HAL. The HAL is supposed to
+            // report the position increasing monotonically. But this may not always be true
+            // especially when the stream is in standby and release the mmap buffer. In that case,
+            // for the first position report, make sure the position is offset correctly as the
+            // hardware is reading from the returned position.
+            const int pos = position.position_frames % getBufferCapacity();
+            // The position reported from the HAL is the where the DSP read position is. The mmap
+            // buffer is a circular buffer. mFramesTransferred is rounded up to multiple times of
+            // buffer capacity when stopping the stream. mFramesTransferred is used to send as the
+            // read position to the client side. In that case, it is needed to increment `pos` so
+            // that it represents the right DSP reading position.
+            mFramesTransferred.increment(pos);
+            mFramesTransferred.set32(position.position_frames);
+            mNeedToCatchUp = false;
+        } else {
+            // Convert 32-bit position to 64-bit position.
+            mFramesTransferred.update32(position.position_frames);
+        }
         *positionFrames = mFramesTransferred.get();
         *timeNanos = position.time_nanoseconds;
     }
@@ -531,10 +593,10 @@ void AAudioServiceEndpointMMAP::handleTearDownAsync(audio_port_handle_t portHand
 void AAudioServiceEndpointMMAP::onTearDown(audio_port_handle_t portHandle) {
     ALOGD("%s(portHandle = %d) called", __func__, portHandle);
     const android::sp<AAudioServiceEndpointMMAP> holdEndpoint(this);
-    std::thread asyncTask([holdEndpoint, portHandle]() {
+    AAudioThread::getAsyncCommandThread().add("EndpointMMAP::onTearDown",
+                                        [holdEndpoint, portHandle]() {
         holdEndpoint->handleTearDownAsync(portHandle);
     });
-    asyncTask.detach();
 }
 
 void AAudioServiceEndpointMMAP::onVolumeChanged(float volume) {
@@ -554,20 +616,33 @@ void AAudioServiceEndpointMMAP::onRoutingChanged(const android::DeviceIdVector& 
           android::toString(getDeviceIds()).c_str());
     if (!android::areDeviceIdsEqual(getDeviceIds(), deviceIds)) {
         if (!getDeviceIds().empty()) {
-            // When there is a routing changed, mmap stream should be disconnected. Set `mConnected`
-            // as false here so that there won't be a new stream connected to this endpoint.
-            mConnected.store(false);
-            const android::sp<AAudioServiceEndpointMMAP> holdEndpoint(this);
-            std::thread asyncTask([holdEndpoint, deviceIds]() {
-                ALOGD("onRoutingChanged() asyncTask launched");
-                // When routing changed, the stream is disconnected and cannot be used except for
-                // closing. In that case, it should be safe to release all registered streams.
-                // This can help release service side resource in case the client doesn't close
-                // the stream after receiving disconnect event.
-                holdEndpoint->releaseRegisteredStreams();
-                holdEndpoint->setDeviceIds(deviceIds);
-            });
-            asyncTask.detach();
+            if (android_media_audio_partial_flush_for_pcm_offload() &&
+                getPerformanceMode() == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED) {
+                // Just set the device ids if the performance mode is power saving offload instead
+                // of release all registered streams as there is nothing particular different for
+                // offload playback when device is changed. The client side will receive a routing
+                // changed callback and notify apps if they register a routing changed callback.
+                // Note for low latency mode, the HAL may be late reporting position which may cause
+                // the client side timeout on reading/writing and get disconnected from the client
+                // side.
+                setDeviceIds(deviceIds);
+            } else {
+                // When there is a routing changed, mmap stream should be disconnected. Set
+                // `mConnected` as false here so that there won't be a new stream connected
+                // to this endpoint.
+                mConnected.store(false);
+                const android::sp<AAudioServiceEndpointMMAP> holdEndpoint(this);
+                AAudioThread::getAsyncCommandThread().add("EndpointMMAP::onRoutingChanged",
+                                                    [holdEndpoint, deviceIds]() {
+                    ALOGD("onRoutingChanged() asyncTask launched");
+                    // When routing changed, the stream is disconnected and cannot be used except
+                    // for closing. In that case, it should be safe to release all registered
+                    // streams. This can help release service side resource in case the client
+                    // doesn't close the stream after receiving disconnect event.
+                    holdEndpoint->releaseRegisteredStreams();
+                    holdEndpoint->setDeviceIds(deviceIds);
+                });
+            }
         } else {
             setDeviceIds(deviceIds);
         }
@@ -586,6 +661,17 @@ void AAudioServiceEndpointMMAP::onWakeUp(android::audio_utils::TimerQueue::handl
     const std::lock_guard<std::mutex> lock(mLockStreams);
     for (const auto& stream : mRegisteredStreams) {
         stream->onWakeUp(handle);
+    }
+    if (mShouldReleaseClientWhenWakeUp) {
+        // When the client is pending to wake up to release, it indicates the client side has
+        // called close and it has gone. It was previously pending to drain all written data.
+        // Here, a thread is spawned to release the stream to avoid dead lock.
+        const android::sp<AAudioServiceEndpointMMAP> holdEndpoint(this);
+        AAudioThread::getAsyncCommandThread().add("EndpointMMAP::onWakeUp",
+                                            [holdEndpoint]() {
+            ALOGD("onWakeUp() asyncTask to release client");
+            holdEndpoint->releaseRegisteredStreams();
+        });
     }
 }
 
@@ -733,6 +819,7 @@ aaudio_result_t AAudioServiceEndpointMMAP::createMmapBuffer_l()
             VALUE_OR_FATAL(legacy2aidl_uid_t_int32_t(getuid()));
         if ((mMmapClient.attributionSource.uid != audioServiceUid) &&
             getSharingMode() == AAUDIO_SHARING_MODE_EXCLUSIVE) {
+            ::close(mMmapBufferinfo.shared_memory_fd);  // must close the fd as no new owner.
             ALOGW("%s() - exclusive FD cannot be used by client", __func__);
             return AAUDIO_ERROR_UNAVAILABLE;
         }
@@ -754,6 +841,8 @@ aaudio_result_t AAudioServiceEndpointMMAP::createMmapBuffer_l()
     mMmapStream->getMmapPosition(&position);
 
     mFramesPerBurst = mMmapBufferinfo.burst_size_frames;
+
+    mFramesTransferred.reset32();
 
     return AAUDIO_OK;
 }

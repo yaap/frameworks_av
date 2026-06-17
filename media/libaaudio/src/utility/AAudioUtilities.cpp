@@ -17,10 +17,10 @@
 #define LOG_TAG "AAudio"
 //#define LOG_NDEBUG 0
 
-#include <assert.h>
-#include <math.h>
-#include <stdint.h>
+#include "AAudioUtilities.h"
 
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
 #include <aaudio/AAudioTesting.h>
 #include <android/media/audio/common/AudioMMapPolicy.h>
 #include <cutils/properties.h>
@@ -28,17 +28,30 @@
 #include <system/audio.h>
 #include <utils/Errors.h>
 #include <utils/Log.h>
+// go/keep-sorted end
 
-#include "aaudio/AAudio.h"
-#include "core/AudioGlobal.h"
-#include "utility/AAudioUtilities.h"
+// go/keep-sorted start
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+// go/keep-sorted end
+
+#include "AudioGlobal.h"
 
 using namespace android;
 
 using android::media::audio::common::AudioMMapPolicy;
 using android::media::audio::common::AudioMMapPolicyInfo;
+using android::media::audio::common::FlushFromFrameAccuracy;
 
-status_t AAudioConvert_aaudioToAndroidStatus(aaudio_result_t result) {
+status_t AAudioConvert_aaudioToAndroidStatus(
+        aaudio_result_t result,
+        const std::map<aaudio_result_t, android::status_t>& customizedMap) {
+    // First check if `result` is in the customized map.
+    if (const auto it = customizedMap.find(result); it != customizedMap.end()) {
+        return it->second;
+    }
+
     // This covers the case for AAUDIO_OK and for positive results.
     if (result >= 0) {
         return result;
@@ -84,7 +97,14 @@ status_t AAudioConvert_aaudioToAndroidStatus(aaudio_result_t result) {
     return status;
 }
 
-aaudio_result_t AAudioConvert_androidToAAudioResult(status_t status) {
+aaudio_result_t AAudioConvert_androidToAAudioResult(
+        status_t status,
+        const std::map<android::status_t, aaudio_result_t>& customizedMap) {
+    // First check if `status` is in the customized map.
+    if (const auto it = customizedMap.find(status); it != customizedMap.end()) {
+        return it->second;
+    }
+
     // This covers the case for OK and for positive result.
     if (status >= 0) {
         return status;
@@ -786,6 +806,12 @@ audio_devices_t AAudioConvert_aaudioToAndroidDeviceType(AAudio_DeviceType device
                 return AUDIO_DEVICE_IN_HDMI_ARC;
             case AAUDIO_DEVICE_HDMI_EARC:
                 return AUDIO_DEVICE_IN_HDMI_EARC;
+            case AAUDIO_DEVICE_BLE_HEARING_AID:
+                return AUDIO_DEVICE_IN_BLE_HEARING_AID;
+            case AAUDIO_DEVICE_BLE_CENTRAL:
+                return AUDIO_DEVICE_IN_BLE_CENTRAL;
+            case AAUDIO_DEVICE_BLE_CENTRAL_BROADCAST:
+                return AUDIO_DEVICE_IN_BLE_CENTRAL_BROADCAST;
             default:
                 break;
         }
@@ -845,6 +871,10 @@ audio_devices_t AAudioConvert_aaudioToAndroidDeviceType(AAudio_DeviceType device
                 return AUDIO_DEVICE_OUT_BLE_SPEAKER;
             case AAUDIO_DEVICE_BLE_BROADCAST:
                 return AUDIO_DEVICE_OUT_BLE_BROADCAST;
+            case AAUDIO_DEVICE_BLE_HEARING_AID:
+                return AUDIO_DEVICE_OUT_BLE_HEARING_AID;
+            case AAUDIO_DEVICE_BLE_CENTRAL:
+                return AUDIO_DEVICE_OUT_BLE_CENTRAL;
             default:
                 break;
         }
@@ -862,6 +892,20 @@ aaudio_policy_t AAudioConvert_androidToAAudioMMapPolicy(AudioMMapPolicy policy) 
         case AudioMMapPolicy::UNSPECIFIED:
         default:
             return AAUDIO_POLICY_NEVER;
+    }
+}
+
+AAudio_FlushFromAccuracy AAudioConvert_androidToAAudioFlushFromAccuracy(
+        FlushFromFrameAccuracy accuracy) {
+    switch (accuracy) {
+        case FlushFromFrameAccuracy::BEST_EFFORT:
+            return AAUDIO_FLUSH_FROM_ACCURACY_UNDEFINED;
+        case FlushFromFrameAccuracy::EXACT:
+            return AAUDIO_FLUSH_FROM_FRAME_ACCURATE;
+        default:
+            ALOGW("%s unrecognized accuracy: %d, convert it to undefined",
+                  __func__, static_cast<int>(accuracy));
+            return AAUDIO_FLUSH_FROM_ACCURACY_UNDEFINED;
     }
 }
 

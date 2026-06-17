@@ -20,28 +20,33 @@
 //#define LOG_NDEBUG 0
 #include <utils/Log.h>
 
+#include "Spatializer.h"
+#include "SpatializerHelper.h"
+
+// go/keep-sorted start
+#include <android/content/AttributionSourceState.h>
+#include <android/sysprop/BluetoothProperties.sysprop.h>
+#include <audio_utils/fixedfft.h>
+#include <audio_utils/threads.h>
+#include <cutils/bitops.h>
+#include <hardware/sensors.h>
+#include <media/MediaMetricsItem.h>
+#include <media/QuaternionUtil.h>
+#include <media/ShmemCompat.h>
+#include <media/stagefright/foundation/AHandler.h>
+#include <media/stagefright/foundation/AMessage.h>
+#include <mediautils/SchedulingPolicyService.h>
+#include <mediautils/ServiceUtilities.h>
+#include <utils/Thread.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
 #include <algorithm>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdint.h>
 #include <sys/types.h>
-
-#include <android/content/AttributionSourceState.h>
-#include <android/sysprop/BluetoothProperties.sysprop.h>
-#include <audio_utils/fixedfft.h>
-#include <cutils/bitops.h>
-#include <hardware/sensors.h>
-#include <media/stagefright/foundation/AHandler.h>
-#include <media/stagefright/foundation/AMessage.h>
-#include <media/MediaMetricsItem.h>
-#include <media/QuaternionUtil.h>
-#include <media/ShmemCompat.h>
-#include <mediautils/SchedulingPolicyService.h>
-#include <mediautils/ServiceUtilities.h>
-#include <utils/Thread.h>
-
-#include "Spatializer.h"
-#include "SpatializerHelper.h"
+// go/keep-sorted end
 
 namespace android {
 
@@ -141,9 +146,16 @@ public:
         // No ALooper method to get the tid so update
         // Spatializer priority on the first message received.
         std::call_once(mPrioritySetFlag, [](){
-            const pid_t pid = getpid();
-            const pid_t tid = gettid();
-            (void)requestSpatializerPriority(pid, tid);
+            const int priority = getSpatializerThreadPriority();
+            if (priority > 0) {
+                const pid_t pid = getpid();
+                const pid_t tid = gettid();
+                const status_t status = requestPriority(pid, tid, priority, false /* isForApp */,
+                        true /*asynchronous*/);
+                ALOGW_IF(status != OK,
+                        "%s: requestPriority (pid=%d, tid=%d) with priority=%d failed "
+                        "with status %d", __func__, pid, tid, priority, status);
+            }
         });
 
         sp<Spatializer> spatializer = mSpatializer.promote();
@@ -528,6 +540,7 @@ status_t Spatializer::registerCallback(
 
 // IBinder::DeathRecipient
 void Spatializer::binderDied(__unused const wp<IBinder> &who) {
+    audio_utils::set_priority_for_binder_callback(__func__);
     {
         audio_utils::lock_guard lock(mMutex);
         mLevel = Spatialization::Level::NONE;
@@ -1172,8 +1185,20 @@ bool Spatializer::containsImmersiveChannelMask(
 }
 
 bool Spatializer::shouldUseHeadTracking_l() const {
-    // Headtracking only available on immersive channel masks.
-    return containsImmersiveChannelMask(mActiveTracksMasks);
+    // Headtracking only available on immersive channel masks or
+    // stereo if enabled by sys prop.
+    if (containsImmersiveChannelMask(mActiveTracksMasks)) {
+        return true;
+    }
+    if (!property_get_bool("ro.audio.stereo_head_tracking_enabled", false)) {
+        return false;
+    }
+    for (auto channelMask : mActiveTracksMasks) {
+        if (audio_channel_mask_contains_stereo(channelMask)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Spatializer::checkEngineState_l() {

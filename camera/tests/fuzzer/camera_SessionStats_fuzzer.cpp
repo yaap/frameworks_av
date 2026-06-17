@@ -84,10 +84,19 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         if (fdp.ConsumeBool()) {
             parcelCamStreamStats.writeInt32(colorSpace);
         }
+        int32_t currentSurfaceId = fdp.ConsumeIntegral<int32_t>();
+        if (fdp.ConsumeBool()) {
+            parcelCamStreamStats.writeInt32(currentSurfaceId);
+        }
+        int32_t mrirMode = fdp.ConsumeIntegral<int32_t>();
+        if (fdp.ConsumeBool()) {
+            parcelCamStreamStats.writeInt32(mrirMode);
+        }
 
         cameraStreamStats = new CameraStreamStats(width, height, format, maxPreviewFps, dataSpace,
                                                   usage, maxHalBuffers, maxAppBuffers,
-                                                  dynamicRangeProfile, streamUseCase, colorSpace);
+                                                  dynamicRangeProfile, streamUseCase, colorSpace,
+                                                  currentSurfaceId, mrirMode);
     }
 
     parcelCamStreamStats.setDataPosition(0);
@@ -135,8 +144,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             parcelCamSessionStats.writeInt64(logId);
         }
 
+        bool sharedMode = fdp.ConsumeIntegral<bool>();
+        if (fdp.ConsumeBool()) {
+            parcelCamSessionStats.writeBool(sharedMode);
+        }
+
+
         cameraSessionStats = new CameraSessionStats(cameraId, facing, newCameraState, clientName,
-                                                    apiLevel, isNdk, latencyMs, logId);
+                                                    apiLevel, isNdk, latencyMs, sharedMode, logId);
     }
 
     if (fdp.ConsumeBool()) {

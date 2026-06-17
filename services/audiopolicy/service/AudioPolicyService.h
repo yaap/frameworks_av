@@ -155,19 +155,19 @@ public:
                                                   int32_t* _aidl_return) override;
     binder::Status getMinVolumeIndexForAttributes(const AudioAttributes& attr,
                                                   int32_t* _aidl_return) override;
-    binder::Status setVolumeIndexForGroup(int32_t groupId, const AudioDeviceDescription& device,
-            int32_t index, bool muted) override;
-    binder::Status getVolumeIndexForGroup(int32_t groupId, const AudioDeviceDescription& device,
-        int32_t* _aidl_return) override;
     binder::Status getMaxVolumeIndexForGroup(int32_t groupId, int32_t* _aidl_return) override;
     binder::Status setMaxVolumeIndexForGroup(int32_t groupId, int32_t index) override;
     binder::Status getMinVolumeIndexForGroup(int32_t groupId, int32_t* _aidl_return) override;
     binder::Status setMinVolumeIndexForGroup(int32_t groupId, int32_t index) override;
-    binder::Status getStrategyForStream(AudioStreamType stream,
+
+    binder::Status setVolumeIndexForGroup(int32_t groupId, int32_t uid,
+            const AudioDeviceDescription& device, int32_t index, bool muted) override;
+    binder::Status getVolumeIndexForGroup(int32_t groupId, const AudioDeviceDescription& device,
+            int32_t* _aidl_return) override;
+    binder::Status getStrategyForStream(AudioStreamType stream, int32_t uid,
                                         int32_t* _aidl_return) override;
     binder::Status getDevicesForAttributes(const AudioAttributes& attr,
-                                           bool forVolume,
-                                           std::vector<AudioDevice>* _aidl_return) override;
+            int32_t uid, bool forVolume, std::vector<AudioDevice>* _aidl_return) override;
     binder::Status getOutputForEffect(const media::EffectDescriptor& desc,
                                       int32_t* _aidl_return) override;
     binder::Status registerEffect(const media::EffectDescriptor& desc, int32_t io, int32_t strategy,
@@ -203,7 +203,7 @@ public:
                                            const AudioAttributes& attributes,
                                            bool* _aidl_return) override;
     binder::Status listAudioPorts(media::AudioPortRole role, media::AudioPortType type,
-                                  Int* count, std::vector<media::AudioPortFw>* ports,
+                                  std::vector<media::AudioPortFw>* ports,
                                   int32_t* _aidl_return) override;
     binder::Status listDeclaredDevicePorts(media::AudioPortRole role,
                                            std::vector<media::AudioPortFw>* _aidl_return) override;
@@ -212,7 +212,7 @@ public:
     binder::Status createAudioPatch(const media::AudioPatchFw& patch, int32_t handle,
                                     int32_t* _aidl_return) override;
     binder::Status releaseAudioPatch(int32_t handle) override;
-    binder::Status listAudioPatches(Int* count, std::vector<media::AudioPatchFw>* patches,
+    binder::Status listAudioPatches(std::vector<media::AudioPatchFw>* patches,
                                     int32_t* _aidl_return) override;
     binder::Status setAudioPortConfig(const media::AudioPortConfigFw& config) override;
     binder::Status registerClient(const sp<media::IAudioPolicyServiceClient>& client) override;
@@ -268,6 +268,8 @@ public:
             const AudioAttributes& aa,
             bool fallbackOnDefault,
             int32_t* _aidl_return) override;
+    binder::Status setProductStrategiesZoneIdForUserId(int32_t userId, int32_t zoneId) override;
+    binder::Status resetProductStrategiesZoneIdForUserId(int32_t userId) override;
     binder::Status listAudioVolumeGroups(
             std::vector<media::AudioVolumeGroup>* _aidl_return) override;
     binder::Status getVolumeGroupFromAudioAttributes(
@@ -316,14 +318,13 @@ public:
             const std::optional<AudioConfig>& config,
             const std::vector<AudioDevice>& devices,
             bool* _aidl_return) override;
+    binder::Status getDirectPlaybackSupport(
+            const AudioAttributes& attr, int32_t uid,
+            const AudioConfig& config, media::AudioDirectMode* _aidl_return) override;
 
-    binder::Status getDirectPlaybackSupport(const AudioAttributes& attr,
-                                            const AudioConfig& config,
-                                            media::AudioDirectMode* _aidl_return) override;
-
-    binder::Status getDirectProfilesForAttributes(const AudioAttributes& attr,
-                        std::vector<media::audio::common::AudioProfile>* _aidl_return) override;
-
+    binder::Status getDirectProfilesForAttributes(
+            const AudioAttributes& attr, int32_t uid,
+            std::vector<media::audio::common::AudioProfile>* _aidl_return) override;
     binder::Status getSupportedMixerAttributes(
             int32_t portId,
             std::vector<media::AudioMixerAttributesInternal>* _aidl_return) override;
@@ -335,6 +336,7 @@ public:
     binder::Status getPreferredMixerAttributes(
             const AudioAttributes& attr,
             int32_t portId,
+            int32_t uid,
             std::optional<media::AudioMixerAttributesInternal>* _aidl_return) override;
     binder::Status clearPreferredMixerAttributes(const AudioAttributes& attr,
                                                  int32_t portId,
@@ -352,13 +354,22 @@ public:
             AudioMMapPolicyType policyType,
             AudioMMapPolicyInfo* policyInfo) override;
 
-    binder::Status setEnableHardening(bool shouldEnable) override;
+    binder::Status setHardeningOverride(HardeningOverride hardeningOverride) override;
+
+    binder::Status getFlushFromFrameSupport(
+            const AudioConfigBase& config,
+            const AudioAttributes& attributes,
+            int32_t uid,
+            int32_t flags,
+            android::media::audio::common::FlushFromFrameSupport* _aidl_return) override;
+
+    binder::Status useMmapForPcmOffload(bool* _aidl_return) override;
 
     status_t onTransact(uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags) override;
 
     // -- IAudioPolicyLocal methods
     const IPermissionProvider& getPermissionProvider() const override;
-    bool isHardeningOverrideEnabled() const override { return mShouldEnableHardening.load(); };
+    HardeningOverride getHardeningOverride() const override { return mHardeningOverride.load(); };
 
     // IBinder::DeathRecipient
     virtual     void        binderDied(const wp<IBinder>& who);
@@ -662,7 +673,7 @@ private:
                     void        releaseOutputCommand(audio_port_handle_t portId);
                     status_t    forceReleaseDirectOutputCommand(audio_io_handle_t outputId);
                     status_t    sendCommand(sp<AudioCommand>& command, int delayMs = 0);
-                    void        insertCommand_l(sp<AudioCommand>& command, int delayMs = 0);
+                    nsecs_t     insertCommand_l(sp<AudioCommand>& command, int delayMs = 0);
                     status_t    createAudioPatchCommand(const struct audio_patch *patch,
                                                         audio_patch_handle_t *handle,
                                                         int delayMs);
@@ -694,7 +705,7 @@ private:
                     void        updateActiveSpatializerTracksCommand();
                     void        volRangeInitReqCommand();
 
-                    void        insertCommand_l(AudioCommand *command, int delayMs = 0);
+                    nsecs_t     insertCommand_l(AudioCommand *command, int delayMs = 0);
     private:
         class AudioCommandData;
 
@@ -702,18 +713,18 @@ private:
         class AudioCommand: public RefBase {
 
         public:
-            AudioCommand()
-            : mCommand(-1), mStatus(NO_ERROR), mWaitStatus(false) {}
+            AudioCommand(int command, bool waitStatus, sp<AudioCommandData> param)
+            : mCommand(command), mStatus(NO_ERROR), mWaitStatus(waitStatus), mParam(param) {}
 
-            void dump(char* buffer, size_t size);
+            void dump(char* buffer, size_t size) const;
 
-            int mCommand;   // SET_VOLUME, SET_PARAMETERS...
+            const int mCommand;   // SET_VOLUME, SET_PARAMETERS...
             nsecs_t mTime;  // time stamp
-            audio_utils::mutex mMutex{audio_utils::MutexOrder::kAudioCommand_Mutex};
-            audio_utils::condition_variable mCond; // condition for status return
-            status_t mStatus; // command status
-            bool mWaitStatus; // true if caller is waiting for status
-            sp<AudioCommandData> mParam;     // command specific parameter data
+            mutable audio_utils::mutex mMutex{audio_utils::MutexOrder::kAudioCommand_Mutex};
+            mutable audio_utils::condition_variable mCond; // condition for status return
+            status_t mStatus GUARDED_BY(mMutex); // command status
+            bool mWaitStatus GUARDED_BY(mMutex); // true if caller is waiting for status
+            const sp<AudioCommandData> mParam;     // command specific parameter data
         };
 
         class AudioCommandData: public RefBase {
@@ -981,6 +992,11 @@ private:
         error::BinderResult<bool> checkPermissionForInput(const AttributionSourceState& attr,
                 const PermissionReqs& req) override;
 
+        status_t getFlushFromFrameSupport(
+                audio_module_handle_t module,
+                const media::audio::common::AudioPortConfig& config,
+                media::audio::common::FlushFromFrameSupport* support) const override;
+
      private:
         AudioPolicyService *mAudioPolicyService;
     };
@@ -1159,7 +1175,8 @@ private:
     DestroyAudioPolicyManagerInstance mDestroyAudioPolicyManager;
     std::unique_ptr<media::UsecaseValidator> mUsecaseValidator;
     const sp<NativePermissionController> mPermissionController;
-    std::atomic<bool> mShouldEnableHardening;
+    std::atomic<IAudioPolicyService::HardeningOverride> mHardeningOverride{
+            IAudioPolicyService::HardeningOverride::DEFAULT};
 };
 
 } // namespace android

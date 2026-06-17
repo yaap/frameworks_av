@@ -19,6 +19,7 @@
 
 #include <utils/RefBase.h>
 #include <gui/Surface.h>
+#include <vector>
 
 #include "Camera3Stream.h"
 
@@ -37,7 +38,8 @@ class Camera3IOStreamBase :
             android_dataspace dataSpace, camera_stream_rotation_t rotation,
             const std::string& physicalCameraId,
             const std::unordered_set<int32_t> &sensorPixelModesUsed,
-            int setId = CAMERA3_STREAM_SET_ID_INVALID, bool isMultiResolution = false,
+            int setId = CAMERA3_STREAM_SET_ID_INVALID,
+            int multiResMode = OutputConfiguration::MULTI_RES_OFF,
             int64_t dynamicProfile = ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
             int64_t streamUseCase = ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
             bool deviceTimeBaseIsRealtime = false,
@@ -81,7 +83,7 @@ class Camera3IOStreamBase :
             nsecs_t timestamp,
             nsecs_t readoutTimestamp,
             bool output,
-            int32_t transform,
+            const std::vector<int32_t>& transforms = std::vector<int32_t>(),
             const std::vector<size_t>& surface_ids = std::vector<size_t>());
 
     virtual status_t returnBufferCheckedLocked(
@@ -89,7 +91,7 @@ class Camera3IOStreamBase :
             nsecs_t timestamp,
             nsecs_t readoutTimestamp,
             bool output,
-            int32_t transform,
+            const std::vector<int32_t>& transforms,
             const std::vector<size_t>& surface_ids,
             /*out*/
             sp<Fence> *releaseFenceOut) = 0;
@@ -110,13 +112,15 @@ class Camera3IOStreamBase :
 
     virtual status_t getEndpointUsage(uint64_t *usage) = 0;
 
+    virtual nsecs_t getTimestampOffset() const { return 0; }
+
     status_t getBufferPreconditionCheckLocked() const;
     status_t returnBufferPreconditionCheckLocked() const;
 
     // State check only
     virtual status_t configureQueueLocked();
     // State checks only
-    virtual status_t disconnectLocked();
+    virtual status_t disconnectLocked(bool force = false);
 
     // Hand out the buffer to a native location,
     //   incrementing the internal refcount and dequeued buffer count

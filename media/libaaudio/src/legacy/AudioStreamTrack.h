@@ -17,16 +17,20 @@
 #ifndef LEGACY_AUDIO_STREAM_TRACK_H
 #define LEGACY_AUDIO_STREAM_TRACK_H
 
-#include <math.h>
-#include <media/TrackPlayerBase.h>
-#include <media/AudioTrack.h>
+// go/keep-sorted start
 #include <aaudio/AAudio.h>
+#include <core/AudioStream.h>
+#include <media/AudioTrack.h>
+#include <media/TrackPlayerBase.h>
+#include <utility/FixedBlockReader.h>
+// go/keep-sorted end
 
-#include "AudioStreamBuilder.h"
-#include "AudioStream.h"
-#include "legacy/AAudioLegacy.h"
-#include "legacy/AudioStreamLegacy.h"
-#include "utility/FixedBlockReader.h"
+#include <math.h>
+
+// go/keep-sorted start
+#include "AAudioLegacy.h"
+#include "AudioStreamLegacy.h"
+// go/keep-sorted end
 
 namespace aaudio {
 
@@ -40,7 +44,7 @@ public:
     virtual ~AudioStreamTrack();
 
 
-    aaudio_result_t open(const AudioStreamBuilder & builder) override;
+    aaudio_result_t open(const AAudioStreamOpenRequest& openRequest) override;
     aaudio_result_t release_l() REQUIRES(mStreamMutex) override;
     void close_l() REQUIRES(mStreamMutex) override;
 

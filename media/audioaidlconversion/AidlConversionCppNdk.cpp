@@ -195,6 +195,14 @@ ConversionResult<int32_t> legacy2aidl_uid_t_int32_t(uid_t legacy) {
     return convertReinterpret<int32_t>(legacy);
 }
 
+ConversionResult<userid_t> aidl2legacy_int32_t_userid_t(int32_t aidl) {
+    return convertReinterpret<userid_t>(aidl);
+}
+
+ConversionResult<int32_t> legacy2aidl_userid_t_int32_t(userid_t legacy) {
+    return convertReinterpret<int32_t>(legacy);
+}
+
 ConversionResult<String16> aidl2legacy_string_view_String16(std::string_view aidl) {
     return String16(aidl.data(), aidl.size());
 }
@@ -512,8 +520,12 @@ const detail::AudioDevicePairs& getAudioDevicePairs() {
             {
                 AUDIO_DEVICE_IN_ECHO_REFERENCE, make_AudioDeviceDescription(
                         AudioDeviceType::IN_ECHO_REFERENCE)
-            }
-        }};
+            },
+            {
+                AUDIO_DEVICE_IN_BLE_CENTRAL_BROADCAST, make_AudioDeviceDescription(
+                        AudioDeviceType::IN_CENTRAL_BROADCAST_DEVICE,
+                        GET_DEVICE_DESC_CONNECTION(BT_LE))
+            }       }};
         append_AudioDeviceDescription(pairs,
                 AUDIO_DEVICE_IN_DEFAULT, AUDIO_DEVICE_OUT_DEFAULT,
                 AudioDeviceType::IN_DEFAULT, AudioDeviceType::OUT_DEFAULT);
@@ -588,10 +600,17 @@ const detail::AudioDevicePairs& getAudioDevicePairs() {
                 AudioDeviceType::IN_HEADSET, AudioDeviceType::OUT_HEADSET,
                 GET_DEVICE_DESC_CONNECTION(BT_LE));
         append_AudioDeviceDescription(pairs,
+                AUDIO_DEVICE_IN_BLE_HEARING_AID, AUDIO_DEVICE_OUT_BLE_HEARING_AID,
+                AudioDeviceType::IN_HEARING_AID, AudioDeviceType::OUT_HEARING_AID,
+                GET_DEVICE_DESC_CONNECTION(BT_LE));
+        append_AudioDeviceDescription(pairs,
                 AUDIO_DEVICE_IN_REMOTE_SUBMIX, AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
                 AudioDeviceType::IN_SUBMIX, AudioDeviceType::OUT_SUBMIX,
                 GET_DEVICE_DESC_CONNECTION(VIRTUAL));
-
+        append_AudioDeviceDescription(pairs,
+                AUDIO_DEVICE_IN_BLE_CENTRAL, AUDIO_DEVICE_OUT_BLE_CENTRAL,
+                AudioDeviceType::IN_CENTRAL_DEVICE, AudioDeviceType::OUT_CENTRAL_DEVICE,
+                GET_DEVICE_DESC_CONNECTION(BT_LE));
         return pairs;
     }();
     return pairs;
@@ -841,6 +860,9 @@ const detail::AudioFormatPairs& getAudioFormatPairs() {
             {// Note: not in the IANA registry.
              AUDIO_FORMAT_IAMF_BASE_ENHANCED_PCM, make_AudioFormatDescription(
                     std::string(::android::MEDIA_MIMETYPE_AUDIO_IAMF) + ".base_enhanced.pcm")},
+            {// Note: not in the IANA registry.
+             AUDIO_FORMAT_APTX_ADAPTIVE_PLUS,
+             make_AudioFormatDescription("audio/vnd.qcom.aptx.plus")},
     }};
     return pairs;
 }
@@ -948,6 +970,30 @@ ConversionResult<audio_channel_mask_t> aidl2legacy_AudioChannelLayout_audio_chan
             return unexpected(BAD_VALUE);
         case Tag::voiceMask:
             return convert(aidl, mVoice, __func__, "voice");
+        case Tag::acnMask: {
+            using Ambisonics = AudioChannelLayout::Ambisonics;
+            const auto& acn = aidl.get<Tag::acnMask>();
+            if (int32_t channelCount = acn & AudioChannelLayout::ACN_CHANNEL_COUNT_BIT_MASK;
+                    channelCount >= Ambisonics::MIN_CHANNEL_COUNT &&
+                    channelCount <= Ambisonics::MAX_CHANNEL_COUNT) {
+                audio_channel_mask_t mask = audio_channel_mask_from_representation_and_bits(
+                        AUDIO_CHANNEL_REPRESENTATION_ACN, channelCount);
+                const int32_t layout = (acn & AudioChannelLayout::ACN_SOURCE_LAYOUT_BIT_MASK)
+                        >> AudioChannelLayout::ACN_SOURCE_LAYOUT_BIT_SHIFT;
+                if (layout == static_cast<int32_t>(
+                                AudioChannelLayout::Ambisonics::SourceLayout::HORIZONTAL)) {
+                    mask = (audio_channel_mask_t)(mask | AUDIO_ACN_HORIZONTAL);
+                }
+                if (audio_acn_channel_mask_is_supported(mask)) {
+                    return mask;
+                }
+                ALOGE("%s: acnMask %s is not supported", __func__, aidl.toString().c_str());
+                return unexpected(BAD_VALUE);
+            } else {
+                ALOGE("%s: invalid channel count in %s", __func__, aidl.toString().c_str());
+                return unexpected(BAD_VALUE);
+            }
+        }
     }
     ALOGE("%s: unexpected tag value %d", __func__, static_cast<int>(aidl.getTag()));
     return unexpected(BAD_VALUE);
@@ -1029,6 +1075,26 @@ ConversionResult<AudioChannelLayout> legacy2aidl_audio_channel_mask_t_AudioChann
                     __func__, legacy);
         }
         return unexpected(BAD_VALUE);
+    } else if (repr == AUDIO_CHANNEL_REPRESENTATION_ACN) {
+        using SourceLayout = AudioChannelLayout::Ambisonics::SourceLayout;
+        if (audio_channel_mask_is_valid(legacy) && audio_acn_channel_mask_is_supported(legacy)) {
+            const int32_t channelCount = static_cast<int32_t>(
+                    legacy & AUDIO_ACN_CHANNEL_COUNT_MASK);
+            if ((channelCount & AudioChannelLayout::ACN_CHANNEL_COUNT_BIT_MASK) != channelCount) {
+                ALOGE("%s: legacy audio_channel_mask_t channel count %d is not supported",
+                        __func__, channelCount);
+                return unexpected(BAD_VALUE);
+            }
+            const int32_t layout = static_cast<int32_t>(
+                    (legacy & AUDIO_ACN_HORIZONTAL) == AUDIO_ACN_HORIZONTAL ?
+                    SourceLayout::HORIZONTAL : SourceLayout::FULL_SPHERE)
+                    << AudioChannelLayout::ACN_SOURCE_LAYOUT_BIT_SHIFT;
+            return AudioChannelLayout::make<Tag::acnMask>(channelCount | layout);
+        } else {
+            ALOGE("%s: legacy audio_channel_mask_t value 0x%x is invalid or unsupported",
+                    __func__, legacy);
+            return unexpected(BAD_VALUE);
+        }
     }
 
     ALOGE("%s: unknown representation %d in audio_channel_mask_t value 0x%x",
@@ -1840,6 +1906,10 @@ aidl2legacy_AudioUsage_audio_usage_t(AudioUsage aidl) {
             return AUDIO_USAGE_ANNOUNCEMENT;
         case AudioUsage::SPEAKER_CLEANUP:
             return AUDIO_USAGE_SPEAKER_CLEANUP;
+        case AudioUsage::NOTIFICATION_VIBRATION:
+            return AUDIO_USAGE_NOTIFICATION_VIBRATION;
+        case AudioUsage::RINGTONE_VIBRATION:
+            return AUDIO_USAGE_RINGTONE_VIBRATION;
     }
     return unexpected(BAD_VALUE);
 }
@@ -1893,6 +1963,10 @@ legacy2aidl_audio_usage_t_AudioUsage(audio_usage_t legacy) {
             return AudioUsage::ANNOUNCEMENT;
         case AUDIO_USAGE_SPEAKER_CLEANUP:
             return AudioUsage::SPEAKER_CLEANUP;
+        case AUDIO_USAGE_NOTIFICATION_VIBRATION:
+            return AudioUsage::NOTIFICATION_VIBRATION;
+        case AUDIO_USAGE_RINGTONE_VIBRATION:
+            return AudioUsage::RINGTONE_VIBRATION;
     }
     return unexpected(BAD_VALUE);
 }

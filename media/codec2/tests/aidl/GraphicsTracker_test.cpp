@@ -15,6 +15,7 @@
  */
 //#define LOG_NDEBUG 0
 #define LOG_TAG "GraphicsTracker_test"
+#include <poll.h>
 #include <unistd.h>
 
 #include <android/hardware_buffer.h>
@@ -35,8 +36,9 @@
 #include <C2FenceFactory.h>
 
 #include <atomic>
-#include <memory>
+#include <future>
 #include <iostream>
+#include <memory>
 #include <thread>
 
 using ::aidl::android::hardware::media::c2::implementation::GraphicsTracker;
@@ -50,7 +52,11 @@ using ::android::IGraphicBufferProducer;
 using ::android::IProducerListener;
 using ::android::OK;
 using ::android::sp;
+using ::android::StubSurfaceListener;
 using ::android::Surface;
+using ::android::SurfaceListener;
+using ::android::SurfaceQueueBufferInput;
+using ::android::SurfaceQueueBufferOutput;
 using ::android::wp;
 
 namespace {
@@ -99,11 +105,10 @@ struct TestConsumerListener : public BufferItemConsumer::FrameAvailableListener 
     wp<BufferItemConsumer> mConsumer;
 };
 
-struct TestProducerListener : public android::BnProducerListener {
+struct TestProducerListener : public StubSurfaceListener {
     TestProducerListener(std::shared_ptr<GraphicsTracker> tracker,
-                         std::shared_ptr<BqStatistics> &stat,
-                         uint32_t generation) : BnProducerListener(),
-        mTracker(tracker), mStat(stat), mGeneration(generation) {}
+                         std::shared_ptr<BqStatistics>& stat, uint32_t generation)
+        : StubSurfaceListener(), mTracker(tracker), mStat(stat), mGeneration(generation) {}
     virtual void onBufferReleased() override {
         auto tracker = mTracker.lock();
         if (tracker) {
@@ -112,7 +117,6 @@ struct TestProducerListener : public android::BnProducerListener {
         }
     }
     virtual bool needsReleaseNotify() override { return true; }
-    virtual void onBuffersDiscarded(const std::vector<int32_t>&) override {}
 
     std::weak_ptr<GraphicsTracker> mTracker;
     std::shared_ptr<BqStatistics> mStat;
@@ -228,11 +232,11 @@ public:
                 mBqStat->mDiscarded++;
                 continue;
             }
-            IGraphicBufferProducer::QueueBufferInput input(
-                    0, false,
-                    HAL_DATASPACE_UNKNOWN, android::Rect(0, 0, 1, 1),
-                    NATIVE_WINDOW_SCALING_MODE_FREEZE, 0, Fence::NO_FENCE);
-            IGraphicBufferProducer::QueueBufferOutput output{};
+            SurfaceQueueBufferInput input;
+            input.fence = Fence::NO_FENCE;
+            input.crop = android::Rect(0, 0, 1, 1);
+            input.scalingMode = NATIVE_WINDOW_SCALING_MODE_FREEZE;
+            SurfaceQueueBufferOutput output{};
             c2_status_t res = mTracker->render(
                     blk->share(C2Rect(1, 1), C2Fence()),
                     input, &output);
@@ -259,14 +263,12 @@ protected:
       if (!mTracker) {
           return false;
       }
-      sp<Surface> surface;
-      std::tie(mConsumer, surface) = BufferItemConsumer::create(
+      std::tie(mConsumer, mSurface) = BufferItemConsumer::create(
               kTestUsageFlag, BufferItemConsumer::DEFAULT_MAX_BUFFERS, controlledByApp);
-      mProducer = surface->getIGraphicBufferProducer();
 
       return true;
   }
-  bool configure(sp<IProducerListener> producerListener,
+  bool configure(sp<SurfaceListener> producerListener,
                  sp<BufferItemConsumer::FrameAvailableListener> consumerListener,
                  int maxAcquiredCount = 1) {
       mConsumerListener = consumerListener;
@@ -274,12 +276,10 @@ protected:
       if (mConsumer->setMaxAcquiredBufferCount(maxAcquiredCount) != ::android::NO_ERROR) {
           return false;
       }
-      IGraphicBufferProducer::QueueBufferOutput qbo{};
-      if (mProducer->connect(producerListener, NATIVE_WINDOW_API_MEDIA, true, &qbo) !=
-          ::android::NO_ERROR) {
+      if (mSurface->connect(NATIVE_WINDOW_API_MEDIA, producerListener) != ::android::NO_ERROR) {
           return false;
       }
-      if (mProducer->setDequeueTimeout(0) != ::android::NO_ERROR) {
+      if (mSurface->setDequeueTimeout(0) != ::android::NO_ERROR) {
           return false;
       }
       return true;
@@ -293,16 +293,16 @@ protected:
             mTracker->stop();
             mTracker.reset();
         }
-        if (mProducer) {
-            mProducer->disconnect(NATIVE_WINDOW_API_MEDIA);
+        if (mSurface) {
+            mSurface->disconnect(NATIVE_WINDOW_API_MEDIA);
         }
-        mProducer.clear();
+        mSurface.clear();
         mConsumer.clear();
     }
 
 protected:
     std::shared_ptr<BqStatistics> mBqStat = std::make_shared<BqStatistics>();
-    sp<IGraphicBufferProducer> mProducer;
+    sp<Surface> mSurface;
     sp<BufferItemConsumer> mConsumer;
     sp<BufferItemConsumer::FrameAvailableListener> mConsumerListener;
     std::shared_ptr<GraphicsTracker> mTracker;
@@ -317,8 +317,8 @@ TEST_F(GraphicsTrackerTest, AllocateAndBlockedTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new DummyConsumerListener()));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
-    c2_status_t ret = mTracker->configureGraphics(mProducer, generation);
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
+    c2_status_t ret = mTracker->configureGraphics(mSurface, generation);
     ASSERT_EQ(C2_OK, ret);
     ASSERT_EQ(maxDequeueCount, mTracker->getCurDequeueable());
 
@@ -357,8 +357,8 @@ TEST_F(GraphicsTrackerTest, AllocateAndDeallocateTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new DummyConsumerListener()));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
-    c2_status_t ret = mTracker->configureGraphics(mProducer, generation);
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
+    c2_status_t ret = mTracker->configureGraphics(mSurface, generation);
     ASSERT_EQ(C2_OK, ret);
 
     ASSERT_EQ(maxDequeueCount, mTracker->getCurDequeueable());
@@ -400,8 +400,8 @@ TEST_F(GraphicsTrackerTest, DropAndReleaseTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new DummyConsumerListener()));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
-    c2_status_t ret = mTracker->configureGraphics(mProducer, generation);
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
+    c2_status_t ret = mTracker->configureGraphics(mSurface, generation);
     ASSERT_EQ(C2_OK, ret);
 
     ASSERT_EQ(maxDequeueCount, mTracker->getCurDequeueable());
@@ -454,9 +454,9 @@ TEST_F(GraphicsTrackerTest, RenderTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new TestConsumerListener(mConsumer), 1));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
 
-    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mProducer, generation));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
     ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(maxDequeueCount));
 
     int waitFd = -1;
@@ -515,9 +515,9 @@ TEST_F(GraphicsTrackerTest, StopAndWaitTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new TestConsumerListener(mConsumer), 1));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
 
-    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mProducer, generation));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
     ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(maxDequeueCount));
 
     int waitFd = -1;
@@ -559,9 +559,9 @@ TEST_F(GraphicsTrackerTest, SurfaceChangeTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new TestConsumerListener(mConsumer), 1));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
 
-    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mProducer, generation));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
     ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(maxDequeueCount));
 
     int waitFd = -1;
@@ -605,26 +605,24 @@ TEST_F(GraphicsTrackerTest, SurfaceChangeTest) {
     ASSERT_EQ(numAlloc, firstPassAlloc);
 
     // switching surface
-    sp<IGraphicBufferProducer> oldProducer = mProducer;
+    sp<Surface> oldSurface = mSurface;
     sp<BufferItemConsumer> oldConsumer = mConsumer;
     sp<BufferItemConsumer::FrameAvailableListener> oldConsumerListener = mConsumerListener;
-    mProducer.clear();
+    mSurface.clear();
     mConsumer.clear();
-    sp<Surface> surface;
-    std::tie(mConsumer, surface) = BufferItemConsumer::create(
+    std::tie(mConsumer, mSurface) = BufferItemConsumer::create(
             kTestUsageFlag, BufferItemConsumer::DEFAULT_MAX_BUFFERS, /*controlledByApp=*/false);
-    mProducer = surface->getIGraphicBufferProducer();
 
     generation += 1;
 
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new TestConsumerListener(mConsumer), 1));
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
-    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mProducer, generation));
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
     ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(maxDequeueCount));
 
-    ASSERT_EQ(OK, oldProducer->disconnect(NATIVE_WINDOW_API_MEDIA));
-    oldProducer.clear();
+    ASSERT_EQ(OK, oldSurface->disconnect(NATIVE_WINDOW_API_MEDIA));
+    oldSurface.clear();
     oldConsumer.clear();
 
     for (int i = firstPassRender ; i < firstPassAlloc; ++i) {
@@ -696,8 +694,8 @@ TEST_F(GraphicsTrackerTest, maxDequeueIncreaseTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new TestConsumerListener(mConsumer), 1));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
-    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mProducer, generation));
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
 
     int waitFd = -1;
     ASSERT_EQ(C2_OK, mTracker->getWaitableFd(&waitFd));
@@ -763,8 +761,8 @@ TEST_F(GraphicsTrackerTest, maxDequeueDecreaseTest) {
     ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
                           new TestConsumerListener(mConsumer), 1));
 
-    ASSERT_EQ(OK, mProducer->setGenerationNumber(generation));
-    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mProducer, generation));
+    ASSERT_EQ(OK, mSurface->setGenerationNumber(generation));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
 
     int waitFd = -1;
     ASSERT_EQ(C2_OK, mTracker->getWaitableFd(&waitFd));
@@ -817,4 +815,415 @@ TEST_F(GraphicsTrackerTest, maxDequeueDecreaseTest) {
     ASSERT_EQ(C2_OK, waitFence.wait(1000000000));
     ASSERT_EQ(C2_OK, mTracker->allocate( 0, 0, 0, kTestUsageFlag, &buf, &fence));
     mBqStat->mDequeued++;
+}
+
+TEST_F(GraphicsTrackerTest, DirectAllocationTest) {
+    int maxDequeueCount = 10;
+    mTracker = GraphicsTracker::CreateGraphicsTracker(maxDequeueCount);
+    ASSERT_NE(nullptr, mTracker);
+
+    // Configure with null IGBP for direct allocation
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(nullptr, 1));
+
+    AHardwareBuffer* buf;
+    sp<Fence> fence;
+    uint64_t bid;
+
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        // Direct allocation
+        ASSERT_EQ(C2_OK, mTracker->allocate(640, 480, HAL_PIXEL_FORMAT_RGBA_8888, kTestUsageFlag,
+                                            &buf, &fence));
+        ASSERT_NE(nullptr, buf);
+        ASSERT_EQ(OK, AHardwareBuffer_getId(buf, &bid));
+
+        // Render should fail because there is no surface
+        // Note: requestRender() on a null surface (direct allocation mode) actively removes
+        // the buffer from tracking (reclaims it) and returns C2_BAD_STATE.
+        std::shared_ptr<C2GraphicBlock> blk = _C2BlockFactory::CreateGraphicBlock(buf);
+        SurfaceQueueBufferInput input;
+        input.transform = 0;
+        input.dataSpace = HAL_DATASPACE_UNKNOWN;
+        input.crop = android::Rect(0, 0, 1, 1);
+        input.scalingMode = NATIVE_WINDOW_SCALING_MODE_FREEZE;
+        input.timestamp = 0;
+        input.fence = Fence::NO_FENCE;
+        SurfaceQueueBufferOutput output{};
+        ASSERT_EQ(C2_BAD_STATE,
+                  mTracker->render(blk->share(C2Rect(640, 480), C2Fence()), input, &output));
+
+        // Buffer should be already removed from tracking by render()
+        ASSERT_EQ(maxDequeueCount, mTracker->getCurDequeueable());
+        ASSERT_EQ(C2_NOT_FOUND, mTracker->deallocate(bid, Fence::NO_FENCE));
+
+        AHardwareBuffer_release(buf);
+    }
+}
+
+TEST_F(GraphicsTrackerTest, ConfigureSameGenerationTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+    // Same generation should fail
+    ASSERT_EQ(C2_BAD_VALUE, mTracker->configureGraphics(mSurface, generation));
+}
+
+TEST_F(GraphicsTrackerTest, MaxDequeueBoundsTest) {
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+
+    ASSERT_EQ(C2_BAD_VALUE, mTracker->configureMaxDequeueCount(0));  // Too small
+    ASSERT_EQ(C2_BAD_VALUE, mTracker->configureMaxDequeueCount(
+                                    ::android::BufferQueueDefs::NUM_BUFFER_SLOTS));  // Too large
+    ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(5));                         // Valid
+}
+
+TEST_F(GraphicsTrackerTest, DeallocateInvalidIdTest) {
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(
+            configure(new TestProducerListener(mTracker, mBqStat, 1), new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, 1));
+
+    uint64_t invalidId = 0xFFFFFFFFFFFFFFFF;
+    ASSERT_EQ(C2_NOT_FOUND, mTracker->deallocate(invalidId, Fence::NO_FENCE));
+}
+
+TEST_F(GraphicsTrackerTest, DoubleDeallocateTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+    AHardwareBuffer* buf;
+    sp<Fence> fence;
+    uint64_t bid;
+
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        ASSERT_EQ(C2_OK, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf, &fence));
+        ASSERT_EQ(OK, AHardwareBuffer_getId(buf, &bid));
+
+        ASSERT_EQ(C2_OK, mTracker->deallocate(bid, Fence::NO_FENCE));
+        ASSERT_EQ(C2_NOT_FOUND, mTracker->deallocate(bid, Fence::NO_FENCE));  // Double free
+
+        AHardwareBuffer_release(buf);
+    }
+}
+
+TEST_F(GraphicsTrackerTest, OnRequestStopTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+    mTracker->onRequestStop();
+
+    // Allocation should still succeed (via PlaceHolderSurface)
+    AHardwareBuffer* buf;
+    sp<Fence> fence;
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        ASSERT_EQ(C2_OK, mTracker->allocate(640, 480, HAL_PIXEL_FORMAT_RGBA_8888, kTestUsageFlag,
+                                            &buf, &fence));
+        ASSERT_NE(nullptr, buf);
+        AHardwareBuffer_release(buf);
+    }
+}
+
+TEST_F(GraphicsTrackerTest, WaitableFdSignalingTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 2;  // Small count to easily exhaust
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+    ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(maxDequeueCount));
+
+    int pipeFd = -1;
+    ASSERT_EQ(C2_OK, mTracker->getWaitableFd(&pipeFd));
+    ASSERT_GE(pipeFd, 0);
+
+    AHardwareBuffer *buf1, *buf2;
+    sp<Fence> fence;
+
+    // Allocate all available buffers
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        ASSERT_EQ(C2_OK, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf1, &fence));
+        ASSERT_EQ(C2_OK, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf2, &fence));
+
+        struct pollfd pfd;
+        pfd.fd = pipeFd;
+        pfd.events = POLLIN;
+        int ret = poll(&pfd, 1, 0);  // Non-blocking check
+        ASSERT_EQ(0, ret);           // Should be 0 (timeout, no data)
+
+        // Deallocate one
+        uint64_t bid;
+        AHardwareBuffer_getId(buf1, &bid);
+        mTracker->deallocate(bid, Fence::NO_FENCE);
+
+        // Now FD SHOULD be readable
+        ret = poll(&pfd, 1, 1000);
+        ASSERT_GT(ret, 0);
+        ASSERT_TRUE(pfd.revents & POLLIN);
+
+        AHardwareBuffer_release(buf1);
+        AHardwareBuffer_release(buf2);
+    }
+    close(pipeFd);
+}
+
+TEST_F(GraphicsTrackerTest, StopIdempotencyTest) {
+    int maxDequeueCount = 10;
+    mTracker = GraphicsTracker::CreateGraphicsTracker(maxDequeueCount);
+    ASSERT_NE(nullptr, mTracker);
+
+    mTracker->stop();
+    mTracker->stop();  // Should not crash
+
+    // Verify allocate fails after stop
+    AHardwareBuffer* buf;
+    sp<Fence> fence;
+    ASSERT_EQ(C2_BAD_STATE, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf, &fence));
+}
+
+TEST_F(GraphicsTrackerTest, PollForRenderedFramesTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+    // Just verify it doesn't crash on valid or empty call
+    android::FrameEventHistoryDelta delta;
+    mTracker->pollForRenderedFrames(&delta);
+}
+
+TEST_F(GraphicsTrackerTest, GarbageCollectionTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 5;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+    AHardwareBuffer* buf = nullptr;
+    sp<Fence> fence;
+    ASSERT_EQ(C2_OK, mTracker->allocate(1, 1, 1, kTestUsageFlag, &buf, &fence));
+    ASSERT_NE(nullptr, buf);
+
+    uint64_t bid = 0;
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        ASSERT_EQ(android::OK, AHardwareBuffer_getId(buf, &bid));
+    } else {
+        GTEST_SKIP() << "AHardwareBuffer_getId not available";
+    }
+
+    sp<GraphicBuffer> gb = android::AHardwareBuffer_to_GraphicBuffer(buf);
+    wp<GraphicBuffer> wgb = gb;
+    gb.clear();
+
+    // Release local reference to AHB
+    AHardwareBuffer_release(buf);
+
+    // Buffer is still in tracker's mDequeued and cache
+    ASSERT_NE(nullptr, wgb.promote());
+
+    // Deallocate: removes from mDequeued, but stays in cache (mBuffers)
+    mTracker->deallocate(bid, Fence::NO_FENCE);
+    ASSERT_NE(nullptr, wgb.promote());
+
+    // Shrink max dequeue count to 1: triggers clearCacheIfNecessaryLocked
+    // which should call onBufferRemoved and erase it from cache.
+    ASSERT_EQ(C2_OK, mTracker->configureMaxDequeueCount(1));
+
+    // Disconnect surface to ensure BufferQueue releases its references
+    mSurface->disconnect(NATIVE_WINDOW_API_MEDIA);
+
+    // Now it should be gone.
+    // Promotion should fail as the last reference (in tracker's cache) is gone.
+    ASSERT_EQ(nullptr, wgb.promote());
+}
+
+TEST_F(GraphicsTrackerTest, OnBufferDetachedDeadlockTest) {
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        uint32_t generation = 1;
+        const int maxDequeueCount = 10;
+        ASSERT_TRUE(init(maxDequeueCount));
+        ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                              new DummyConsumerListener()));
+        ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+        AHardwareBuffer* buf;
+        sp<Fence> fence;
+        uint64_t bid;
+
+        // 1. Allocate a buffer
+        ASSERT_EQ(C2_OK, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf, &fence));
+        ASSERT_EQ(OK, AHardwareBuffer_getId(buf, &bid));
+
+        // 2. Start deallocating it, but don't finish yet.
+        // In the real code, this would block the buffer in the cache.
+        // We can simulate this by calling deallocate which blocks then unblocks.
+        // But to truly test the deadlock, we need Thread A to be in onBufferDetached
+        // waiting for the buffer to be unblocked by Thread B (commitDeallocate).
+
+        // For this test, we rely on the fact that deallocate() calls blockBufferId()
+        // and then commitDeallocate() calls unblockBufferId().
+        // We'll use a deallocate call that we can "pause" or simply run in parallel.
+
+        std::promise<void> readyToDeallocate;
+        std::promise<void> deallocateDone;
+        std::thread deallocateThread([&]() {
+            readyToDeallocate.set_value();
+            mTracker->deallocate(bid, Fence::NO_FENCE);
+            deallocateDone.set_value();
+        });
+
+        readyToDeallocate.get_future().wait();
+
+        // 3. Call onBufferDetached in a separate thread.
+        // This used to hold mLock and call waitOnBufferId, causing deadlock.
+        auto future = std::async(std::launch::async,
+                                 [&]() { mTracker->onBufferDetached(generation, bid); });
+
+        // 4. Verify it doesn't deadlock.
+        auto status = future.wait_for(std::chrono::seconds(2));
+        ASSERT_NE(std::future_status::timeout, status) << "Deadlock detected in onBufferDetached!";
+
+        if (deallocateThread.joinable()) {
+            deallocateThread.join();
+        }
+        AHardwareBuffer_release(buf);
+    }
+}
+
+TEST_F(GraphicsTrackerTest, AllocateUpdatesSurfaceParamsTest) {
+    uint32_t generation = 1;
+    const int maxDequeueCount = 10;
+    ASSERT_TRUE(init(maxDequeueCount));
+    ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                          new DummyConsumerListener()));
+    ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+    uint32_t reqWidth = 320;
+    uint32_t reqHeight = 240;
+    ::android::PixelFormat reqFormat = HAL_PIXEL_FORMAT_RGBA_8888;
+    uint64_t reqUsage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_HW_TEXTURE;
+
+    AHardwareBuffer* buf;
+    sp<Fence> fence;
+
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        // Allocate with specific parameters
+        ASSERT_EQ(C2_OK,
+                  mTracker->allocate(reqWidth, reqHeight, reqFormat, reqUsage, &buf, &fence));
+
+        // Verify the dequeued buffer has the requested parameters
+        AHardwareBuffer_Desc desc;
+        AHardwareBuffer_describe(buf, &desc);
+
+        EXPECT_EQ(reqWidth, desc.width);
+        EXPECT_EQ(reqHeight, desc.height);
+        EXPECT_EQ((uint32_t)reqFormat, desc.format);
+        // usage bits should contain at least what we requested
+        EXPECT_EQ(reqUsage, desc.usage & reqUsage);
+
+        AHardwareBuffer_release(buf);
+    }
+}
+
+TEST_F(GraphicsTrackerTest, OnBuffersRemovedDeadlockTest) {
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        uint32_t generation = 1;
+        const int maxDequeueCount = 10;
+        ASSERT_TRUE(init(maxDequeueCount));
+        ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                              new DummyConsumerListener()));
+        ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+        std::vector<uint64_t> bids;
+        std::vector<AHardwareBuffer*> bufs;
+        for (int i = 0; i < 5; ++i) {
+            AHardwareBuffer* buf;
+            sp<Fence> fence;
+            uint64_t bid;
+            ASSERT_EQ(C2_OK, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf, &fence));
+            ASSERT_EQ(OK, AHardwareBuffer_getId(buf, &bid));
+            bids.push_back(bid);
+            bufs.push_back(buf);
+        }
+
+        // Block all buffers by starting deallocation in parallel
+        std::vector<std::thread> threads;
+        for (uint64_t bid : bids) {
+            threads.emplace_back([&, bid]() { mTracker->deallocate(bid, Fence::NO_FENCE); });
+        }
+
+        // Call onBuffersRemoved - should not deadlock
+        auto future = std::async(std::launch::async,
+                                 [&]() { mTracker->onBuffersRemoved(generation, bids); });
+
+        auto status = future.wait_for(std::chrono::seconds(5));
+        ASSERT_NE(std::future_status::timeout, status) << "Deadlock detected in onBuffersRemoved!";
+
+        for (auto& t : threads) {
+            if (t.joinable()) t.join();
+        }
+        for (auto buf : bufs) {
+            AHardwareBuffer_release(buf);
+        }
+    }
+}
+
+TEST_F(GraphicsTrackerTest, GenerationMigrationRaceTest) {
+    if (__builtin_available(android __ANDROID_API_T__, *)) {
+        uint32_t generation = 1;
+        const int maxDequeueCount = 10;
+        ASSERT_TRUE(init(maxDequeueCount));
+        ASSERT_TRUE(configure(new TestProducerListener(mTracker, mBqStat, generation),
+                              new DummyConsumerListener()));
+        ASSERT_EQ(C2_OK, mTracker->configureGraphics(mSurface, generation));
+
+        AHardwareBuffer* buf;
+        sp<Fence> fence;
+        uint64_t bid;
+
+        ASSERT_EQ(C2_OK, mTracker->allocate(0, 0, 0, kTestUsageFlag, &buf, &fence));
+        ASSERT_EQ(OK, AHardwareBuffer_getId(buf, &bid));
+
+        // Start a deallocate to block the buffer
+        std::thread deallocateThread([&]() { mTracker->deallocate(bid, Fence::NO_FENCE); });
+
+        // Race configureGraphics (which acquires mConfigLock and mLock)
+        // with onBufferDetached (which now releases mLock before blocking).
+        auto futureDetach = std::async(std::launch::async,
+                                       [&]() { mTracker->onBufferDetached(generation, bid); });
+
+        auto futureConfig = std::async(std::launch::async, [&]() {
+            generation++;
+            // Create a new surface for the next generation
+            sp<Surface> newSurface;
+            sp<BufferItemConsumer> newConsumer;
+            std::tie(newConsumer, newSurface) = BufferItemConsumer::create(
+                    kTestUsageFlag, BufferItemConsumer::DEFAULT_MAX_BUFFERS, true);
+            newSurface->connect(NATIVE_WINDOW_API_MEDIA,
+                                new TestProducerListener(mTracker, mBqStat, generation));
+            return mTracker->configureGraphics(newSurface, generation);
+        });
+
+        ASSERT_NE(std::future_status::timeout, futureDetach.wait_for(std::chrono::seconds(5)));
+        ASSERT_NE(std::future_status::timeout, futureConfig.wait_for(std::chrono::seconds(5)));
+        ASSERT_EQ(C2_OK, futureConfig.get());
+
+        if (deallocateThread.joinable()) deallocateThread.join();
+        AHardwareBuffer_release(buf);
+    }
 }

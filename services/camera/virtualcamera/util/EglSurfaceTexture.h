@@ -59,10 +59,13 @@ class EglSurfaceTexture {
   // Returns false on timeout, true if new frame was received before timeout.
   bool waitForNextFrame(std::chrono::nanoseconds timeout);
 
+  // Interrupt any ongoing wait for a new frame.
+  void interruptWait();
+
   void setFrameAvailableListener(const std::function<void()>& listener);
 
   // Update the texture with the most recent submitted buffer.
-  // Most be called on thread with EGL context.
+  // Must be called on thread with EGL context.
   //
   // Returns EGL texture id of the texture.
   GLuint updateTexture();
@@ -80,7 +83,7 @@ class EglSurfaceTexture {
 
   // Retrieves the timestamp associated with the texture image
   // set by the most recent call to updateTexture.
-  std::chrono::nanoseconds getTimestamp();
+  std::chrono::nanoseconds getTimestamp() const;
 
   // Returns true is a frame has ever been drawn on this surface.
   bool isFirstFrameDrawn();
@@ -110,6 +113,7 @@ class EglSurfaceTexture {
   sp<ConsumerBase::FrameAvailableListener> mFrameAvailableListener;
   std::condition_variable mFrameAvailableCondition;
   std::mutex mWaitForFrameMutex;
+  bool mInterruptWait GUARDED_BY(mWaitForFrameMutex) = false;
 };
 
 }  // namespace virtualcamera

@@ -15,24 +15,25 @@
  */
 
 //#define LOG_NDEBUG 0
-#include <utils/Errors.h>
 #define LOG_TAG "CCodecBufferChannel"
 #define ATRACE_TAG  ATRACE_TAG_VIDEO
+#include <utils/Errors.h>
 #include <utils/Log.h>
 #include <utils/Trace.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <list>
 #include <numeric>
 #include <thread>
-#include <chrono>
 #include <regex>
 
 #include <android_media_codec.h>
 #include <android_media_tv_flags.h>
 
 #include <C2AllocatorGralloc.h>
+#include <C2AllocatorGrallocSupport.h>
 #include <C2PlatformSupport.h>
 #include <C2BlockInternal.h>
 #include <C2Config.h>
@@ -40,6 +41,7 @@
 
 #include <android/hardware/cas/native/1.0/IDescrambler.h>
 #include <android/hardware/drm/1.0/types.h>
+#include <android/hidl/memory/1.0/IMemory.h>
 #include <android/sysprop/MediaProperties.sysprop.h>
 #include <android-base/parseint.h>
 #include <android-base/properties.h>
@@ -50,6 +52,7 @@
 #include <cutils/properties.h>
 #include <gui/Surface.h>
 #include <hidlmemory/FrameworkUtils.h>
+#include <hidlmemory/mapping.h>
 #include <media/openmax/OMX_Core.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ALookup.h>
@@ -88,6 +91,8 @@ namespace {
 
 constexpr size_t kSmoothnessFactor = 4;
 
+constexpr uint32_t kSourceMemoryMapSize = 16;
+
 // This is for keeping IGBP's buffer dropping logic in legacy mode other
 // than making it non-blocking. Do not change this value.
 const static size_t kDequeueTimeoutNs = 0;
@@ -123,25 +128,103 @@ static uint32_t convertFlags(uint32_t flags, bool toC2) {
             });
 }
 
-class SurfaceCallbackHandler {
-public:
-    enum callback_type_t {
-        ON_BUFFER_RELEASED = 0,
-        ON_BUFFER_ATTACHED
+std::shared_ptr<C2Info> generateC2EncryptionInfo(CryptoPlugin::Mode mode,
+                                                 const CryptoPlugin::Pattern& pattern,
+                                                 const CryptoPlugin::SubSample* subSamples,
+                                                 size_t numSubSamples) {
+    C2Config::encryption_scheme_t scheme = C2Config::UNENCRYPTED;
+    switch (mode) {
+        case CryptoPlugin::kMode_Unencrypted:
+            scheme = C2Config::UNENCRYPTED;
+            break;
+        case CryptoPlugin::kMode_AES_CTR:
+            scheme = C2Config::AES_CTR;
+            break;
+        case CryptoPlugin::kMode_AES_CBC:
+            scheme = C2Config::AES_CBC;
+            break;
+        case CryptoPlugin::kMode_AES_WV:
+        default:
+            ALOGE("Unexpected mode: %" PRIu32, static_cast<uint32_t>(mode));
+            return nullptr;
+    }
+
+    if (pattern.mSkipBlocks > std::numeric_limits<uint16_t>::max()) {
+        ALOGE("Pattern skip blocks overflows for 16 bits: %" PRIu32, pattern.mSkipBlocks);
+        return nullptr;
+    }
+    if (pattern.mEncryptBlocks > std::numeric_limits<uint16_t>::max()) {
+        ALOGE("Pattern encrypt blocks overflows for 16 bits: %" PRIu32, pattern.mEncryptBlocks);
+        return nullptr;
+    }
+
+    C2EncryptionPatternStruct c2Pattern{
+            .skip = static_cast<uint16_t>(pattern.mSkipBlocks),
+            .crypt = static_cast<uint16_t>(pattern.mEncryptBlocks),
     };
 
-    void post(callback_type_t callback,
-            std::shared_ptr<Codec2Client::Component> component,
-            uint32_t generation) {
-        if (!component) {
-            ALOGW("surface callback psoted for invalid component");
-        }
-        std::shared_ptr<SurfaceCallbackItem> item =
-                std::make_shared<SurfaceCallbackItem>(callback, component, generation);
-        std::unique_lock<std::mutex> lock(mMutex);
-        mItems.emplace_back(std::move(item));
-        mCv.notify_one();
+    if (numSubSamples > 0 && subSamples == nullptr) {
+        ALOGE("sub samples is nullptr but num sub samples is not 0");
+        return nullptr;
     }
+
+    // CCodecBufferChannel doesn't support multiple IVs and keys currently.
+    constexpr uint16_t kSoleKeyIx = 0;
+    std::vector<C2EncryptionSubsampleStruct> c2Subsamples;
+    c2Subsamples.reserve(numSubSamples);
+    for (size_t i = 0; i < numSubSamples; i++) {
+        if (subSamples[i].mNumBytesOfClearData > std::numeric_limits<uint16_t>::max()) {
+            // The app gives a subsample whose clear value is beyond 16 bits value.
+            // Since C2EncryptionSubsampleStruct's clear is uint16_t, we represent
+            // the subsample with two C2EncryptionSubsampleStruct. This utilizes
+            // the Codec2 API specification that, when `vector` is more than the
+            // number of initialization vectors or keys, the
+            // C2EncryptionSubsampleStruct represents the clear content.
+            c2Subsamples.push_back(C2EncryptionSubsampleStruct{
+                    .vector = kSoleKeyIx + 1,
+                    .clear = 0,
+                    .ciphered = subSamples[i].mNumBytesOfClearData,
+            });
+            if (subSamples[i].mNumBytesOfEncryptedData > 0) {
+                c2Subsamples.push_back(C2EncryptionSubsampleStruct{
+                        .vector = kSoleKeyIx,
+                        .clear = 0,
+                        .ciphered = subSamples[i].mNumBytesOfEncryptedData,
+                });
+            }
+        } else {
+            c2Subsamples.push_back(C2EncryptionSubsampleStruct{
+                    .vector = kSoleKeyIx,
+                    .clear = static_cast<uint16_t>(subSamples[i].mNumBytesOfClearData),
+                    .ciphered = subSamples[i].mNumBytesOfEncryptedData,
+            });
+        }
+    }
+
+    return C2StreamEncryptionInfo::input::AllocShared(c2Subsamples.size(), 0, scheme, c2Pattern,
+                                                      c2Subsamples);
+}
+
+class SurfaceCallbackHandler {
+public:
+  enum callback_type_t {
+      ON_BUFFER_RELEASED = 0,
+      ON_BUFFER_ATTACHED,
+      ON_BUFFER_DETACHED,
+      ON_BUFFERS_REMOVED,
+  };
+
+  void post(callback_type_t callback, std::shared_ptr<Codec2Client::Component> component,
+            uint32_t generation, const std::vector<uint64_t>& removedBufferIds = {}) {
+      if (!component) {
+          ALOGW("surface callback psoted for invalid component");
+      }
+      std::shared_ptr<SurfaceCallbackItem> item = std::make_shared<SurfaceCallbackItem>(
+              callback, component, generation, removedBufferIds);
+      std::unique_lock<std::mutex> lock(mMutex);
+      mItems.emplace_back(std::move(item));
+      mCv.notify_one();
+  }
 
     ~SurfaceCallbackHandler() {
         {
@@ -164,12 +247,14 @@ private:
         callback_type_t mCallback;
         std::weak_ptr<Codec2Client::Component> mComp;
         uint32_t mGeneration;
+        std::vector<uint64_t> mRemovedBufferIds;
 
-        SurfaceCallbackItem(
-                callback_type_t callback,
-                std::shared_ptr<Codec2Client::Component> comp,
-                uint32_t generation)
-                : mCallback(callback), mComp(comp), mGeneration(generation) {}
+        SurfaceCallbackItem(callback_type_t callback, std::shared_ptr<Codec2Client::Component> comp,
+                            uint32_t generation, const std::vector<uint64_t>& removedBufferIds)
+            : mCallback(callback),
+              mComp(comp),
+              mGeneration(generation),
+              mRemovedBufferIds(removedBufferIds) {}
     };
 
     SurfaceCallbackHandler() { mThread = std::thread(&SurfaceCallbackHandler::run, this); }
@@ -204,6 +289,22 @@ private:
                     std::shared_ptr<Codec2Client::Component> comp = item->mComp.lock();
                     if (comp) {
                         comp->onBufferAttachedToOutputSurface(item->mGeneration);
+                    }
+                    break;
+                }
+                case ON_BUFFER_DETACHED: {
+                    std::shared_ptr<Codec2Client::Component> comp = item->mComp.lock();
+                    if (comp) {
+                        comp->onBufferDetachedFromOutputSurface(item->mGeneration,
+                                                                item->mRemovedBufferIds[0]);
+                    }
+                    break;
+                }
+                case ON_BUFFERS_REMOVED: {
+                    std::shared_ptr<Codec2Client::Component> comp = item->mComp.lock();
+                    if (comp) {
+                        comp->onBuffersRemovedFromOutputSurface(item->mGeneration,
+                                                                item->mRemovedBufferIds);
                     }
                     break;
                 }
@@ -286,9 +387,9 @@ CCodecBufferChannel::Input::Input() : extraBuffers("extra") {}
 
 // CCodecBufferChannel
 
-CCodecBufferChannel::CCodecBufferChannel(
-        const std::shared_ptr<CCodecCallback> &callback)
+CCodecBufferChannel::CCodecBufferChannel(const std::shared_ptr<CCodecCallback>& callback)
     : mHeapSeqNum(-1),
+      mSourceMemoryMap(kSourceMemoryMapSize),
       mCCodecCallback(callback),
       mFrameIndex(0u),
       mFirstValidFrameIndex(0u),
@@ -300,7 +401,9 @@ CCodecBufferChannel::CCodecBufferChannel(
       mInputMetEos(false),
       mLastInputBufferAvailableTs(0u),
       mIsHWDecoder(false),
-      mSendEncryptedInfoBuffer(false) {
+      mSendEncryptedInfoBuffer(false),
+      mSendEncryptionInfo(false),
+      mSendEncryptionKeyHandle(false) {
     {
         Mutexed<Input>::Locked input(mInput);
         input->buffers.reset(new DummyInputBuffers(""));
@@ -374,9 +477,8 @@ status_t CCodecBufferChannel::signalEndOfInputStream() {
 }
 
 status_t CCodecBufferChannel::queueInputBufferInternal(
-        sp<MediaCodecBuffer> buffer,
-        std::shared_ptr<C2LinearBlock> encryptedBlock,
-        size_t blockSize) {
+        sp<MediaCodecBuffer> buffer, std::shared_ptr<C2LinearBlock> encryptedBlock,
+        std::vector<std::shared_ptr<C2Info>> c2Infos, size_t blockSize) {
     int64_t timeUs;
     CHECK(buffer->meta()->findInt64("timeUs", &timeUs));
 
@@ -483,6 +585,11 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
                                 multipleAccessUnitInfos.size(), 0u, multipleAccessUnitInfos);
                 c2buffer->setInfo(c2AccessUnitInfos);
             }
+
+            for (std::shared_ptr<C2Info> c2Info : c2Infos) {
+                c2buffer->setInfo(std::move(c2Info));
+            }
+
             work->input.buffers.push_back(c2buffer);
             if (encryptedBlock) {
                 work->input.infoBuffers.emplace_back(C2InfoBuffer::CreateLinearBuffer(
@@ -629,6 +736,18 @@ int32_t CCodecBufferChannel::getHeapSeqNum(const sp<HidlMemory> &memory) {
     return heapSeqNum;
 }
 
+sp<android::hidl::memory::V1_0::IMemory> CCodecBufferChannel::getSourceIMemory(
+        const sp<hardware::HidlMemory>& memory) {
+    if (mSourceMemoryMap.contains(memory)) {
+        return mSourceMemoryMap.get(memory);
+    }
+    sp<android::hidl::memory::V1_0::IMemory> im = hardware::mapMemory(*memory);
+    if (im) {
+        mSourceMemoryMap.put(memory, im);
+    }
+    return im;
+}
+
 typedef WrapperObject<std::vector<AccessUnitInfo>> BufferInfosWrapper;
 typedef WrapperObject<std::vector<std::unique_ptr<CodecCryptoInfo>>> CryptoInfosWrapper;
 status_t CCodecBufferChannel::attachEncryptedBuffers(
@@ -754,6 +873,51 @@ status_t CCodecBufferChannel::attachEncryptedBuffers(
     return OK;
 }
 
+bool CCodecBufferChannel::fetchAndCopyEncryptedInfoBuffer(const std::span<const uint8_t> input,
+                                                          std::shared_ptr<C2LinearBlock> *block,
+                                                          size_t *blockSize) {
+    CHECK(mSendEncryptedInfoBuffer);
+    static const C2MemoryUsage kDefaultReadWriteUsage{
+        C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
+    constexpr int kAllocGranule0 = 1024 * 64;
+    constexpr int kAllocGranule1 = 1024 * 1024;
+
+    if (input.empty()) {
+        // A buffer size is zero if the input is EOS. The encrypted info buffer is not sent to
+        // the C2 HAL then. Returns true without creating a block.
+        return true;
+    }
+
+    std::shared_ptr<C2BlockPool> pool = mBlockPools.lock()->inputPool;
+
+    // round up encrypted sizes to limit fragmentation and encourage buffer reuse
+    if (input.size() <= kAllocGranule1) {
+        *blockSize = align(input.size(), kAllocGranule0);
+    } else {
+        *blockSize = align(input.size(), kAllocGranule1);
+    }
+
+    c2_status_t blockRes = pool->fetchLinearBlock(*blockSize, kDefaultReadWriteUsage, block);
+    if (blockRes != C2_OK) {
+        ALOGE("Failed to fetch linear block: %s", asString(blockRes));
+        return false;
+    }
+
+    C2WriteView view = (*block)->map().get();
+    if (view.error() != C2_OK) {
+        ALOGE("Failed to map block: %s", asString(view.error()));
+        return false;
+    }
+    if (view.size() != *blockSize) {
+        ALOGE("Mapped block size mismatch: expected %zu, got %zu", *blockSize,
+              static_cast<size_t>(view.size()));
+        return false;
+    }
+
+    memcpy(view.data(), input.data(), input.size());
+    return true;
+}
+
 status_t CCodecBufferChannel::attachEncryptedBuffer(
         const sp<hardware::HidlMemory> &memory,
         bool secure,
@@ -780,38 +944,86 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
     }
     std::shared_ptr<C2BlockPool> pool = mBlockPools.lock()->inputPool;
     std::shared_ptr<C2LinearBlock> block;
+    int32_t blockSize = kLinearBufferSize;
+    {
+        sp<AMessage> inputFormat = mInput.lock()->buffers->dupFormat();
+        if (inputFormat) {
+            (void)inputFormat->findInt32(KEY_MAX_INPUT_SIZE, &blockSize);
+            if ((size_t)blockSize > kMaxLinearBufferSize) {
+                blockSize = kMaxLinearBufferSize;
+            }
+        }
+    }
+
     c2_status_t err = pool->fetchLinearBlock(
-            size,
-            secure ? kSecureUsage : kDefaultReadWriteUsage,
-            &block);
+            blockSize, secure ? kSecureUsage : kDefaultReadWriteUsage, &block);
     if (err != C2_OK) {
         ALOGI("[%s] attachEncryptedBuffer: fetchLinearBlock failed: size = %zu (%s) err = %d",
-              mName, size, secure ? "secure" : "non-secure", err);
+              mName, (size_t)blockSize, secure ? "secure" : "non-secure", err);
         return NO_MEMORY;
     }
     if (!secure) {
-        ensureDecryptDestination(size);
+        ensureDecryptDestination(blockSize);
     }
+
+    std::vector<std::shared_ptr<C2Info>> c2Infos;
     ssize_t result = -1;
     ssize_t codecDataOffset = 0;
     if (mCrypto) {
-        int32_t heapSeqNum = getHeapSeqNum(memory);
-        hardware::drm::V1_0::SharedBuffer src{(uint32_t)heapSeqNum, offset, size};
-        hardware::drm::V1_0::DestinationBuffer dst;
-        if (secure) {
-            dst.type = DrmBufferType::NATIVE_HANDLE;
-            dst.secureMemory = hardware::hidl_handle(block->handle());
+        if (mSendEncryptionKeyHandle) {
+            CHECK(secure);
+            Vector<uint8_t> keyHandle;
+            const DrmStatus drmStatus = mCrypto->getKeyHandle(key, mode, size, offset, subSamples,
+                                                              numSubSamples, keyHandle);
+            const status_t status = drmStatus;
+            if (status != OK) {
+                ALOGE("[%s] attachEncryptedBuffer: getKeyHandle failed: status = %d, "
+                      "message = %s", mName, status, drmStatus.getErrorMessage().c_str());
+                return status;
+            }
+            std::shared_ptr<C2StreamEncryptionKeyInfo::input> c2KeyHandle =
+                    C2StreamEncryptionKeyInfo::input::AllocShared(
+                            keyHandle.size(), 0u, keyHandle.size(),
+                            std::vector<uint8_t>(keyHandle.begin(), keyHandle.end()));
+            c2Infos.push_back(std::move(c2KeyHandle));
+            if (iv) {
+                constexpr size_t kIVSize = 16;
+                std::vector<uint8_t> ivVec(iv, iv + kIVSize);
+                std::shared_ptr<C2StreamEncryptionIvInfo::input> c2Iv =
+                        C2StreamEncryptionIvInfo::input::AllocShared(kIVSize, 0u, ivVec.size(),
+                                                                     ivVec);
+                c2Infos.push_back(std::move(c2Iv));
+            }
+
+            // Fill the result to the sum of subsamples which is the used memory size.
+            result = size;
         } else {
-            dst.type = DrmBufferType::SHARED_MEMORY;
-            IMemoryToSharedBuffer(
-                    mDecryptDestination, mHeapSeqNum, &dst.nonsecureMemory);
+            int32_t heapSeqNum = getHeapSeqNum(memory);
+            hardware::drm::V1_0::SharedBuffer src{(uint32_t)heapSeqNum, offset, size};
+            hardware::drm::V1_0::DestinationBuffer dst;
+            if (secure) {
+                dst.type = DrmBufferType::NATIVE_HANDLE;
+                dst.secureMemory = hardware::hidl_handle(block->handle());
+            } else {
+                dst.type = DrmBufferType::SHARED_MEMORY;
+                IMemoryToSharedBuffer(mDecryptDestination, mHeapSeqNum, &dst.nonsecureMemory);
+            }
+
+            result = mCrypto->decrypt(key, iv, mode, pattern, src, 0, subSamples, numSubSamples,
+                                      dst, errorDetailMsg);
+            if (result < 0) {
+                ALOGI("[%s] attachEncryptedBuffer: decrypt failed: result = %zd", mName, result);
+                return result;
+            }
         }
-        result = mCrypto->decrypt(
-                key, iv, mode, pattern, src, 0, subSamples, numSubSamples,
-                dst, errorDetailMsg);
-        if (result < 0) {
-            ALOGI("[%s] attachEncryptedBuffer: decrypt failed: result = %zd", mName, result);
-            return result;
+
+        if (mSendEncryptionInfo) {
+            std::shared_ptr<C2Info> encryptionInfo =
+                    generateC2EncryptionInfo(mode, pattern, subSamples, numSubSamples);
+            if (!encryptionInfo) {
+                return BAD_VALUE;
+            }
+            c2Infos.push_back(std::move(encryptionInfo));
         }
     } else {
         // Here we cast CryptoPlugin::SubSample to hardware::cas::native::V1_0::SubSample
@@ -868,7 +1080,7 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
             return BAD_VALUE;
         }
     }
-    if (!secure) {
+    if (!secure || mSendEncryptionKeyHandle) {
         C2WriteView view = block->map().get();
         if (view.error() != C2_OK) {
             ALOGI("[%s] attachEncryptedBuffer: block map error: %d (non-secure)",
@@ -881,14 +1093,56 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
                   mName, view.size(), result);
             return UNKNOWN_ERROR;
         }
-        memcpy(view.data(), mDecryptDestination->unsecurePointer(), result);
+        if (mSendEncryptionKeyHandle) {
+            sp<android::hidl::memory::V1_0::IMemory> im = getSourceIMemory(memory);
+            if (!im) {
+                ALOGE("Failed to map hidl_memory");
+                return UNKNOWN_ERROR;
+            }
+            memcpy(view.data(), im->getPointer(), result);
+        } else {
+            memcpy(view.data(), mDecryptDestination->unsecurePointer(), result);
+        }
     }
     std::shared_ptr<C2Buffer> c2Buffer{C2Buffer::CreateLinearBuffer(
             block->share(codecDataOffset, result - codecDataOffset, C2Fence{}))};
+
+    for (std::shared_ptr<C2Info> c2Info : c2Infos) {
+        c2Buffer->setInfo(std::move(c2Info));
+    }
+
     if (!buffer->copy(c2Buffer)) {
         ALOGI("[%s] attachEncryptedBuffer: buffer copy failed", mName);
         return -ENOSYS;
     }
+
+    if (mSendEncryptedInfoBuffer) {
+        CHECK_GT(size, 0u);
+        sp<android::hidl::memory::V1_0::IMemory> im = getSourceIMemory(memory);
+        if (!im) {
+            ALOGE("Failed to map hidl_memory");
+            return UNKNOWN_ERROR;
+        }
+        if (im->getPointer() == nullptr) {
+            ALOGE("Mapped memory is null");
+            return UNKNOWN_ERROR;
+        }
+
+        std::span<const uint8_t> inputBuffer(
+                static_cast<uint8_t*>(static_cast<void*>(im->getPointer())) + offset, size);
+        std::shared_ptr<C2LinearBlock> encryptedBlock;
+        size_t encryptedBufferSize = 0;
+        if (!fetchAndCopyEncryptedInfoBuffer(inputBuffer, &encryptedBlock, &encryptedBufferSize)) {
+            return UNKNOWN_ERROR;
+        }
+        // Since size is not zero, encryptedBlock must not be null.
+        CHECK(encryptedBlock);
+        buffer->meta()->setObject(
+                "encrypted-block",
+                new WrapperObject<std::shared_ptr<C2LinearBlock>>{encryptedBlock});
+        buffer->meta()->setSize("encrypted-block-size", encryptedBufferSize);
+    }
+
     return OK;
 }
 
@@ -898,7 +1152,20 @@ status_t CCodecBufferChannel::queueInputBuffer(const sp<MediaCodecBuffer> &buffe
         ALOGD("[%s] No more buffers should be queued at current state.", mName);
         return -ENOSYS;
     }
-    return queueInputBufferInternal(buffer);
+
+    // The encryptedBlock might be set in meta in attachEncryptedBuffer().
+    std::shared_ptr<C2LinearBlock> encryptedBlock;
+    size_t encryptedBlockSize = 0;
+    sp<RefBase> obj;
+    if (buffer->meta()->findObject("encrypted-block", &obj)) {
+        encryptedBlock =
+                static_cast<WrapperObject<std::shared_ptr<C2LinearBlock>>*>(obj.get())->value;
+        buffer->meta()->findSize("encrypted-block-size", &encryptedBlockSize);
+        // Remove entries so they are not carried over to next buffer.
+        buffer->meta()->removeEntryByName("encrypted-block");
+        buffer->meta()->removeEntryByName("encrypted-block-size");
+    }
+    return queueInputBufferInternal(buffer, encryptedBlock, {}, encryptedBlockSize);
 }
 
 status_t CCodecBufferChannel::queueSecureInputBuffer(
@@ -915,43 +1182,18 @@ status_t CCodecBufferChannel::queueSecureInputBuffer(
     if (!hasCryptoOrDescrambler()) {
         return -ENOSYS;
     }
-    sp<EncryptedLinearBlockBuffer> encryptedBuffer((EncryptedLinearBlockBuffer *)buffer.get());
 
     std::shared_ptr<C2LinearBlock> block;
-    size_t allocSize = buffer->size();
+    std::vector<std::shared_ptr<C2Info>> c2Infos;
     size_t bufferSize = 0;
-    c2_status_t blockRes = C2_OK;
-    bool copied = false;
     {
         ScopedTrace trace(ATRACE_TAG, android::base::StringPrintf(
                 "CCodecBufferChannel::decrypt(%s)", mName).c_str());
         if (mSendEncryptedInfoBuffer) {
-            static const C2MemoryUsage kDefaultReadWriteUsage{
-                C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
-            constexpr int kAllocGranule0 = 1024 * 64;
-            constexpr int kAllocGranule1 = 1024 * 1024;
-            std::shared_ptr<C2BlockPool> pool = mBlockPools.lock()->inputPool;
-            // round up encrypted sizes to limit fragmentation and encourage buffer reuse
-            if (allocSize <= kAllocGranule1) {
-                bufferSize = align(allocSize, kAllocGranule0);
-            } else {
-                bufferSize = align(allocSize, kAllocGranule1);
+            std::span<const uint8_t> inputBuffer(buffer->data(), buffer->size());
+            if (!fetchAndCopyEncryptedInfoBuffer(inputBuffer, &block, &bufferSize)) {
+                return UNKNOWN_ERROR;
             }
-            blockRes = pool->fetchLinearBlock(
-                    bufferSize, kDefaultReadWriteUsage, &block);
-
-            if (blockRes == C2_OK) {
-                C2WriteView view = block->map().get();
-                if (view.error() == C2_OK && view.size() == bufferSize) {
-                    copied = true;
-                    // TODO: only copy clear sections
-                    memcpy(view.data(), buffer->data(), allocSize);
-                }
-            }
-        }
-
-        if (!copied) {
-            block.reset();
         }
 
         ssize_t result = -1;
@@ -962,28 +1204,75 @@ status_t CCodecBufferChannel::queueSecureInputBuffer(
             // We don't need to go through crypto or descrambler if the input is empty.
             result = 0;
         } else if (mCrypto != nullptr) {
-            hardware::drm::V1_0::DestinationBuffer destination;
-            if (secure) {
-                destination.type = DrmBufferType::NATIVE_HANDLE;
-                destination.secureMemory = hidl_handle(encryptedBuffer->handle());
+            if (mSendEncryptionKeyHandle) {
+                Vector<uint8_t> keyHandle;
+                const DrmStatus drmStatus =
+                        mCrypto->getKeyHandle(key, mode, buffer->size(), buffer->offset(),
+                                              subSamples, numSubSamples, keyHandle);
+                const status_t status = drmStatus;
+                if (status != OK) {
+                    ALOGE("[%s] getKeyHandle() failed: status=%d, message=%s", mName, status,
+                          drmStatus.getErrorMessage().c_str());
+                    return status;
+                }
+
+                std::shared_ptr<C2StreamEncryptionKeyInfo::input> c2KeyHandle =
+                        C2StreamEncryptionKeyInfo::input::AllocShared(
+                                keyHandle.size(), 0u, keyHandle.size(),
+                                std::vector<uint8_t>(keyHandle.begin(), keyHandle.end()));
+                c2Infos.push_back(std::move(c2KeyHandle));
+
+                if (iv) {
+                    constexpr size_t kIVSize = 16;
+                    std::vector<uint8_t> ivVec(iv, iv + kIVSize);
+                    std::shared_ptr<C2StreamEncryptionIvInfo::input> c2Iv =
+                            C2StreamEncryptionIvInfo::input::AllocShared(kIVSize, 0u, ivVec.size(),
+                                                                         ivVec);
+                    c2Infos.push_back(std::move(c2Iv));
+                }
             } else {
-                destination.type = DrmBufferType::SHARED_MEMORY;
-                IMemoryToSharedBuffer(
-                        mDecryptDestination, mHeapSeqNum, &destination.nonsecureMemory);
+                sp<EncryptedLinearBlockBuffer> encryptedBuffer(
+                        (EncryptedLinearBlockBuffer*)buffer.get());
+                hardware::drm::V1_0::DestinationBuffer destination;
+                if (secure) {
+                    destination.type = DrmBufferType::NATIVE_HANDLE;
+                    destination.secureMemory = hidl_handle(encryptedBuffer->handle());
+                } else {
+                    destination.type = DrmBufferType::SHARED_MEMORY;
+                    IMemoryToSharedBuffer(mDecryptDestination, mHeapSeqNum,
+                                          &destination.nonsecureMemory);
+                }
+                hardware::drm::V1_0::SharedBuffer source;
+                encryptedBuffer->fillSourceBuffer(&source);
+
+                result = mCrypto->decrypt(key, iv, mode, pattern, source, buffer->offset(),
+                                          subSamples, numSubSamples, destination, errorDetailMsg);
+                if (result < 0) {
+                    ALOGI("[%s] decrypt failed: result=%zd", mName, result);
+                    return result;
+                }
+                if (destination.type == DrmBufferType::SHARED_MEMORY) {
+                    encryptedBuffer->copyDecryptedContent(mDecryptDestination, result);
+                }
             }
-            hardware::drm::V1_0::SharedBuffer source;
-            encryptedBuffer->fillSourceBuffer(&source);
-            result = mCrypto->decrypt(
-                    key, iv, mode, pattern, source, buffer->offset(),
-                    subSamples, numSubSamples, destination, errorDetailMsg);
-            if (result < 0) {
-                ALOGI("[%s] decrypt failed: result=%zd", mName, result);
-                return result;
-            }
-            if (destination.type == DrmBufferType::SHARED_MEMORY) {
-                encryptedBuffer->copyDecryptedContent(mDecryptDestination, result);
+
+            if (mSendEncryptionInfo) {
+                // This offset is the offset of MediaCodecBuffer, |buffer|, in other words,
+                // |offset| argument in ICrypto::decrypt(). The size is unnecessary because it's
+                // the sum of clear data bytes and encrypted data bytes of sub samples. Note
+                // that the offset of EncryptedBuffer (cpu-accessible, encrypted video buffer)
+                // is always zero.
+                std::shared_ptr<C2Info> encryptionInfo =
+                        generateC2EncryptionInfo(mode, pattern, subSamples, numSubSamples);
+                if (!encryptionInfo) {
+                    return BAD_VALUE;
+                }
+                c2Infos.push_back(std::move(encryptionInfo));
             }
         } else {
+            sp<EncryptedLinearBlockBuffer> encryptedBuffer(
+                    (EncryptedLinearBlockBuffer*)buffer.get());
+
             // Here we cast CryptoPlugin::SubSample to hardware::cas::native::V1_0::SubSample
             // directly, the structure definitions should match as checked in DescramblerImpl.cpp.
             hidl_vec<SubSample> hidlSubSamples;
@@ -1046,7 +1335,7 @@ status_t CCodecBufferChannel::queueSecureInputBuffer(
 
         buffer->setRange(codecDataOffset, result - codecDataOffset);
     }
-    return queueInputBufferInternal(buffer, block, bufferSize);
+    return queueInputBufferInternal(buffer, block, c2Infos, bufferSize);
 }
 
 status_t CCodecBufferChannel::queueSecureInputBuffers(
@@ -1092,40 +1381,16 @@ status_t CCodecBufferChannel::queueSecureInputBuffers(
     sp<EncryptedLinearBlockBuffer> encryptedBuffer((EncryptedLinearBlockBuffer *)buffer.get());
 
     std::shared_ptr<C2LinearBlock> block;
-    size_t allocSize = buffer->size();
     size_t bufferSize = 0;
-    c2_status_t blockRes = C2_OK;
-    bool copied = false;
     ScopedTrace trace(ATRACE_TAG, android::base::StringPrintf(
             "CCodecBufferChannel::decrypt(%s)", mName).c_str());
     if (mSendEncryptedInfoBuffer) {
-        static const C2MemoryUsage kDefaultReadWriteUsage{
-            C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
-        constexpr int kAllocGranule0 = 1024 * 64;
-        constexpr int kAllocGranule1 = 1024 * 1024;
-        std::shared_ptr<C2BlockPool> pool = mBlockPools.lock()->inputPool;
-        // round up encrypted sizes to limit fragmentation and encourage buffer reuse
-        if (allocSize <= kAllocGranule1) {
-            bufferSize = align(allocSize, kAllocGranule0);
-        } else {
-            bufferSize = align(allocSize, kAllocGranule1);
-        }
-        blockRes = pool->fetchLinearBlock(
-                bufferSize, kDefaultReadWriteUsage, &block);
-
-        if (blockRes == C2_OK) {
-            C2WriteView view = block->map().get();
-            if (view.error() == C2_OK && view.size() == bufferSize) {
-                copied = true;
-                // TODO: only copy clear sections
-                memcpy(view.data(), buffer->data(), allocSize);
-            }
+        std::span<const uint8_t> inputBuffer(buffer->data(), buffer->size());
+        if (!fetchAndCopyEncryptedInfoBuffer(inputBuffer, &block, &bufferSize)) {
+            return UNKNOWN_ERROR;
         }
     }
 
-    if (!copied) {
-        block.reset();
-    }
     // size of cryptoInfo and accessUnitInfo should be the same?
     ssize_t result = -1;
     size_t srcOffset = 0;
@@ -1180,7 +1445,7 @@ status_t CCodecBufferChannel::queueSecureInputBuffers(
         }
         buffer->setRange(0, outBufferSize);
     }
-    return queueInputBufferInternal(buffer, block, bufferSize);
+    return queueInputBufferInternal(buffer, block, {}, bufferSize);
 }
 
 void CCodecBufferChannel::queueDummyWork() {
@@ -1520,7 +1785,7 @@ status_t CCodecBufferChannel::renderOutputBuffer(
         }
         qbi.setHdrMetadata(hdr);
     }
-    SetMetadataToGralloc4Handle(dataSpace, hdrStaticInfo, hdrDynamicInfo, block.handle());
+    SetMetadataToGralloc4Handle(dataSpace, hdrStaticInfo, hdrDynamicInfo, block);
 
     qbi.setSurfaceDamage(Region::INVALID_REGION); // we don't have dirty regions
     qbi.getFrameTimestamps = true; // we need to know when a frame is rendered
@@ -1700,6 +1965,32 @@ void CCodecBufferChannel::onBufferAttachedToOutputSurface(uint32_t generation) {
     }
 }
 
+void CCodecBufferChannel::onBufferDetachedFromOutputSurface(uint32_t generation,
+                                                            uint64_t bufferId) {
+    // Note: Since this is called asynchronously from IProducerListener not
+    // knowing the internal state of CCodec/CCodecBufferChannel,
+    // prevent mComponent from being destroyed by holding the shared reference
+    // during this interface being executed.
+    std::shared_ptr<Codec2Client::Component> comp = std::atomic_load(&mComponent);
+    if (comp) {
+        SurfaceCallbackHandler::GetInstance().post(SurfaceCallbackHandler::ON_BUFFER_DETACHED, comp,
+                                                   generation, {bufferId});
+    }
+}
+
+void CCodecBufferChannel::onBuffersRemovedFromOutputSurface(
+        uint32_t generation, const std::vector<uint64_t>& bufferIds) {
+    // Note: Since this is called asynchronously from IProducerListener not
+    // knowing the internal state of CCodec/CCodecBufferChannel,
+    // prevent mComponent from being destroyed by holding the shared reference
+    // during this interface being executed.
+    std::shared_ptr<Codec2Client::Component> comp = std::atomic_load(&mComponent);
+    if (comp) {
+        SurfaceCallbackHandler::GetInstance().post(SurfaceCallbackHandler::ON_BUFFERS_REMOVED, comp,
+                                                   generation, bufferIds);
+    }
+}
+
 status_t CCodecBufferChannel::discardBuffer(const sp<MediaCodecBuffer> &buffer) {
     ALOGV("[%s] discardBuffer: %p", mName, buffer.get());
     bool released = false;
@@ -1800,8 +2091,52 @@ status_t CCodecBufferChannel::start(
     // TODO: get this from input format
     bool secure = std::atomic_load(&mComponent)->getName().find(".secure") != std::string::npos;
 
-    // secure mode is a static parameter (shall not change in the executing state)
+    // secure mode and decrypt mode are static parameters (shall not change in the executing state)
     mSendEncryptedInfoBuffer = secureMode.value == C2Config::SM_READ_PROTECTED_WITH_ENCRYPTED;
+    mSendEncryptionInfo = false;
+    mSendEncryptionKeyHandle = false;
+    if (android::media::codec::provider_->decrypt_and_decode_in_hal()) {
+        if (secureMode.value == C2Config::SM_READ_PROTECTED_WITH_ENCRYPTED ||
+            secureMode.value == C2Config::SM_ENCRYPTED_WITH_KEY) {
+            std::vector<std::unique_ptr<C2Param>> heapParams;
+            c2_status_t err = std::atomic_load(&mComponent)
+                                      ->query({},
+                                              {
+                                                      C2StreamEncryptionInfo::input::PARAM_TYPE,
+                                                      C2StreamEncryptionIvInfo::input::PARAM_TYPE,
+                                                      C2StreamEncryptionKeyInfo::input::PARAM_TYPE,
+                                              },
+                                              C2_DONT_BLOCK, &heapParams);
+            if (err != C2_BAD_INDEX && err != C2_OK) {
+                return UNKNOWN_ERROR;
+            }
+
+            bool sendEncryptionIvInfo = false;
+            for (const std::unique_ptr<C2Param>& param : heapParams) {
+                switch (param->index()) {
+                    case C2StreamEncryptionInfo::input::PARAM_TYPE:
+                        mSendEncryptionInfo = true;
+                        break;
+                    case C2StreamEncryptionIvInfo::input::PARAM_TYPE:
+                        sendEncryptionIvInfo = true;
+                        break;
+                    case C2StreamEncryptionKeyInfo::input::PARAM_TYPE:
+                        mSendEncryptionKeyHandle = true;
+                        break;
+                }
+            }
+
+            if (mSendEncryptionKeyHandle != sendEncryptionIvInfo) {
+                ALOGW("Unexpected combination: sendEncryptionKeyInfo=%d, encryptionIvInfo=%d",
+                      (int)mSendEncryptionKeyHandle, (int)sendEncryptionIvInfo);
+            }
+            if (mSendEncryptionKeyHandle && secureMode.value != C2Config::SM_ENCRYPTED_WITH_KEY) {
+                ALOGE("encryptionKeyInfo is advertised unexpectedly in secure mode=%d",
+                      secureMode.value);
+                return UNKNOWN_ERROR;
+            }
+        }
+    }
 
     std::shared_ptr<C2AllocatorStore> allocatorStore = GetCodec2PlatformAllocatorStore();
     int poolMask = GetCodec2PoolMask();
@@ -1809,7 +2144,8 @@ status_t CCodecBufferChannel::start(
 
     if (inputFormat != nullptr) {
         bool graphic = (iStreamFormat.value == C2BufferData::GRAPHIC);
-        bool audioEncoder = !graphic && (kind.value == C2Component::KIND_ENCODER);
+        bool encoder = (kind.value == C2Component::KIND_ENCODER);
+        bool audioEncoder = !graphic && encoder;
         C2Config::api_feature_t apiFeatures = C2Config::api_feature_t(
                 API_REFLECTION |
                 API_VALUES |
@@ -1918,9 +2254,11 @@ status_t CCodecBufferChannel::start(
         bool conforming = (apiFeatures & API_SAME_INPUT_BUFFER);
         // For encrypted content, framework decrypts source buffer (ashmem) into
         // C2Buffers. Thus non-conforming codecs can process these.
+        // For graphic buffer, framework uses graphic buffers directly.
+        // Thus non-conforming codecs can process these.
         if (!buffersBoundToCodec
                 && !input->frameReassembler
-                && (hasCryptoOrDescrambler() || conforming)) {
+                && (hasCryptoOrDescrambler() || (graphic && encoder) || conforming)) {
             input->buffers.reset(new SlotInputBuffers(mName));
         } else if (graphic) {
             if (mHasInputSurface) {
@@ -1934,7 +2272,7 @@ status_t CCodecBufferChannel::start(
                 input->buffers.reset(new GraphicInputBuffers(mName));
             }
         } else {
-            if (hasCryptoOrDescrambler()) {
+            if (hasCryptoOrDescrambler() && !mSendEncryptionKeyHandle) {
                 int32_t capacity = kLinearBufferSize;
                 (void)inputFormat->findInt32(KEY_MAX_INPUT_SIZE, &capacity);
                 if ((size_t)capacity > kMaxLinearBufferSize) {
@@ -1957,7 +2295,14 @@ status_t CCodecBufferChannel::start(
                 input->buffers.reset(new EncryptedLinearInputBuffers(
                         secure, mDealer, mCrypto, mHeapSeqNum, (size_t)capacity,
                         numInputSlots, mName));
-                forceArrayMode = true;
+                // Certain ".secure" codecs have incorrect assumption about
+                // ArrayMode behaviour and we workaround the violation by keeping
+                // it here.
+                // For non ".secure" codecs with or without crypto, BufferPools
+                // can be used for input memory management. In all the cases
+                // non ArrayMode is used and the lifecycle and reuse will be
+                // managed by BufferPool.
+                forceArrayMode = secure;
             } else {
                 input->buffers.reset(new LinearInputBuffers(mName));
             }
@@ -1987,6 +2332,7 @@ status_t CCodecBufferChannel::start(
                     output->surface->getIGraphicBufferProducer() : nullptr;
             if (outputSurface) {
                 (void)SurfaceCallbackHandler::GetInstance();
+                output->surface->setDequeueTimeout(kDequeueTimeoutNs);
                 output->surface->setMaxDequeuedBufferCount(output->maxDequeueBuffers);
             }
             outputGeneration = output->generation;
@@ -2331,6 +2677,7 @@ void CCodecBufferChannel::stop() {
     mSync.stop();
     mFirstValidFrameIndex = mFrameIndex.load(std::memory_order_relaxed);
     mInfoBuffers.clear();
+    mSourceMemoryMap.clear();
 }
 
 void CCodecBufferChannel::stopUseOutputSurface(bool pushBlankBuffer) {
@@ -2376,6 +2723,7 @@ void CCodecBufferChannel::reset() {
 
 void CCodecBufferChannel::release() {
     mInfoBuffers.clear();
+    mSourceMemoryMap.clear();
     std::shared_ptr<Codec2Client::Component> nullComp;
     std::atomic_store(&mComponent, nullComp);
     mInputAllocator.reset();
@@ -2522,7 +2870,12 @@ bool CCodecBufferChannel::handleWork(
         // C2_OK and C2_NOT_FOUND are the only results that we accept for processing
         // the config update.
         ALOGD("[%s] work failed to complete: %d", mName, work->result);
-        mCCodecCallback->onError(work->result, ACTION_CODE_FATAL);
+        // TODO: Mapping c2_status_t to status_t could help with more descriptive error code here.
+        // What should be the right operation for handleWork?
+        // status_t err = toStatusT(work->result, C2_OPERATION_NONE);
+        // mCCodecCallback->onError(err, ACTION_CODE_FATAL);
+        mCCodecCallback->onError((work->result == C2_NO_MEMORY ? NO_MEMORY : UNKNOWN_ERROR),
+                                  ACTION_CODE_FATAL);
         return false;
     }
 

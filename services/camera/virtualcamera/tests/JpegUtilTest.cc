@@ -13,11 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// #define LOG_NDEBUG 0
+#define LOG_TAG "JpegUtilTest"
 
 #include <sys/types.h>
-
-#include "system/graphics.h"
-#define LOG_TAG "JpegUtilTest"
 
 #include <array>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "jpeglib.h"
+#include "system/graphics.h"
 #include "util/JpegUtil.h"
 #include "util/Util.h"
 #include "utils/Errors.h"
@@ -38,6 +38,7 @@ namespace {
 
 using testing::Eq;
 using testing::Gt;
+using testing::Ne;
 using testing::Optional;
 using testing::VariantWith;
 
@@ -159,6 +160,7 @@ TEST_F(JpegUtilTest, compressImageSizeAlignedWithDctSucceeds) {
 
   std::optional<size_t> compressedSize = compress(640, 480, inBuffer);
 
+  EXPECT_THAT(compressedSize, Ne(std::nullopt));
   EXPECT_THAT(compressedSize, Optional(Gt(0)));
   EXPECT_THAT(verifyHeaderAndGetResolution(mOutputBuffer.data(),
                                            compressedSize.value()),

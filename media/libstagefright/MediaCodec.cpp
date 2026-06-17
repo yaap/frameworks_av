@@ -282,6 +282,12 @@ static const char *kJudderEventDetailsContentDurationUs =
         "android.media.mediacodec.judder.details-content-duration-us";
 static const char *kJudderEventDetailsDistanceMs =
         "android.media.mediacodec.judder.details-distance-ms";
+static const char *kHdcpRetrySuccess = "android.media.mediacodec.retry-hdcp-success-count";
+static const char *kHdcpRetryFailure = "android.media.mediacodec.retry-hdcp-failure-count";
+
+// Default maximum retry duration in seconds for HDCP decrypt failures.
+// This can be overriddec by sys.prop 'ro.media.codec.retry_decrypt_for_hdcp_failure_secs'
+static constexpr int kDefaultMaxHdcpDecryptRetrySecs = 6;
 
 // XXX suppress until we get our representation right
 static bool kEmitHistogram = false;
@@ -464,6 +470,9 @@ private:
     // knows about the current resource usage.
     void reRegisterAllResources_l();
 
+    // Register the globally available system resources with the service.
+    void registerGlobalResources_l();
+
     void deinit() {
         std::scoped_lock lock{mLock};
         // Unregistering from DeathRecipient notification.
@@ -577,6 +586,41 @@ status_t MediaCodec::ResourceManagerServiceProxy::init() {
     return OK;
 }
 
+inline bool IsCodecAvailabilityMetricsFeatureOn() {
+    if (android::media::codec::codec_availability_metrics()) {
+        return true;
+    }
+
+    return false;
+}
+
+inline MediaResourceType getResourceType(const std::string& resourceName) {
+    // Extract id from the resource name ==> resource name = "componentStoreName-id"
+    std::size_t pos = resourceName.rfind("-");
+    if (pos != std::string::npos) {
+        return static_cast<MediaResourceType>(std::atoi(resourceName.substr(pos).c_str()));
+    }
+
+    ALOGE("Resource ID missing in resource Name: [%s]!", resourceName.c_str());
+    return MediaResourceType::kUnspecified;
+}
+
+void MediaCodec::ResourceManagerServiceProxy::registerGlobalResources_l() {
+    // Register the globally available system resources with the service.
+    std::vector<GlobalResourceInfo> globalResources = CCodec::GetGloballyAvailableResources();
+    if (!globalResources.empty()) {
+        std::vector<MediaResourceParcel> resources;
+        resources.reserve(globalResources.size());
+        for (const GlobalResourceInfo& glob : globalResources) {
+            MediaResourceParcel res;
+            res.type = getResourceType(glob.mName);
+            res.value = glob.mAvailable;
+            resources.push_back(res);
+        }
+        mService->registerSystemResource(resources);
+    }
+}
+
 std::shared_ptr<IResourceManagerService> MediaCodec::ResourceManagerServiceProxy::getService_l() {
     if (mService != nullptr) {
         return mService;
@@ -596,11 +640,17 @@ std::shared_ptr<IResourceManagerService> MediaCodec::ResourceManagerServiceProxy
     // Register for the callbacks by linking to death notification.
     AIBinder_linkToDeath(mService->asBinder().get(), mDeathRecipient.get(), mCookie);
 
+    if (IsCodecAvailabilityMetricsFeatureOn()) {
+        // Register the globally available system resources with the service.
+        registerGlobalResources_l();
+    }
+
     // If the RM was restarted, re-register all the resources.
     if (mBinderDied) {
         reRegisterAllResources_l();
         mBinderDied = false;
     }
+
     return mService;
 }
 
@@ -935,6 +985,20 @@ private:
         }
     }
 
+    void notifyBufferDetached(uint64_t bufferId) {
+        auto p = mBufferChannel.lock();
+        if (p) {
+            p->onBufferDetachedFromOutputSurface(mGeneration, bufferId);
+        }
+    }
+
+    void notifyBuffersRemoved(const std::vector<uint64_t>& bufferIds) {
+        auto p = mBufferChannel.lock();
+        if (p) {
+            p->onBuffersRemovedFromOutputSurface(mGeneration, bufferIds);
+        }
+    }
+
 public:
     explicit OnBufferReleasedListener(
             uint32_t generation,
@@ -947,11 +1011,26 @@ public:
         notifyBufferReleased();
     }
 
-    void onBuffersDiscarded([[maybe_unused]] const std::vector<sp<GraphicBuffer>>& buffers)
-        override { }
+    void onBuffersDiscarded(const std::vector<sp<GraphicBuffer>>& buffers) override {
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
+        std::vector<uint64_t> bufferIds;
+        bufferIds.reserve(buffers.size());
+        for (const auto& buffer : buffers) {
+            bufferIds.push_back(buffer->getId());
+        }
+        notifyBuffersRemoved(bufferIds);
+#else
+        (void)buffers;
+#endif
+    }
 
-    void onBufferDetached([[maybe_unused]] int slot) override {
+    void onBufferDetached(uint64_t bufferId) override {
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
+        notifyBufferDetached(bufferId);
+#else
+        (void)bufferId;
         notifyBufferReleased();
+#endif
     }
 
     bool needsReleaseNotify() override { return true; }
@@ -1279,27 +1358,13 @@ sp<PersistentSurface> MediaCodec::CreatePersistentInputSurface() {
     sp<MediaSurfaceType> surface;
     sp<hardware::media::omx::V1_0::IGraphicBufferSource> bufferSource;
 
-    // Change IOMX to use Surface too in a follow up CL.
-    sp<IGraphicBufferProducer> igbp = mediaflagtools::surfaceTypeToIGBP(surface);
-    status_t err = omx->createInputSurface(&igbp, &bufferSource);
-
+    status_t err = omx->createInputSurface(&surface, &bufferSource);
     if (err != OK) {
         ALOGE("Failed to create persistent input surface.");
         return NULL;
     }
 
     return new PersistentSurface(mediaflagtools::igbpToSurfaceType(igbp), bufferSource);
-}
-
-inline MediaResourceType getResourceType(const std::string& resourceName) {
-    // Extract id from the resource name ==> resource name = "componentStoreName-id"
-    std::size_t pos = resourceName.rfind("-");
-    if (pos != std::string::npos) {
-        return static_cast<MediaResourceType>(std::atoi(resourceName.substr(pos).c_str()));
-    }
-
-    ALOGE("Resource ID missing in resource Name: [%s]!", resourceName.c_str());
-    return MediaResourceType::kUnspecified;
 }
 
 /**
@@ -1325,43 +1390,15 @@ static bool getValueFor(const sp<AMessage>& msg,
 }
 
 /*
- * Use operating frame rate for per frame resource calculation as below:
- * - Check if operating-rate is available. If so, use it.
- * - If its encoder and if we have capture-rate, use that as frame rate.
- * - Else, check if frame-rate is available. If so, use it.
- * - Else, use the default value.
- *
- * NOTE: This function is called with format that could be:
- *   - format used to configure the codec
- *   - codec's input format
- *   - codec's output format
- *
- * Some of the key's may not be present in either input or output format or
- * both.
- * For example, "capture-rate", this is currently only used in configure format.
- *
- * For encoders, in rare cases, we would expect "operating-rate" to be set
- * for high-speed capture and it's only used during configuration.
+ * For audio codec, return sample-rate if available, else return the default value.
  */
-static float getOperatingFrameRate(const sp<AMessage>& format,
-                                   float defaultFrameRate,
-                                   bool isEncoder) {
-    float operatingRate = 0;
-    if (getValueFor(format, "operating-rate", &operatingRate)) {
-        // Use operating rate to convert per-frame resources into a whole.
-        return operatingRate;
+static float getSampleRateForAudio(const sp<AMessage>& format,
+                                   float defaultValue) {
+    int sampleRate = 0;
+    if (format->findInt32(KEY_SAMPLE_RATE, &sampleRate)) {
+        return sampleRate;
     }
-
-    float captureRate = 0;
-    if (isEncoder && getValueFor(format, "capture-rate", &captureRate)) {
-        // Use capture rate to convert per-frame resources into a whole.
-        return captureRate;
-    }
-
-    // Otherwise use frame-rate (or fallback to the default framerate passed)
-    float frameRate = defaultFrameRate;
-    getValueFor(format, "frame-rate", &frameRate);
-    return frameRate;
+    return defaultValue;
 }
 
 inline MediaResourceParcel getMediaResourceParcel(const InstanceResourceInfo& resourceInfo) {
@@ -1375,6 +1412,7 @@ void MediaCodec::updateResourceUsage(
         const std::vector<InstanceResourceInfo>& oldResources,
         const std::vector<InstanceResourceInfo>& newResources) {
     std::vector<MediaResourceParcel> resources;
+    resources.reserve(newResources.size());
 
     // Add all the new resources first.
     for (const InstanceResourceInfo& resource : newResources) {
@@ -1409,8 +1447,7 @@ bool MediaCodec::getRequiredSystemResources() {
     std::vector<InstanceResourceInfo> oldResources;
     std::vector<InstanceResourceInfo> newResources;
 
-    if (android::media::codec::codec_availability() &&
-        android::media::codec::codec_availability_support()) {
+    {
         Mutexed<std::vector<InstanceResourceInfo>>::Locked resourcesLocked(
                 mRequiredResourceInfo);
         // Make a copy of the previous required resources, if there were any.
@@ -1441,6 +1478,7 @@ bool MediaCodec::getRequiredSystemResources() {
 std::vector<InstanceResourceInfo> MediaCodec::computeDynamicResources(
         const std::vector<InstanceResourceInfo>& inResources) {
     std::vector<InstanceResourceInfo> dynamicResources;
+    dynamicResources.reserve(inResources.size());
     for (const InstanceResourceInfo& resource : inResources) {
         // If mStaticCount isn't 0, nothing to be changed because effectively this is a union.
         if (resource.mStaticCount != 0) {
@@ -1448,7 +1486,7 @@ std::vector<InstanceResourceInfo> MediaCodec::computeDynamicResources(
             continue;
         }
         if (resource.mPerFrameCount != 0) {
-            uint64_t staticCount = resource.mPerFrameCount * mFrameRate;
+            uint64_t staticCount = resource.mPerFrameCount * mOperatingRate.mValue;
             // We are tracking everything as static count here. So set per frame count to 0.
             dynamicResources.emplace_back(resource.mName, staticCount, 0);
         }
@@ -1461,11 +1499,6 @@ std::vector<InstanceResourceInfo> MediaCodec::computeDynamicResources(
 //static
 status_t MediaCodec::getGloballyAvailableResources(std::vector<GlobalResourceInfo>& resources) {
     resources.clear();
-    // Make sure codec availability feature is on.
-    if (!android::media::codec::codec_availability() ||
-        !android::media::codec::codec_availability_support()) {
-        return ERROR_UNSUPPORTED;
-    }
 
     // Get binder interface to resource manager.
     ::ndk::SpAIBinder binder(AServiceManager_waitForService("media.resource_manager"));
@@ -1573,6 +1606,7 @@ MediaCodec::MediaCodec(
       mIsLowLatencyModeOn(false),
       mIndexOfFirstFrameWhenLowLatencyOn(-1),
       mInputBufferCounter(0),
+      mMaxHdcpDecryptRetryInSecs(0),
       mGetCodecBase(getCodecBase),
       mGetCodecInfo(getCodecInfo) {
     mCodecId = GenerateCodecId();
@@ -1619,10 +1653,25 @@ MediaCodec::MediaCodec(
             mTracer.reset(new Tracer(uid, pid));
         }
     }
+    if(android::media::codec::provider_->retry_decrypt_for_hdcp_failure()) {
+        int32_t maxRetrySecs = property_get_int32(
+                "ro.media.codec.retry_decrypt_for_hdcp_failure_secs",
+                kDefaultMaxHdcpDecryptRetrySecs);
+        if (maxRetrySecs > 0) {
+            mMaxHdcpDecryptRetryInSecs = maxRetrySecs;
+            mRetryHdcpFailure.emplace(0, 0, 0);
+            ALOGI("Retry enabled for HDCP failure");
+        }
+    }
+
 }
 
 MediaCodec::~MediaCodec() {
-    CHECK_EQ(mState, UNINITIALIZED);
+    if (mState != UNINITIALIZED) {
+        ALOGI("Codec must have been in UNINITIALIZED state, but is in an invalid state %s",
+              stateString(mState).c_str());
+        return;
+    }
     mResourceManagerProxy->removeClient();
 
     flushMediametrics();  // this deletes mMetricsHandle
@@ -1666,7 +1715,10 @@ void MediaCodec::initMediametrics() {
         mIndexOfFirstFrameWhenLowLatencyOn = -1;
         mInputBufferCounter = 0;
     }
-
+    if (mRetryHdcpFailure) {
+        std::get<1>(mRetryHdcpFailure.value()) = 0;
+        std::get<2>(mRetryHdcpFailure.value()) = 0;
+    }
     mSubsessionCount = 0;
     mLifetimeStartNs = systemTime(SYSTEM_TIME_MONOTONIC);
     resetMetricsFields();
@@ -1677,6 +1729,10 @@ void MediaCodec::resetMetricsFields() {
 
     mApiUsageMetrics = ApiUsageMetrics();
     mReliabilityContextMetrics = ReliabilityContextMetrics();
+    if (mRetryHdcpFailure) {
+        std::get<1>(mRetryHdcpFailure.value()) = 0;
+        std::get<2>(mRetryHdcpFailure.value()) = 0;
+    }
 }
 
 // always called from the looper thread (and therefore not mutexed)
@@ -1719,6 +1775,25 @@ void MediaCodec::updateMediametrics() {
             mReliabilityContextMetrics.setOutputSurfaceCount);
     mediametrics_setInt32(mMetricsHandle, kCodecResolutionChangeCount,
             mReliabilityContextMetrics.resolutionChangeCount);
+
+    if (mRetryHdcpFailure) {
+        std::tuple<uint32_t, uint32_t, uint32_t> retryHdcpMetric(0, 0, 0);
+        if (mCryptoAsync) {
+            sp<AMessage> metrics = mCryptoAsync->getMetrics();
+            sp<RefBase> obj;
+            if(metrics->findObject("retryHdcpMetric", &obj)) {
+                retryHdcpMetric = static_cast<MediaCodec::WrapperObject<
+                        std::tuple<uint32_t, uint32_t, uint32_t>>*>(obj.get())->value;
+            }
+        }
+        auto [cntr, success, failure] = retryHdcpMetric;
+        mediametrics_setInt32(
+                mMetricsHandle,
+                kHdcpRetrySuccess, std::get<1>(mRetryHdcpFailure.value()) + success);
+        mediametrics_setInt32(
+                mMetricsHandle,
+                kHdcpRetryFailure, std::get<2>(mRetryHdcpFailure.value()) + failure);
+    }
 
     // Video rendering quality metrics
     {
@@ -2853,6 +2928,72 @@ status_t MediaCodec::configure(
     return configure(format, nativeWindow, crypto, NULL, flags);
 }
 
+/*
+ * Operating Rate is determined by KEY_OPERATING_RATE.
+ * And if not specified, the fallback is on:
+ *  - KEY_CAPTURE_RATE (video encoders)
+ *  - KEY_FRAME_RATE (video codecs)
+ *  - KEY_SAMPLE_RATE (audio codec - which is a mandatory param)
+ *  - Else use the default value, which is 30fps for video codecs.
+ *
+ * NOTE:
+ * - The implementation can update the KEY_FRAME_RATE through input/output formats.
+ *   But, we always give preference to the frame rate specified by the user, which means
+ *   KEY_FRAME_RATE can be updated by the user either through configure() or setParameter()
+ * - The implementation knows the correct KEY_SAMPLE_RATE, which it updates through
+ *   input/output formats.
+ *   So, whenever we get updates on input/output format for an audio codec and
+ *   if the operating rate was derived from KEY_SAMPLE_RATE, it needs to be updated.
+ *
+ * - Some of the key's may not be present in either input or output format or both.
+ *   For example, "capture-rate", this is currently only used in configure format.
+ *
+ * - For encoders, in rare cases, we would expect "operating-rate" to be set
+ *   for high-speed capture and it's only used during configuration.
+ *
+ * If the operating rate is not updateable through input/output format, this returns true.
+ * False, otherwise.
+ */
+void MediaCodec::findOperatingRate(const sp<AMessage> &format, uint32_t flags) {
+    // Look for Operating Rate in the configuration parameter.
+    float operatingRate = 0;
+    if (getValueFor(format, KEY_OPERATING_RATE, &operatingRate) && operatingRate > 0) {
+        mOperatingRate.mValue = operatingRate;
+        mOperatingRate.mSource = OPERATING_RATE;
+        return;
+    }
+
+    // Fallback operating rate.
+    if (mDomain == DOMAIN_VIDEO) {
+        bool isEncoder = (flags & CONFIGURE_FLAG_ENCODE);
+        // Use capture rate as operating for video encoders.
+        if (isEncoder) {
+            float captureRate = 0;
+            if (getValueFor(format, KEY_CAPTURE_RATE, &captureRate) && captureRate > 0) {
+                mOperatingRate.mValue = captureRate;
+                mOperatingRate.mSource = CAPTURE_RATE;
+                return;
+            }
+        }
+        // Otherwise use frame-rate as the operating rate.
+        float frameRate = 0;
+        if (getValueFor(format, KEY_FRAME_RATE, &frameRate) && frameRate > 0) {
+            mOperatingRate.mValue = frameRate;
+            mOperatingRate.mSource = FRAME_RATE;
+        }
+    } else if (mDomain == DOMAIN_AUDIO) {
+        // use sample-rate as the operating rate.
+        // NOTE: sample-rate is must for audio codecs.
+        int sampleRate = 0;
+        if (format->findInt32(KEY_SAMPLE_RATE, &sampleRate)) {
+            mOperatingRate.mValue = sampleRate;
+            mOperatingRate.mSource = SAMPLE_RATE;
+        }
+    }
+
+    return;
+}
+
 status_t MediaCodec::configure(
         const sp<AMessage> &format,
         const sp<Surface> &surface,
@@ -2908,13 +3049,8 @@ status_t MediaCodec::configure(
 
     sp<AMessage> callback = mCallback;
 
-    if (mDomain == DOMAIN_VIDEO) {
-        // Use format to compute initial operating frame rate.
-        // After the successful configuration (and also possibly when output
-        // format change notification), this value will be recalculated.
-        bool isEncoder = (flags & CONFIGURE_FLAG_ENCODE);
-        mFrameRate = getOperatingFrameRate(format, mFrameRate, isEncoder);
-    }
+    // Look for Operating Rate in the configuration parameter.
+    findOperatingRate(format, flags);
 
     std::vector<MediaResourceParcel> resources;
     resources.push_back(MediaResource::CodecResource(mFlags & kFlagIsSecure,
@@ -2961,11 +3097,6 @@ status_t MediaCodec::configure(
 
 status_t MediaCodec::getRequiredResources(std::vector<InstanceResourceInfo>& resources) {
     resources.clear();
-    // Make sure codec availability feature is on.
-    if (!android::media::codec::codec_availability() ||
-        !android::media::codec::codec_availability_support()) {
-        return ERROR_UNSUPPORTED;
-    }
     // Make sure that the codec was configured already.
     if (mState != CONFIGURED && mState != STARTING && mState != STARTED &&
         mState != FLUSHING && mState != FLUSHED) {
@@ -3563,6 +3694,16 @@ status_t MediaCodec::start() {
         // Don't know the buffer size at this point, but it's fine to use 1 because
         // the reclaimResource call doesn't consider the requester's buffer size for now.
         resources.push_back(MediaResource::GraphicMemoryResource(1));
+    }
+    // Add all entries from mRequiredResourceInfo into resources.
+    // NOTE:
+    // - added system resources are used only for logging metrics.
+    // - adding these system resources doesn't change the behavior of the reclamation.
+    if (IsCodecAvailabilityMetricsFeatureOn()) {
+        Mutexed<std::vector<InstanceResourceInfo>>::Locked resourcesLocked(mRequiredResourceInfo);
+        for (const InstanceResourceInfo& resource : *resourcesLocked) {
+            resources.push_back(getMediaResourceParcel(resource));
+        }
     }
     for (int i = 0; i <= kMaxRetry; ++i) {
         if (i > 0) {
@@ -4482,8 +4623,12 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                     CHECK(msg->findInt32("actionCode", &actionCode));
 
                     ALOGE("Codec reported err %#x/%s, actionCode %d, while in state %d/%s",
-                                              err, StrMediaError(err).c_str(), actionCode,
-                                              mState, stateString(mState).c_str());
+                            err,
+                            isCryptoError(err) ?
+                                    StrCryptoError(err).c_str() : StrMediaError(err).c_str(),
+                            actionCode,
+                            mState,
+                            stateString(mState).c_str());
                     if (err == DEAD_OBJECT) {
                         mFlags |= kFlagSawMediaServerDie;
                         mFlags &= ~kFlagIsComponentAllocated;
@@ -4687,7 +4832,12 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                               mState, stateString(mState).c_str());
                         break;
                     }
-                    CHECK_EQ(mState, INITIALIZING);
+                    if (mState != INITIALIZING) {
+                        ALOGI("Codec must have been in INITIALIZING state, "
+                              "but is in an invalid state %s",
+                              stateString(mState).c_str());
+                        break;
+                    }
                     setState(INITIALIZED);
                     mFlags |= kFlagIsComponentAllocated;
 
@@ -4739,14 +4889,20 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                 case kWhatComponentConfigured:
                 {
-                    if (mState == RELEASING || mState == UNINITIALIZED || mState == INITIALIZED) {
+                    if (mState == RELEASING || mState == UNINITIALIZED ||
+                        mState == INITIALIZING || mState == INITIALIZED) {
                         // In case a kWhatError or kWhatRelease message came in and replied,
                         // we log a warning and ignore.
                         ALOGW("configure interrupted by error or release, current state %d/%s",
                               mState, stateString(mState).c_str());
                         break;
                     }
-                    CHECK_EQ(mState, CONFIGURING);
+                    if (mState != CONFIGURING) {
+                        ALOGI("Codec must have been in CONFIGURING state, "
+                              "but is in an invalid state %s",
+                              stateString(mState).c_str());
+                        break;
+                    }
 
                     // reset input surface flag
                     mHaveInputSurface = false;
@@ -4772,10 +4928,13 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         mFlags |= kFlagUsesSoftwareRenderer;
                     }
 
-                    // Use input and output formats to get operating frame-rate.
-                    bool isEncoder = mFlags & kFlagIsEncoder;
-                    mFrameRate = getOperatingFrameRate(mInputFormat, mFrameRate, isEncoder);
-                    mFrameRate = getOperatingFrameRate(mOutputFormat, mFrameRate, isEncoder);
+                    // For the audio codec, if the operating rate was from sample-rate,
+                    // get the updated sample-rate if available.
+                    if (mOperatingRate.mSource == SAMPLE_RATE && mDomain == DOMAIN_AUDIO) {
+                        // Look for sample-rate in the output format.
+                        mOperatingRate.mValue = getSampleRateForAudio(mOutputFormat,
+                                                                      mOperatingRate.mValue);
+                    }
                     getRequiredSystemResources();
 
                     setState(CONFIGURED);
@@ -4915,15 +5074,20 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                 case kWhatStartCompleted:
                 {
-                    if (mState == RELEASING || mState == UNINITIALIZED) {
-                        // In case a kWhatRelease message came in and replied,
+                    if (mState == RELEASING || mState == INITIALIZING || mState == UNINITIALIZED) {
+                        // In case a kWhatError or kWhatRelease message came in and replied,
                         // we log a warning and ignore.
-                        ALOGW("start interrupted by release, current state %d/%s",
+                        ALOGI("start interrupted by error or release, current state %d/%s",
                               mState, stateString(mState).c_str());
                         break;
                     }
 
-                    CHECK_EQ(mState, STARTING);
+                    if (mState != STARTING) {
+                        ALOGI("Codec must have been in STARTING state, "
+                              "but is in an invalid state %s",
+                              stateString(mState).c_str());
+                        break;
+                    }
 
                     // Add the codec resources upon start.
                     std::vector<MediaResourceParcel> resources;
@@ -4931,8 +5095,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         resources.push_back(
                                 MediaResource::GraphicMemoryResource(getGraphicBufferSize()));
                     }
-                    if (android::media::codec::codec_availability() &&
-                        android::media::codec::codec_availability_support()) {
+                    {
                         Mutexed<std::vector<InstanceResourceInfo>>::Locked resourcesLocked(
                                 mRequiredResourceInfo);
                         for (const InstanceResourceInfo& resource : *resourcesLocked) {
@@ -5256,10 +5419,10 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                     // Remove the codec resources upon stop.
                     std::vector<MediaResourceParcel> resources;
-                    if (android::media::codec::codec_availability() &&
-                        android::media::codec::codec_availability_support()) {
+                    {
                         Mutexed<std::vector<InstanceResourceInfo>>::Locked resourcesLocked(
                                 mRequiredResourceInfo);
+                        resources.reserve((*resourcesLocked).size());
                         for (const InstanceResourceInfo& resource : *resourcesLocked) {
                             resources.push_back(getMediaResourceParcel(resource));
                         }
@@ -5610,7 +5773,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                 // TODO (b/274628160): Enable Use of CONFIG_FLAG_USE_CRYPTO_ASYNC
                 //                     with CONFIGURE_FLAG_USE_BLOCK_MODEL)
                 if (!(mFlags & kFlagUseBlockModel)) {
-                    mCryptoAsync = new CryptoAsync(mBufferChannel);
+                    mCryptoAsync = new CryptoAsync(mBufferChannel, mMaxHdcpDecryptRetryInSecs);
                     mCryptoAsync->setCallback(
                     std::make_unique<CryptoAsyncCallback>(new AMessage(kWhatCodecNotify, this)));
                     mCryptoLooper = new ALooper();
@@ -5832,6 +5995,10 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
             sp<AReplyToken> replyID;
             CHECK(msg->senderAwaitsResponse(&replyID));
+            mInputBufferRetryQueue.clear();
+            if (mRetryHdcpFailure) {
+                std::get<0>(mRetryHdcpFailure.value()) = 0;
+            }
             stopCryptoAsync();
             sp<AMessage> asyncNotify;
             (void)msg->findMessage("async", &asyncNotify);
@@ -6079,22 +6246,50 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
         case kWhatQueueInputBuffer:
         {
-            sp<AReplyToken> replyID;
-            CHECK(msg->senderAwaitsResponse(&replyID));
+            auto sendReplyIfPossible = [&](status_t err) -> bool {
+                sp<AReplyToken> replyID;
+                msg->senderAwaitsResponse(&replyID);
+                if (!mRetryHdcpFailure) {
+                    CHECK(replyID != nullptr);
+                }
+                if (replyID != nullptr) {
+                    PostReplyWithError(replyID, err);
+                    return true;
+                }
+                return false;
+            };
 
             if (!isExecuting()) {
                 mErrorLog.log(LOG_TAG, base::StringPrintf(
                         "queueInputBuffer() is valid only at Executing states; currently %s",
                         apiStateString().c_str()));
-                PostReplyWithError(replyID, INVALID_OPERATION);
+                if (!sendReplyIfPossible(INVALID_OPERATION)) {
+                    setStickyError(INVALID_OPERATION);
+                    postActivityNotificationIfPossible();
+                    cancelPendingDequeueOperations();
+                }
                 break;
             } else if (mFlags & kFlagStickyError) {
-                PostReplyWithError(replyID, getStickyError());
+                mErrorLog.log(LOG_TAG, base::StringPrintf(
+                        "queueInputBuffer() failed as MediaCodec already in error; currently %s",
+                        apiStateString().c_str()));
+                sendReplyIfPossible(INVALID_OPERATION);
                 break;
+            }
+            bool isThisRetryMsg = false;
+            if (mRetryHdcpFailure) {
+                isThisRetryMsg =
+                        find(mInputBufferRetryQueue.begin(),
+                                mInputBufferRetryQueue.end(), msg) != mInputBufferRetryQueue.end();
+
+                if (!mInputBufferRetryQueue.empty() && !isThisRetryMsg) {
+                    mInputBufferRetryQueue.push_back(msg);
+                    break;
+                }
             }
 
             status_t err = UNKNOWN_ERROR;
-            if (!mLeftover.empty()) {
+            if (!mLeftover.empty() && !isThisRetryMsg) {
                 mLeftover.push_back(msg);
                 size_t index;
                 msg->findSize("index", &index);
@@ -6103,7 +6298,29 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                 err = onQueueInputBuffer(msg);
             }
 
-            PostReplyWithError(replyID, err);
+            if (mRetryHdcpFailure && handleQueueInputBufferError(msg, err)) {
+                // we are retrying this message
+                msg->post(CryptoAsync::kRetryHdcpDecryptDelayUs);
+                break;
+            }
+
+            if (!sendReplyIfPossible(err) && err != OK) {
+                // for CSD or similar buffers
+                mErrorLog.log(LOG_TAG, base::StringPrintf(
+                    "queueInputBuffer() failed, with no replyID (may be CSD); currently %s",
+                    apiStateString().c_str()));
+                setStickyError(err);
+                postActivityNotificationIfPossible();
+                cancelPendingDequeueOperations();
+            }
+            if (mRetryHdcpFailure) {
+                if (err != OK) {
+                    mInputBufferRetryQueue.clear();
+                } else if (!mInputBufferRetryQueue.empty()){
+                    sp<AMessage> nextMsg = mInputBufferRetryQueue.front();
+                    nextMsg->post();
+                }
+            }
             break;
         }
 
@@ -6303,6 +6520,10 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
             stopCryptoAsync();
             mCodec->signalFlush();
             returnBuffersToCodec();
+            mInputBufferRetryQueue.clear();
+            if (mRetryHdcpFailure) {
+                std::get<0>(mRetryHdcpFailure.value()) = 0;
+            }
             TunnelPeekState previousState = mTunnelPeekState;
             if (previousState != TunnelPeekState::kLegacyMode) {
                 mTunnelPeekState = mTunnelPeekEnabled ? TunnelPeekState::kEnabledNoBuffer :
@@ -6575,15 +6796,13 @@ void MediaCodec::handleOutputFormatChangeIfNeeded(const sp<MediaCodecBuffer> &bu
 
     updateHdrMetrics(false /* isConfig */);
 
-    if (mDomain == DOMAIN_VIDEO) {
-        bool isEncoder = mFlags & kFlagIsEncoder;
-        // Since the output format has changed, see if we need to update
-        // operating frame-rate.
-        float frameRate = getOperatingFrameRate(mOutputFormat, mFrameRate, isEncoder);
-        // if the operating frame-rate has changed, we need to recalibrate the
-        // required system resources again and notify the caller.
-        if (frameRate != mFrameRate) {
-            mFrameRate = frameRate;
+    // For the audio codec, if the operating rate was from sample-rate,
+    // get the updated sample-rate if available.
+    if (mOperatingRate.mSource == SAMPLE_RATE && mDomain == DOMAIN_AUDIO) {
+        float sampleRate = getSampleRateForAudio(mOutputFormat, mOperatingRate.mValue);
+        // If it has been updated, we need to recalibrate the resource usage and notify the caller.
+        if (sampleRate != mOperatingRate.mValue) {
+            mOperatingRate.mValue = sampleRate;
             if (getRequiredSystemResources()) {
                 onRequiredResourcesChanged();
             }
@@ -6642,18 +6861,18 @@ void MediaCodec::extractCSD(const sp<AMessage> &format) {
 
 status_t MediaCodec::queueCSDInputBuffer(size_t bufferIndex) {
     CHECK(!mCSD.empty());
-
     sp<ABuffer> csd = *mCSD.begin();
     mCSD.erase(mCSD.begin());
     std::shared_ptr<C2Buffer> c2Buffer;
     sp<hardware::HidlMemory> memory;
-
+    size_t offset = 0;
+    sp<IMemory> mem = nullptr;
     if (mFlags & kFlagUseBlockModel) {
         if (hasCryptoOrDescrambler()) {
             constexpr size_t kInitialDealerCapacity = 1048576;  // 1MB
             thread_local sp<MemoryDealer> sDealer = new MemoryDealer(
                     kInitialDealerCapacity, "CSD(1MB)");
-            sp<IMemory> mem = sDealer->allocate(csd->size());
+            mem = sDealer->allocate(csd->size());
             if (mem == nullptr) {
                 size_t newDealerCapacity = sDealer->getMemoryHeap()->getSize() * 2;
                 while (csd->size() * 2 > newDealerCapacity) {
@@ -6667,6 +6886,7 @@ status_t MediaCodec::queueCSDInputBuffer(size_t bufferIndex) {
             memcpy(mem->unsecurePointer(), csd->data(), csd->size());
             ssize_t heapOffset;
             memory = hardware::fromHeap(mem->getMemory(&heapOffset, nullptr));
+            offset += heapOffset;
         } else {
             std::shared_ptr<C2LinearBlock> block =
                 FetchLinearBlock(csd->size(), {std::string{mComponentName.c_str()}});
@@ -6713,7 +6933,7 @@ status_t MediaCodec::queueCSDInputBuffer(size_t bufferIndex) {
 
     sp<AMessage> msg = new AMessage(kWhatQueueInputBuffer, this);
     msg->setSize("index", bufferIndex);
-    msg->setSize("offset", 0);
+    msg->setSize("offset", offset);
     msg->setSize("size", csd->size());
     msg->setInt64("timeUs", 0LL);
     msg->setInt32("flags", BUFFER_FLAG_CODECCONFIG);
@@ -6726,9 +6946,32 @@ status_t MediaCodec::queueCSDInputBuffer(size_t bufferIndex) {
         sp<WrapperObject<sp<hardware::HidlMemory>>> obj{
             new WrapperObject<sp<hardware::HidlMemory>>{memory}};
         msg->setObject("memory", obj);
+        sp<WrapperObject<sp<IMemory>>> memObj{
+            new WrapperObject<sp<IMemory>>{mem}};
+        msg->setObject("imemory", memObj);
+    }
+    if (mRetryHdcpFailure) {
+        if(!mInputBufferRetryQueue.empty()) {
+            // remove errorstring as we cannot use this during retry.
+            msg->removeEntryByName("errorDetailMsg");
+            mInputBufferRetryQueue.push_back(msg);
+            return OK;
+        }
     }
 
-    return onQueueInputBuffer(msg);
+    status_t err = onQueueInputBuffer(msg);
+
+    if (mRetryHdcpFailure) {
+        if (handleQueueInputBufferError(msg, err)) {
+             // remove errorstring as we cannot use this during retry.
+             msg->removeEntryByName("errorDetailMsg");
+            msg->post(CryptoAsync::kRetryHdcpDecryptDelayUs);
+        } else if (err != OK) {
+            mInputBufferRetryQueue.clear();
+        }
+    }
+
+    return err;
 }
 
 void MediaCodec::setState(State newState) {
@@ -7054,6 +7297,13 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
                         memory, (mFlags & kFlagIsSecure), key, iv, mode, pattern,
                         offset, subSamples, numSubSamples, buffer, &errorDetailMsg);
             }
+            if (mRetryHdcpFailure
+                    && err == ERROR_DRM_INSUFFICIENT_OUTPUT_PROTECTION
+                    && std::get<0>(
+                            mRetryHdcpFailure.value()) <= mMaxHdcpDecryptRetryInSecs) {
+                    // we need to retry
+                    return err;
+            }
             if (err != OK && hasCryptoOrDescrambler()
                     && (mFlags & kFlagUseCryptoAsync)) {
                 // create error detail
@@ -7118,7 +7368,7 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
 
     if (hasCryptoOrDescrambler() && !c2Buffer && !memory) {
         AString *errorDetailMsg;
-        CHECK(msg->findPointer("errorDetailMsg", (void **)&errorDetailMsg));
+        msg->findPointer("errorDetailMsg", (void **)&errorDetailMsg);
         // Notify mCrypto of video resolution changes
         if (mTunneled && mCrypto != NULL) {
             int32_t width, height;
@@ -7156,7 +7406,8 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
         }
         if (err != OK) {
             mediametrics_setInt32(mMetricsHandle, kCodecQueueSecureInputBufferError, err);
-            ALOGW("Log queueSecureInputBuffer error: %d", err);
+            ALOGW("Log queueSecureInputBuffer(s) error: %d\nError: %s",
+                    err, errorDetailMsg != nullptr ? errorDetailMsg->c_str() : "unknown");
         }
     } else {
         err = mBufferChannel->queueInputBuffer(buffer);
@@ -7167,6 +7418,14 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
     }
 
     if (err == OK) {
+        if (mRetryHdcpFailure) {
+            auto& [cntr, success, failure] = mRetryHdcpFailure.value();
+            if (cntr > 0) {
+                // update success metric
+                success++;
+            }
+            cntr = 0;
+        }
         if (mTunneled && (flags & (BUFFER_FLAG_DECODE_ONLY | BUFFER_FLAG_END_OF_STREAM)) == 0) {
             mVideoRenderQualityTracker.onTunnelFrameQueued(timeUs);
         }
@@ -7198,6 +7457,10 @@ status_t MediaCodec::handleLeftover(size_t index) {
     mLeftover.pop_front();
     msg->setSize("index", index);
     ALOGV("handleLeftover(%zu)", index);
+    if (mRetryHdcpFailure && !mInputBufferRetryQueue.empty()) {
+        mInputBufferRetryQueue.push_back(msg);
+        return OK;
+    }
     return onQueueInputBuffer(msg);
 }
 
@@ -7705,6 +7968,31 @@ status_t MediaCodec::setParameters(const sp<AMessage> &params) {
     sp<AMessage> msg = new AMessage(kWhatSetParameters, this);
     msg->setMessage("params", params);
 
+    // Look for Operating Rate in the parameter.
+    float operatingRate = 0;
+    if (getValueFor(params, KEY_OPERATING_RATE, &operatingRate) && operatingRate > 0) {
+        mOperatingRate.mValue = operatingRate;
+        mOperatingRate.mSource = OPERATING_RATE;
+    } else if (mDomain == DOMAIN_VIDEO && mOperatingRate.mSource <= CAPTURE_RATE) {
+        bool isEncoder = (mFlags & kFlagIsEncoder);
+        if (isEncoder) {
+            float captureRate = 0;
+            if (getValueFor(params, KEY_CAPTURE_RATE, &captureRate) && captureRate > 0) {
+                mOperatingRate.mValue = captureRate;
+                mOperatingRate.mSource = CAPTURE_RATE;
+            }
+        }
+
+        if (mOperatingRate.mSource <= FRAME_RATE) {
+            // See if the user has set the frame-rate.
+            float frameRate = 0;
+            if (getValueFor(params, KEY_FRAME_RATE, &frameRate) && frameRate > 0) {
+                mOperatingRate.mValue = frameRate;
+                mOperatingRate.mSource = FRAME_RATE;
+            }
+        }
+    }
+
     sp<AMessage> response;
     return PostAndAwaitResponse(msg, &response);
 }
@@ -7846,6 +8134,35 @@ std::string MediaCodec::stateString(State state) {
             break;
     }
     return rval;
+}
+
+// Always called from the looper, henced not mutexed
+bool MediaCodec::handleQueueInputBufferError(const sp<AMessage> &msg, status_t &err) {
+    if (!mRetryHdcpFailure) {
+        return false;
+    }
+    auto retryMsgIter = find(mInputBufferRetryQueue.begin(), mInputBufferRetryQueue.end(), msg);
+    if (err != ERROR_DRM_INSUFFICIENT_OUTPUT_PROTECTION) {
+        if (retryMsgIter != mInputBufferRetryQueue.end()) {
+            mInputBufferRetryQueue.erase(retryMsgIter);
+        }
+        return false;
+    }
+    auto& [cntr, success, failure] = mRetryHdcpFailure.value();
+    if (++cntr > mMaxHdcpDecryptRetryInSecs) {
+        mInputBufferRetryQueue.clear();
+        failure++;
+        mErrorLog.log(LOG_TAG, base::StringPrintf(
+                "HDCP retry failed due to HDCP error after(%d) max(%d) retries.",
+                cntr, mMaxHdcpDecryptRetryInSecs));
+        return false;
+    }
+
+    if (retryMsgIter == mInputBufferRetryQueue.end()) {
+        mInputBufferRetryQueue.push_back(msg);
+    }
+    err = OK;
+    return true;
 }
 
 // static

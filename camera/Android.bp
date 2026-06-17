@@ -68,11 +68,6 @@ java_aconfig_library {
     aconfig_declarations: "camera_platform_flags",
 }
 
-cc_library_headers {
-    name: "camera_headers",
-    export_include_dirs: ["include"],
-}
-
 cc_library {
     name: "libcamera_client",
 
@@ -199,6 +194,9 @@ filegroup {
         "aidl/android/hardware/camera2/ICameraInjectionSession.aidl",
         "aidl/android/hardware/camera2/ICameraOfflineSession.aidl",
         "aidl/android/hardware/camera2/CameraMetadataInfo.aidl",
+        "aidl/android/hardware/camera2/impl/MultiResConcurrentReadersStartInfo.aidl",
+        "aidl/android/hardware/camera2/utils/OutputAndInputStreamIds.aidl",
+        "aidl/android/hardware/camera2/utils/SessionConfigurationAndStreamIds.aidl",
     ],
     path: "aidl",
 }

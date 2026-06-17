@@ -234,6 +234,35 @@ void mergeResources(MediaResourceParcel& r1, const MediaResourceParcel& r2) {
     }
 }
 
+std::vector<MediaResourceParcel> calculateResourceDifference(
+        const std::vector<MediaResourceParcel>& resourcesFrom,
+        const std::vector<MediaResourceParcel>& resourcesWhat) {
+    // deltaResources = resourcesFrom - resourcesWhat
+    std::map<MediaResourceType, MediaResourceParcel> differenceMap;
+
+    // Populate the map with resources from the base vector (resourcesFrom)
+    for (const MediaResourceParcel& res : resourcesFrom) {
+        differenceMap[res.type] = res;
+    }
+
+    // Subtract the amounts from the second vector (resourcesWhat)
+    for (const MediaResourceParcel& res : resourcesWhat) {
+        // If the resource exists, subtract the amount.
+        // If the resource is new (unique to resourcesWhat), a negative value will be inserted.
+        differenceMap[res.type].type = res.type;
+        differenceMap[res.type].value -= res.value;
+    }
+
+    // Map to vector
+    std::vector<MediaResourceParcel> deltaResources;
+    deltaResources.reserve(differenceMap.size());
+    for (const auto& pair : differenceMap) {
+        deltaResources.push_back(pair.second);
+    }
+
+    return deltaResources;
+}
+
 ///////////////////////////////////////////////////////////////////////
 ////////////// Death Notifier implementation   ////////////////////////
 ///////////////////////////////////////////////////////////////////////
@@ -339,6 +368,24 @@ void notifyResourceGranted(int pid, const std::vector<MediaResourceParcel>& reso
             }
         }
     }
+}
+
+std::string toString(const std::vector<MediaResourceParcel>& resources, size_t maxElements) {
+    std::ostringstream logMsg;
+    // To track number of resources are being converted to string.
+    // Once this exceeds maxElements, we stop Stringifying to limit the size of the output.
+    size_t items = 1;
+
+    logMsg << "{";
+    for (const MediaResourceParcel& res : resources) {
+        logMsg << " [" << static_cast<int>(res.type) << " : " << res.value << "]";
+        if (++items > maxElements) {
+            break;
+        }
+    }
+    logMsg << " }";
+
+    return logMsg.str();
 }
 
 } // namespace android

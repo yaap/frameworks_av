@@ -184,7 +184,7 @@ class Camera3Device :
             const std::unordered_set<int32_t> &sensorPixelModesUsed,
             std::vector<int> *surfaceIds = nullptr,
             int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
-            bool isShared = false, bool isMultiResolution = false,
+            bool isShared = false, int multiResMode = OutputConfiguration::MULTI_RES_OFF,
             uint64_t consumerUsage = 0,
             int64_t dynamicRangeProfile =
             ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
@@ -202,7 +202,7 @@ class Camera3Device :
             const std::unordered_set<int32_t> &sensorPixelModesUsed,
             std::vector<int> *surfaceIds = nullptr,
             int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
-            bool isShared = false, bool isMultiResolution = false,
+            bool isShared = false, int multiResMode = OutputConfiguration::MULTI_RES_OFF,
             uint64_t consumerUsage = 0,
             int64_t dynamicRangeProfile =
             ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
@@ -309,7 +309,16 @@ class Camera3Device :
     status_t updateStream(int streamId, const std::vector<SurfaceHolder> &newSurfaces,
             const std::vector<OutputStreamInfo> &outputInfo,
             const std::vector<size_t> &removedSurfaceIds,
-            KeyedVector<sp<Surface>, size_t> *outputMap/*out*/);
+            bool modifyRequests,
+            KeyedVector<sp<Surface>, size_t> *outputMap/*out*/,
+            int64_t* lastFrameNumber = nullptr) override;
+
+    /**
+     * Update the surface id of a given internal stream.
+     */
+    virtual status_t updateInternalStream(int streamId, size_t surfaceId,
+            KeyedVector<sp<Surface>, size_t> *outputMap/*out*/,
+            int64_t *lastFrameNumber = nullptr /*out*/) override;
 
     /**
      * Drop buffers for stream of streamId if dropping is true. If dropping is false, do not
@@ -400,6 +409,9 @@ class Camera3Device :
 
     // Whether the device is in error state
     bool hasDeviceError();
+
+    // Get Error State
+    int32_t getErrorState();
 
     /**
      * The injection camera session to replace the internal camera
@@ -560,6 +572,8 @@ class Camera3Device :
         void getInflightRequestBufferKeys(std::vector<uint64_t>* out);
 
         void onStreamReConfigured(int streamId);
+
+        void clearUnusedBufferCaches(int streamId);
 
       protected:
 
@@ -933,10 +947,10 @@ class Camera3Device :
      * error message to indicate why. Only the first call's message will be
      * used. The message is also sent to the log.
      */
-    void               setErrorState(const char *fmt, ...) override;
-    void               setErrorStateLocked(const char *fmt, ...) override;
-    void               setErrorStateV(const char *fmt, va_list args);
-    void               setErrorStateLockedV(const char *fmt, va_list args);
+    void               setErrorState(int32_t errorType, const char *fmt, ...) override;
+    void               setErrorStateLocked(int32_t errorType, const char *fmt, ...) override;
+    void               setErrorStateV(int32_t errorType, const char *fmt, va_list args);
+    void               setErrorStateLockedV(int32_t errorType, const char *fmt, va_list args);
 
     bool               isInErrorState();
 
@@ -1032,6 +1046,18 @@ class Camera3Device :
          * Remove all queued and repeating requests, and pending triggers
          */
         status_t clear(/*out*/int64_t *lastFrameNumber = NULL);
+
+        /**
+         * Remove all queued and repeating requests, and pending triggers
+         * of a given list of surface Ids
+         */
+        status_t clearOutputs(int streamId, const std::vector<size_t>& surfaceIds,
+                /*out*/int64_t *lastFrameNumber = NULL);
+
+        static bool containsSurfaceIds(int streamId, const sp<CaptureRequest>& request,
+                const std::vector<size_t>& surfaceIds);
+        bool clearOutputList(int streamId, const std::vector<size_t>& surfaceIds,
+                RequestList& requestList, sp<NotificationListener> listener);
 
         /**
          * Flush all pending requests in HAL.
@@ -1214,7 +1240,7 @@ class Camera3Device :
         void               unpauseForNewRequests();
 
         // Relay error to parent device object setErrorState
-        void               setErrorState(const char *fmt, ...);
+        void               setErrorState(int32_t errorType, const char *fmt, ...);
 
         // If the input request is in mRepeatingRequests. Must be called with mRequestLock hold
         bool isRepeatingRequestLocked(const sp<CaptureRequest>&);
@@ -1235,7 +1261,7 @@ class Camera3Device :
                 const camera_metadata_t *request);
 
         // Check and update latest session parameters based on the current request settings.
-        bool updateSessionParameters(const CameraMetadata& settings, bool *updatesDetected/*out*/);
+        bool updateSessionParameters(const CameraMetadata& settings);
 
         // Check whether FPS range session parameter re-configuration is needed in constrained
         // high speed recording camera sessions.
@@ -1360,7 +1386,8 @@ class Camera3Device :
     status_t registerInFlight(uint32_t frameNumber,
             int32_t numBuffers, CaptureResultExtras resultExtras, bool hasInput,
             bool callback, nsecs_t minExpectedDuration, nsecs_t maxExpectedDuration,
-            bool isFixedFps, const std::set<std::set<std::string>>& physicalCameraIds,
+            bool isFixedFps, const std::set<std::string>& physicalCameraIds,
+            std::map<int, camera3::MultiResInflightRequest>&& requestedMultiResPhysicalIds,
             bool isStillCapture, bool isZslCapture, bool rotateAndCropAuto, bool autoframingAuto,
             const std::set<std::string>& cameraIdsWithZoom, bool useZoomRatio,
             const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs,
@@ -1527,7 +1554,8 @@ class Camera3Device :
     bool mUseHalBufManager = false;
     std::set<int32_t > mHalBufManagedStreamIds;
     bool mSessionHalBufManager = false;
-    // Lock to ensure requestStreamBuffers() callbacks are serialized
+    // Lock to ensure requestStreamBuffers() callbacks and request thread buffer allocations
+    // are serialized along with output surface updates
     std::mutex mRequestBufferInterfaceLock;
 
     // The state machine to control when requestStreamBuffers should allow

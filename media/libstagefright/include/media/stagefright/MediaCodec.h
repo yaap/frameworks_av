@@ -162,7 +162,6 @@ struct MediaCodec : public AHandler {
      *
      * It will return INVALID_OPERATION if:
      *  - HAL does not implement codec availability API
-     *  - codec_availability feature flag isn't defined.
      */
     static status_t getGloballyAvailableResources(std::vector<GlobalResourceInfo>& resources);
 
@@ -188,7 +187,6 @@ struct MediaCodec : public AHandler {
      * returning INVALID_OPERATION error code.
      * It will also return INVALID_OPERATION if:
      *  - HAL does not implement codec availability API
-     *  - codec_availability feature flag isn't defined.
      */
     status_t getRequiredResources(std::vector<InstanceResourceInfo>& resources);
 
@@ -390,6 +388,8 @@ private:
             const std::vector<InstanceResourceInfo>& resources);
     void updateResourceUsage(const std::vector<InstanceResourceInfo>& oldResources,
                              const std::vector<InstanceResourceInfo>& newResources);
+    // Calculate the operating rate.
+    void findOperatingRate(const sp<AMessage> &format, uint32_t flags);
 
 private:
     enum State {
@@ -798,6 +798,17 @@ private:
 
     sp<BatteryChecker> mBatteryChecker;
 
+    // property specified max hdcp failure retry time(in secs)
+    uint32_t mMaxHdcpDecryptRetryInSecs;
+    // HDCP tuple<currentRetryCounter, retrySuccessCounter, retryFailureCounter>
+    std::optional<std::tuple<uint32_t, uint32_t, uint32_t>> mRetryHdcpFailure;
+    std::list<sp<AMessage>> mInputBufferRetryQueue;
+    // Handles errors encountered during queueInputBuffer. This is to manage
+    // retries, particularly for HDCP-related failures.
+    // Returns true if the error was handled (e.g. by queuing for retry),
+    // false otherwise, if error cannot be handled (e.g. retry exhausted).
+    bool handleQueueInputBufferError(const sp<AMessage> &msg, status_t &err);
+
     void statsBufferSent(int64_t presentationUs, const sp<MediaCodecBuffer> &buffer);
     void statsBufferReceived(int64_t presentationUs, const sp<MediaCodecBuffer> &buffer);
     bool discardDecodeOnlyOutputBuffer(size_t index);
@@ -835,8 +846,22 @@ private:
     // Required resource info for this codec.
     Mutexed<std::vector<InstanceResourceInfo>> mRequiredResourceInfo;
 
-    // Default frame-rate.
-    float mFrameRate = 30.0;
+    // Source for operating rate.
+    enum OperatingRateSource {
+        DEFAULT = 0,        // Default operating rate source. The value is 30 for video codec.
+        FRAME_RATE = 1,     // fallback operating rate from frame rate for video codecs.
+        CAPTURE_RATE = 2,   // fallback operating rate from capture rate for video encoders.
+        SAMPLE_RATE = 3,    // fallback operating rate from sample rate for audio codecs.
+        OPERATING_RATE = 4, // from operating-rate itself.
+    };
+
+    struct OperatingRate {
+        OperatingRateSource mSource = DEFAULT;
+        // Default operating-rate as 30 fps for video codecs.
+        // For audio codecs, this will be updated either by the operating rate or sample rate.
+        float mValue = 30.0;
+    };
+    OperatingRate mOperatingRate;
 
     DISALLOW_EVIL_CONSTRUCTORS(MediaCodec);
 };

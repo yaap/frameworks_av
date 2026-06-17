@@ -306,18 +306,10 @@ bool AudioPolicyManagerFuzzer::getInputForAttr(
 bool AudioPolicyManagerFuzzer::findDevicePort(audio_port_role_t role, audio_devices_t deviceType,
                                               const std::string &address,
                                               audio_port_v7 *foundPort) {
-    uint32_t numPorts = 0;
-    uint32_t generation1;
     status_t ret;
-
-    ret = mManager->listAudioPorts(role, AUDIO_PORT_TYPE_DEVICE, &numPorts, nullptr, &generation1);
-    if (ret != NO_ERROR) {
-        return false;
-    }
-
-    uint32_t generation2;
-    struct audio_port_v7 ports[numPorts];
-    ret = mManager->listAudioPorts(role, AUDIO_PORT_TYPE_DEVICE, &numPorts, ports, &generation2);
+    uint32_t generation;
+    std::vector<audio_port_v7> ports;
+    ret = mManager->listAudioPorts(role, AUDIO_PORT_TYPE_DEVICE, ports, &generation);
     if (ret != NO_ERROR) {
         return false;
     }
@@ -922,6 +914,7 @@ void AudioPolicyManagerFuzzerDeviceConnection::fuzzGetDirectPlaybackSupport() {
     const uint32_t numTestCases = mFdp->ConsumeIntegralInRange<uint32_t>(1, 10);
     for (int i = 0; i < numTestCases; ++i) {
         audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
+        uid_t uid = mFdp->ConsumeIntegral<uint32_t>();
         attr.content_type = getValueFromVector<audio_content_type_t>(mFdp, kAudioContentTypes);
         attr.usage = getValueFromVector<audio_usage_t>(mFdp, kAudioUsages);
         attr.source = getValueFromVector<audio_source_t>(mFdp, kAudioSources);
@@ -930,7 +923,7 @@ void AudioPolicyManagerFuzzerDeviceConnection::fuzzGetDirectPlaybackSupport() {
         config.channel_mask = getValueFromVector<audio_channel_mask_t>(mFdp, kAudioChannelOutMasks);
         config.format = getValueFromVector<audio_format_t>(mFdp, kAudioFormats);
         config.sample_rate = getValueFromVector<uint32_t>(mFdp, kSamplingRates);
-        mManager->getDirectPlaybackSupport(&attr, &config);
+        mManager->getDirectPlaybackSupport(&attr, uid, &config);
     }
 }
 
@@ -939,11 +932,12 @@ void AudioPolicyManagerFuzzerDeviceConnection::fuzzGetDirectProfilesForAttribute
     for (int i = 0; i < numTestCases; ++i) {
         AudioProfileVector audioProfiles;
         audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
+        uid_t uid = mFdp->ConsumeIntegral<uint32_t>();
         attr.content_type = getValueFromVector<audio_content_type_t>(mFdp, kAudioContentTypes);
         attr.usage = getValueFromVector<audio_usage_t>(mFdp, kAudioUsages);
         attr.source = getValueFromVector<audio_source_t>(mFdp, kAudioSources);
         attr.flags = getValueFromVector<audio_flags_mask_t>(mFdp, kAudioFlagMasks);
-        mManager->getDirectProfilesForAttributes(&attr, audioProfiles);
+        mManager->getDirectProfilesForAttributes(&attr, uid, audioProfiles);
     }
 }
 

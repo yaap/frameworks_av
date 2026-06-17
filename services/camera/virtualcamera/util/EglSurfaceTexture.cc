@@ -30,6 +30,7 @@
 #include <mutex>
 
 #include "EglUtil.h"
+#include "android-base/thread_annotations.h"
 
 namespace android {
 namespace companion {
@@ -37,7 +38,7 @@ namespace virtualcamera {
 namespace {
 
 // Maximal number of buffers producer can dequeue without blocking.
-constexpr int kBufferProducerMaxDequeueBufferCount = 64;
+constexpr int kBufferProducerMaxDequeueBufferCount = 4;
 
 }  // namespace
 
@@ -84,6 +85,9 @@ EglSurfaceTexture::~EglSurfaceTexture() {
   if (mTextureId != 0) {
     glDeleteTextures(1, &mTextureId);
   }
+  mGlConsumer->abandon();
+  mGlConsumer.clear();
+  mSurface.clear();
 }
 
 sp<Surface> EglSurfaceTexture::getSurface() {
@@ -101,6 +105,8 @@ void EglSurfaceTexture::setFrameAvailableListener(
 
 bool EglSurfaceTexture::waitForNextFrame(const std::chrono::nanoseconds timeout) {
   std::unique_lock<std::mutex> lock(mWaitForFrameMutex);
+  base::ScopedLockAssertion lockAssertion(mWaitForFrameMutex);
+  mInterruptWait = false;
   mGlConsumer->updateTexImage();
   const long lastRenderedFrame = mGlConsumer->getFrameNumber();
   const long lastWaitedForFrame = mLastWaitedFrame.exchange(lastRenderedFrame);
@@ -113,15 +119,29 @@ bool EglSurfaceTexture::waitForNextFrame(const std::chrono::nanoseconds timeout)
       "%s waiting for max %lld ns. Last waited frame:%ld, last rendered "
       "frame:%ld",
       __func__, timeout.count(), lastWaitedForFrame, lastRenderedFrame);
-  return mFrameAvailableCondition.wait_for(lock, timeout, [this]() {
+  mFrameAvailableCondition.wait_for(lock, timeout, [this]() {
+    base::ScopedLockAssertion lockAssertion(mWaitForFrameMutex);
+    if (std::exchange(mInterruptWait, false)) {
+      return true;
+    }
     // Call updateTexImage to update the frame number.
     mGlConsumer->updateTexImage();
     const long lastRenderedFrame = mGlConsumer->getFrameNumber();
     return lastRenderedFrame > mLastWaitedFrame.exchange(lastRenderedFrame);
   });
+
+  // If we were notified, we need to check if it was because of an interrupt
+  // or because a new frame was available.
+  return mGlConsumer->getFrameNumber() > lastWaitedForFrame;
 }
 
-std::chrono::nanoseconds EglSurfaceTexture::getTimestamp() {
+void EglSurfaceTexture::interruptWait() {
+  std::lock_guard<std::mutex> lock(mWaitForFrameMutex);
+  mInterruptWait = true;
+  mFrameAvailableCondition.notify_all();
+}
+
+std::chrono::nanoseconds EglSurfaceTexture::getTimestamp() const {
   return std::chrono::nanoseconds(mGlConsumer->getTimestamp());
 }
 

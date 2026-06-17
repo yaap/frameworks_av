@@ -146,6 +146,8 @@ void AudioPolicyMix::dump(String8 *dst, int spaces, int index) const
 
     dst->appendFormat("%*s- virtual device id: %d\n", spaces, "", mVirtualDeviceId);
 
+    dst->appendFormat("%*s- is persistent: %d\n", spaces, "", mIsPersistent);
+
     dst->appendFormat("%*s- output: %d\n", spaces, "",
             mOutput == nullptr ? 0 : mOutput->mIoHandle);
 
@@ -207,8 +209,9 @@ status_t AudioPolicyMixCollection::registerMix(const AudioMix& mix,
     }
     sp<AudioPolicyMix> policyMix = sp<AudioPolicyMix>::make(mix);
     add(policyMix);
-    ALOGD("registerMix(): adding mix for dev=0x%x addr=%s",
-            policyMix->mDeviceType, policyMix->mDeviceAddress.c_str());
+    ALOGD("registerMix(): adding mix for dev=0x%x addr=%s isPersistent=%d",
+            policyMix->mDeviceType, policyMix->mDeviceAddress.c_str(),
+            policyMix->mIsPersistent);
 
     if (desc != nullptr) {
         desc->mPolicyMix = policyMix;
@@ -394,8 +397,17 @@ sp<DeviceDescriptor> AudioPolicyMixCollection::getOutputDeviceForMix(const Audio
                                                     const DeviceVector& availableOutputDevices) {
     ALOGV("%s: device (0x%x, addr=%s) forced by mix", __func__, mix->mDeviceType,
         mix->mDeviceAddress.c_str());
-    return availableOutputDevices.getDevice(mix->mDeviceType, mix->mDeviceAddress,
-        AUDIO_FORMAT_DEFAULT);
+
+    // The mix may have an input device type (e.g. for MIX_TYPE_RECORDERS) even though we are
+    // looking for an output device here. For loopback mixes, we need to translate it to the
+    // corresponding output device.
+    audio_devices_t deviceType = mix->mDeviceType;
+    if (deviceType == AUDIO_DEVICE_IN_REMOTE_SUBMIX && is_mix_loopback(mix->mRouteFlags)) {
+        deviceType = AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
+    }
+
+    return availableOutputDevices.getDevice(
+            deviceType, mix->mDeviceAddress, AUDIO_FORMAT_DEFAULT);
 }
 
 bool AudioPolicyMixCollection::mixDisallowsRequestedDevice(const AudioMix* mix,

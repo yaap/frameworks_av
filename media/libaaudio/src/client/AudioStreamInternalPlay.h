@@ -17,17 +17,23 @@
 #ifndef ANDROID_AAUDIO_AUDIO_STREAM_INTERNAL_PLAY_H
 #define ANDROID_AAUDIO_AUDIO_STREAM_INTERNAL_PLAY_H
 
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
+#include <aaudio/DrainType.h>
+#include <audio_utils/TimerQueue.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
 #include <condition_variable>
 #include <mutex>
 #include <stdint.h>
 #include <thread>
+// go/keep-sorted end
 
-#include <aaudio/AAudio.h>
-#include <audio_utils/TimerQueue.h>
-#include <mediautils/SingleThreadExecutor.h>
-
+// go/keep-sorted start
+#include "AudioStreamInternal.h"
 #include "binding/AAudioServiceInterface.h"
-#include "client/AudioStreamInternal.h"
+// go/keep-sorted end
 
 using android::sp;
 
@@ -47,7 +53,7 @@ public:
                                      bool inService = false);
     virtual ~AudioStreamInternalPlay() = default;
 
-    aaudio_result_t open(const AudioStreamBuilder &builder) override;
+    aaudio_result_t open(const AAudioStreamOpenRequest& openRequest) override;
 
     aaudio_result_t requestPause_l() REQUIRES(mStreamMutex) override;
 
@@ -86,11 +92,15 @@ public:
         mPresentationEndCallbackUserData = userData;
     }
 
+    void setUseDataAvailableCallback() {
+        mUseDataAvailableCallback = true;
+    }
+
 protected:
 
-    void prepareBuffersForStart() override;
+    void prepareBuffersForStart_l(StartType startType = DEFAULT) REQUIRES(mStreamMutex) final;
 
-    void prepareBuffersForStop() override;
+    aaudio_result_t prepareBuffersForStop_l() REQUIRES(mStreamMutex) final;
 
     void advanceClientToMatchServerPosition(int32_t serverMargin) override;
 
@@ -110,6 +120,7 @@ protected:
                              int64_t currentTimeNanos,
                              int64_t *wakeTimePtr) override;
 
+    aaudio_result_t requestStart_l() REQUIRES(mStreamMutex) final;
     aaudio_result_t requestStop_l() REQUIRES(mStreamMutex) final;
 
     void wakeupCallbackThread_l() REQUIRES(mStreamMutex) final;
@@ -122,6 +133,10 @@ protected:
                getDeviceBufferSize() > getDeviceSampleRate();
     }
 
+    int32_t getMinOffloadCallbackProcessingPeriodMs() const final {
+        return kOffloadFlushFromSafeMarginMs;
+    }
+
     aaudio_result_t setPlaybackParameters_l(const AAudioPlaybackParameters* parameters)
             REQUIRES(mStreamMutex) final;
     aaudio_result_t getPlaybackParameters_l(AAudioPlaybackParameters* parameters)
@@ -131,28 +146,34 @@ protected:
 
 private:
     /*
-     * Asynchronous write with data conversion.
+     * Asynchronous write with potental data conversion.
      * @param buffer
      * @param numFrames
      * @return frames written or negative error
      */
-    aaudio_result_t writeNowWithConversion(const void *buffer,
-                                           int32_t numFrames);
+    // General dispatch method, finds the best method to use below.
+    aaudio_result_t writeNowWithConversion(const void* buffer, int32_t numFrames);
+
+    // Optimized for matched sample rate.
+    aaudio_result_t writeNowWithConversionMatchedSampleRate(const void* buffer, int32_t numFrames);
+
+    // Full conversion method, may be slower than optimized variants above.
+    aaudio_result_t writeNowWithConversionFull(const void* buffer, int32_t numFrames);
+
+    void updateReadCounter(int64_t currentNanoTime);
 
     bool shouldStopStream() EXCLUDES(mStreamMutex);
-    void maybeCallPresentationEndCallback();
+    void maybeCallPresentationEndCallback_l() REQUIRES(mStreamMutex);
 
     void dropPresentationEndCallback_l() REQUIRES(mStreamMutex);
 
-    aaudio_result_t drainStream_l(int64_t wakeUpNanos, bool allowSoftWakeUp) REQUIRES(mStreamMutex);
+    aaudio_result_t drainStream_l(int64_t wakeUpNanos, DrainType drainType) REQUIRES(mStreamMutex);
     aaudio_result_t activateStream_l() REQUIRES(mStreamMutex);
-
-    android::sp<AudioStreamInternalPlay> getPtr() { return this; }
+    aaudio_result_t drainStream(DrainType drainType) EXCLUDES(mStreamMutex);
 
     bool mOffloadEosPending GUARDED_BY(mStreamMutex){false};
     std::condition_variable mStreamEndCV;
-    std::optional<android::mediautils::SingleThreadExecutor> mStreamEndExecutor
-            GUARDED_BY(mStreamMutex);
+    int64_t mOffloadEosNanosBoottime GUARDED_BY(mStreamMutex){0};
 
     AAudioStream_presentationEndCallback mPresentationEndCallbackProc = nullptr;
     void                                *mPresentationEndCallbackUserData = nullptr;
@@ -164,12 +185,29 @@ private:
     int32_t mOffloadFlushFromSafeMarginInFrames = 0;
     std::condition_variable mCallbackCV;
     bool mDraining GUARDED_BY(mStreamMutex){false};
+    DrainType mDrainType GUARDED_BY(mStreamMutex){DrainType::DRAIN_ALL_DATA};
     android::audio_utils::TimerQueue::handle_t mWakeUpHandle
             GUARDED_BY(mStreamMutex){android::audio_utils::TimerQueue::INVALID_HANDLE};
 
     std::mutex mEndpointMutex;
 
     AAudioPlaybackParameters mPlaybackParameters = AAUDIO_PLAYBACK_PARAMETERS_DEFAULT;
+
+    bool mPendingStop GUARDED_BY(mStreamMutex){false};
+
+    bool mUseDataAvailableCallback = false;
+    // The following two values will only be used if `mUseDataAvailableCallback` is true.
+    // When `mUseDataAvailableCallback` is true, the client won't provide data from data
+    // callback. Instead, it will call write. To avoid the callback thread keep spinning,
+    // the `mDrainingNanos` is set when drain is needed after a write. Then the data callback
+    // thread can use this value to drainStream and suspend.
+    int64_t mDrainingNanos GUARDED_BY(mStreamMutex){0};
+    // `mNeedCallbackWakeup` set to true can wake up the callback thread if it is using data
+    // available callback and waiting for client to write data or service to drain.
+    bool mNeedCallbackWakeup GUARDED_BY(mStreamMutex){false};
+
+    // This value is calculated when opening. It will not changed after open.
+    int64_t mNanosPerBurst = 0;
 };
 
 } /* namespace aaudio */

@@ -53,7 +53,8 @@ public:
                                 const alloc_type alloc = ALLOC_CBLK,
                                 track_type type = TYPE_DEFAULT,
                                 audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE,
-                                std::string metricsId = {});
+                                std::string metricsId = {},
+                                const std::string& codecProvenance = {});
     ~TrackBase() override;
 
     // Implement VolumePortInterface using helper VolumePortImpl.
@@ -79,6 +80,7 @@ public:
     bool isOutputTrack() const final { return (mType == TYPE_OUTPUT); }
     bool isPatchTrack() const final { return (mType == TYPE_PATCH); }
     bool isExternalTrack() const final { return !isOutputTrack() && !isPatchTrack(); }
+    void poison() override {}
     void invalidate() override {
                             if (mIsInvalid) return;
                             mTrackMetrics.logInvalidate();
@@ -375,6 +377,7 @@ protected:
     const audio_format_t mFormat;
     const audio_channel_mask_t mChannelMask;
     const uint32_t      mChannelCount;
+    const std::string   mCodecProvenance;
     const size_t        mFrameSize; // AudioFlinger's view of frame size in shared memory,
                                     // where for AudioTrack (but not AudioRecord),
                                     // 8-bit PCM samples are stored as 16-bit

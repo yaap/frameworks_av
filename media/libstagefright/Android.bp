@@ -91,6 +91,7 @@ cc_library_static {
         "HevcUtils.cpp",
         "MediaSource.cpp",
         "Utils.cpp",
+        "VvcUtils.cpp",
     ],
 
     shared_libs: [
@@ -225,10 +226,21 @@ cc_library_shared {
     },
 }
 
+filegroup {
+    name: "libstagefright_mediacodeclistgenerator_aidl",
+    srcs: ["aidl/android/media/IMediaCodecListGenerator.aidl"],
+    path: "aidl",
+}
+
 cc_library {
     name: "libstagefright",
 
+    defaults: [
+        "libaudioclient_client",
+    ],
+
     srcs: [
+        ":libstagefright_mediacodeclistgenerator_aidl",
         "AACWriter.cpp",
         "ACodec.cpp",
         "ACodecBufferChannel.cpp",
@@ -279,7 +291,13 @@ cc_library {
         "VideoFrameScheduler.cpp",
         "VideoFrameSchedulerBase.cpp",
         "VideoRenderQualityTracker.cpp",
+        "VvcUtils.cpp",
     ],
+
+    aidl: {
+        export_aidl_headers: true,
+        local_include_dirs: ["aidl"],
+    },
 
     shared_libs: [
         "aconfig_mediacodec_flags_c_lib",
@@ -287,9 +305,7 @@ cc_library {
         "android.hardware.drm@1.0",
         "android.hardware.media.omx@1.0",
         "android.hidl.allocator@1.0",
-        "framework-permission-aidl-cpp",
         "libaconfig_storage_read_api_cc",
-        "libaudioclient",
         "libaudioclient_aidl_conversion",
         "libaudiofoundation",
         "libaudioutils",
@@ -310,6 +326,7 @@ cc_library {
         "liblog",
         "libmedia",
         "libmedia_codeclist",
+        "libmedia_codeclist_capabilities",
         "libmedia_helper",
         "libmedia_omx",
         "libmedia_omx_client",
@@ -334,6 +351,7 @@ cc_library {
     static_libs: [
         "android.media.codec-aconfig-cc",
         "android.media.extractor.flags-aconfig-cc",
+        "android.media.mediarecorder-aconfig-cc",
         "android.media.tv.flags-aconfig-cc",
         "com.android.media.flags.editing-aconfig-cc",
         "framework-permission-aidl-cpp",

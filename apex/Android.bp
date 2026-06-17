@@ -44,7 +44,14 @@ apex_defaults {
             // Transcoding service only run with primary ABI.
             binaries: [
                 "mediatranscoding",
-            ],
+            ] + select(release_flag("RELEASE_MEDIAMETRICS_MODULE"), {
+                true: [
+                    "mediametrics",
+                ],
+                default: [
+                    // in build/make/target/product/base_system
+                ],
+            }),
         },
     },
     // JNI
@@ -60,7 +67,13 @@ apex_defaults {
         "crash_dump.policy",
         "mediaextractor.policy",
         "media-linker-config",
-    ],
+    ] + select(release_flag("RELEASE_MEDIAMETRICS_MODULE"), {
+        true: [
+            "com.android.media-mediametrics.37rc",
+        ],
+        default: [],
+    }),
+
     key: "com.android.media.key",
     certificate: ":com.android.media.certificate",
 
@@ -173,16 +186,26 @@ filegroup {
 
 apex_defaults {
     name: "com.android.media.swcodec-defaults",
-    binaries: [
-        "mediaswcodec",
-    ],
+    multilib: {
+        first: {
+            binaries: [
+                "mediaswcodec",
+            ],
+            native_shared_libs: [
+                "libcodec2_hidl@1.0",
+                "libcodec2_hidl@1.1",
+                "libcodec2_hidl@1.2",
+            ],
+        },
+    },
     native_shared_libs: [
-        "libcodec2_hidl@1.0",
-        "libcodec2_hidl@1.1",
-        "libcodec2_hidl@1.2",
         "libcom.android.media.swcodec.apexcodecs",
         "libstagefright_foundation",
     ],
+    compile_multilib: select(release_flag("RELEASE_APEX_CODECS"), {
+        true: "both",
+        default: "first",
+    }),
     prebuilts: [
         "com.android.media.swcodec-mediaswcodec.rc",
         "com.android.media.swcodec-mediaswcodec.32rc",

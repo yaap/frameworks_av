@@ -17,15 +17,18 @@
 #ifndef LEGACY_AUDIO_STREAM_RECORD_H
 #define LEGACY_AUDIO_STREAM_RECORD_H
 
-#include <media/AudioRecord.h>
+// go/keep-sorted start
 #include <aaudio/AAudio.h>
-
-#include "AudioStreamBuilder.h"
-#include "AudioStream.h"
-#include "AAudioLegacy.h"
-#include "legacy/AudioStreamLegacy.h"
-#include "utility/FixedBlockWriter.h"
 #include <android/content/AttributionSourceState.h>
+#include <core/AudioStream.h>
+#include <media/AudioRecord.h>
+#include <utility/FixedBlockWriter.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
+#include "AAudioLegacy.h"
+#include "AudioStreamLegacy.h"
+// go/keep-sorted end
 
 namespace aaudio {
 
@@ -38,7 +41,7 @@ public:
 
     virtual ~AudioStreamRecord();
 
-    aaudio_result_t open(const AudioStreamBuilder & builder) override;
+    aaudio_result_t open(const AAudioStreamOpenRequest& openRequest) override;
     aaudio_result_t release_l() REQUIRES(mStreamMutex) override;
     void close_l() REQUIRES(mStreamMutex) override;
 

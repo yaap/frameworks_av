@@ -46,6 +46,7 @@ using aidl::android::media::audio::common::Boolean;
 using aidl::android::media::audio::common::AudioConfig;
 using aidl::android::media::audio::common::AudioDevice;
 using aidl::android::media::audio::common::AudioDeviceType;
+using aidl::android::media::audio::common::AudioInputFlags;
 using aidl::android::media::audio::common::AudioIoFlags;
 using aidl::android::media::audio::common::AudioLatencyMode;
 using aidl::android::media::audio::common::AudioMMapPolicy;
@@ -58,6 +59,7 @@ using aidl::android::media::audio::common::AudioPortConfig;
 using aidl::android::media::audio::common::AudioPortExt;
 using aidl::android::media::audio::common::AudioSource;
 using aidl::android::media::audio::common::Float;
+using aidl::android::media::audio::common::FlushFromFrameSupport;
 using aidl::android::media::audio::common::Int;
 using aidl::android::media::audio::common::MicrophoneDynamicInfo;
 using aidl::android::media::audio::common::MicrophoneInfo;
@@ -382,7 +384,7 @@ status_t DeviceHalAidl::parseAndGetVendorParameters(const AudioParameter& parame
                                                     String8* values) {
     std::vector<std::string> vendorParameterIds;
     RETURN_STATUS_IF_ERROR(
-            fillVendorParameterIds(mVendorExt, IHalAdapterVendorExtension::ParameterScope::MODULE,
+            fillVendorParameterIds(mVendorExt, getParameterScope(),
                                    parameterKeys, vendorParameterIds));
     if (vendorParameterIds.empty()) {
         return OK;
@@ -394,7 +396,7 @@ status_t DeviceHalAidl::parseAndGetVendorParameters(const AudioParameter& parame
                 mModule->getVendorParameters(vendorParameterIds, &vendorParameters)));
     }
     RETURN_STATUS_IF_ERROR(fillKeyValuePairsFromVendorParameters(
-            mVendorExt, IHalAdapterVendorExtension::ParameterScope::MODULE, vendorParameters,
+            mVendorExt, getParameterScope(), vendorParameters,
             values));
     return OK;
 }
@@ -402,7 +404,7 @@ status_t DeviceHalAidl::parseAndGetVendorParameters(const AudioParameter& parame
 status_t DeviceHalAidl::parseAndSetVendorParameters(const AudioParameter& parameters) {
     std::vector<VendorParameter> syncParameters, asyncParameters;
     RETURN_STATUS_IF_ERROR(fillVendorParameters(mVendorExt,
-                                                IHalAdapterVendorExtension::ParameterScope::MODULE,
+                                                getParameterScope(),
                                                 parameters, syncParameters, asyncParameters));
     std::lock_guard l(mLock);
     if (!syncParameters.empty())
@@ -575,14 +577,19 @@ status_t DeviceHalAidl::openOutputStream(
     args.portConfigId = mixPortConfig.id;
     const bool isOffload = isBitPositionFlagSet(
             aidlOutputFlags, AudioOutputFlags::COMPRESS_OFFLOAD);
+    const bool isAsynchronous = isBitPositionFlagSet(
+            aidlOutputFlags, AudioOutputFlags::NON_BLOCKING);
     const bool isHwAvSync = isBitPositionFlagSet(
             aidlOutputFlags, AudioOutputFlags::HW_AV_SYNC);
+    const bool isDirect = isBitPositionFlagSet(
+            aidlOutputFlags, AudioOutputFlags::DIRECT);
     std::shared_ptr<OutputStreamCallbackAidl> streamCb;
-    if (isOffload) {
+    if (isAsynchronous) {
         streamCb = ndk::SharedRefBase::make<OutputStreamCallbackAidl>(this);
         ndk::SpAIBinder binder = streamCb->asBinder();
         AIBinder_setMinSchedulerPolicy(binder.get(), SCHED_NORMAL, ANDROID_PRIORITY_AUDIO);
         AIBinder_setInheritRt(binder.get(), true);
+        args.callback = streamCb;
     }
     auto eventCb = ndk::SharedRefBase::make<OutputStreamEventCallbackAidl>(this);
     ndk::SpAIBinder binder = eventCb->asBinder();
@@ -592,9 +599,6 @@ status_t DeviceHalAidl::openOutputStream(
     if (isOffload || isHwAvSync) {
         args.offloadInfo = aidlConfig.offloadInfo;
     }
-    if (isOffload) {
-        args.callback = streamCb;
-    }
     args.bufferSizeFrames = aidlConfig.frameCount;
     args.eventCallback = eventCb;
     args.sourceMetadata = aidlMetadata;
@@ -603,7 +607,8 @@ status_t DeviceHalAidl::openOutputStream(
         std::lock_guard l(mLock);
         RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mModule->openOutputStream(args, &ret)));
     }
-    StreamContextAidl context(ret.desc, isOffload, aidlHandle, mHasClipTransitionSupport);
+    StreamContextAidl context(ret.desc, isAsynchronous, isDirect, aidlHandle,
+            mHasClipTransitionSupport);
     if (!context.isValid()) {
         AUGMENT_LOG(E, "Failed to created a valid stream context from the descriptor: %s",
                     ret.desc.toString().c_str());
@@ -673,6 +678,7 @@ status_t DeviceHalAidl::openInputStream(
     if (mixPortConfig.id == 0) return BAD_VALUE;  // HAL suggests a different config.
     ::aidl::android::hardware::audio::core::IModule::OpenInputStreamArguments args;
     args.portConfigId = mixPortConfig.id;
+    const bool isDirect = isBitPositionFlagSet(aidlInputFlags, AudioInputFlags::DIRECT);
     RecordTrackMetadata aidlTrackMetadata{
         .source = aidlSource, .gain = 1, .channelMask = aidlConfig.base.channelMask };
     if (outputDevice != AUDIO_DEVICE_NONE) {
@@ -688,7 +694,8 @@ status_t DeviceHalAidl::openInputStream(
         RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mModule->openInputStream(args, &ret)));
     }
     StreamContextAidl context(
-            ret.desc, false /*isAsynchronous*/, aidlHandle, mHasClipTransitionSupport);
+            ret.desc, false /*isAsynchronous*/, isDirect, aidlHandle,
+            mHasClipTransitionSupport);
     if (!context.isValid()) {
         AUGMENT_LOG(E, "Failed to created a valid stream context from the descriptor: %s",
                     ret.desc.toString().c_str());
@@ -931,6 +938,29 @@ status_t DeviceHalAidl::getAudioMixPort(const struct audio_port_v7 *devicePort,
             mixPort->role, mixPort->type)) == ::aidl::android::AudioPortDirection::INPUT;
     *mixPort = VALUE_OR_RETURN_STATUS(::aidl::android::aidl2legacy_AudioPort_audio_port_v7(
             port, isInput));
+    return OK;
+}
+
+status_t DeviceHalAidl::getFlushFromFrameSupport(
+        const media::audio::common::AudioPortConfig& config,
+        media::audio::common::FlushFromFrameSupport* support) const {
+    AUGMENT_LOG(D);
+    TIME_CHECK();
+    RETURN_IF_MODULE_NOT_INIT(NO_INIT);
+
+    if (support == nullptr) {
+        AUGMENT_LOG(E, "support parameter is null");
+        return BAD_VALUE;
+    }
+
+    AudioPortConfig ndkConfig = VALUE_OR_RETURN_STATUS(cpp2ndk_AudioPortConfig(config));
+    FlushFromFrameSupport ndkSupport = FlushFromFrameSupport::UNSUPPORTED;
+    {
+        std::lock_guard l(mLock);
+        RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(
+                mModule->getFlushFromFrameSupport(ndkConfig, &ndkSupport)));
+    }
+    *support = VALUE_OR_RETURN_STATUS(ndk2cpp_FlushFromFrameSupport(ndkSupport));
     return OK;
 }
 
@@ -1562,6 +1592,11 @@ status_t DeviceHalAidl::filterAndUpdateTelephonyParameters(AudioParameter &param
         return statusTFromBinderStatus(mTelephony->setTelecomConfig(telConfig, &newTelConfig));
     }
     return OK;
+}
+
+IHalAdapterVendorExtension::ParameterScope DeviceHalAidl::getParameterScope() const {
+    return IHalAdapterVendorExtension::ParameterScope(
+            IHalAdapterVendorExtension::ScopeType::MODULE, getInstanceName());
 }
 
 void DeviceHalAidl::clearCallbacks(void* cookie) {

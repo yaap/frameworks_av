@@ -28,6 +28,7 @@
 #include "aidl/android/hardware/graphics/common/Dataspace.h"
 #include "api2/JpegRCompositeStream.h"
 #include "binder/Status.h"
+#include "com_android_internal_camera_flags.h"
 #include "common/CameraDeviceBase.h"
 #include "common/HalConversionsTemplated.h"
 #include "device3/Camera3OutputStream.h"
@@ -35,11 +36,13 @@
 #include "device3/aidl/AidlCamera3Device.h"
 #include "device3/hidl/HidlCamera3Device.h"
 #include "system/graphics-base-v1.1.h"
+#include <aidl/android/hardware/graphics/common/PixelFormat.h>
 
 using android::camera3::OutputStreamInfo;
 using android::camera3::OutputStreamInfo;
 using android::hardware::camera2::ICameraDeviceUser;
 using aidl::android::hardware::camera::device::RequestTemplate;
+using AidlPixelFormat = aidl::android::hardware::graphics::common::PixelFormat;
 
 namespace android {
 namespace camera3 {
@@ -325,6 +328,33 @@ bool isDynamicRangeProfileSupported(int64_t dynamicRangeProfile, const CameraMet
 
             return false;
         default:
+            if (flags::new_dynamic_range_profiles()) {
+                switch (dynamicRangeProfile) {
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HDR10_PLUS_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HDR10_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HLG10_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_OEM_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_OEM_PO_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF_PO_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_OEM_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_OEM_PO_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_REF_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_REF_PO_SMPTE_2094_50:
+                        entry = staticInfo.find(
+                                ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP);
+                        for (size_t i = 0; i < entry.count; i += 3) {
+                            if (dynamicRangeProfile == entry.data.i64[i]) {
+                                return true;
+                            }
+                        }
+
+                        return false;
+                    default:
+                        return false;
+                }
+            }
             return false;
     }
 
@@ -343,6 +373,20 @@ bool is10bitDynamicRangeProfile(int64_t dynamicRangeProfile) {
         case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF_PO:
             return true;
         default:
+            if (flags::new_dynamic_range_profiles()) {
+                switch (dynamicRangeProfile) {
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HDR10_PLUS_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HDR10_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HLG10_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_OEM_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_OEM_PO_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF_SMPTE_2094_50:
+                    case ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF_PO_SMPTE_2094_50:
+                        return true;
+                    default:
+                        return false;
+                }
+            }
             return false;
     }
 }
@@ -424,6 +468,7 @@ bool isPublicFormat(int32_t format)
         case HAL_PIXEL_FORMAT_RAW16:
         case HAL_PIXEL_FORMAT_RAW10:
         case HAL_PIXEL_FORMAT_RAW12:
+        case static_cast<int32_t>(AidlPixelFormat::RAW14):
         case HAL_PIXEL_FORMAT_RAW_OPAQUE:
         case HAL_PIXEL_FORMAT_BLOB:
         case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
@@ -480,10 +525,11 @@ binder::Status createConfiguredSurface(
         OutputStreamInfo& streamInfo, bool isStreamInfoValid,
         const OutputConfiguration &outputConfiguration,
         sp<Surface> &out_surface, const sp<SurfaceType>& surface,
-        const std::string &logicalCameraId, const CameraMetadata &physicalCameraMetadata,
+        const std::string &logicalCameraId, const CameraMetadata &deviceInfo,
+        const CameraMetadata &physicalCameraMetadata,
         const std::vector<int32_t> &sensorPixelModesUsed, int64_t dynamicRangeProfile,
         int64_t streamUseCase, int timestampBase, int mirrorMode,
-        int32_t colorSpace, bool respectSurfaceSize, bool isPriviledgedClient) {
+        int32_t colorSpace, bool respectSurfaceSize, int32_t multiResMode, bool isPriviledgedClient) {
     // bufferProducer must be non-null
     if ( flagtools::isSurfaceTypeValid(surface) == false ) {
         std::string msg = fmt::sprintf("Camera %s: Surface is NULL", logicalCameraId.c_str());
@@ -625,6 +671,13 @@ binder::Status createConfiguredSurface(
                 logicalCameraId.c_str(), mirrorMode);
         ALOGE("%s: %s", __FUNCTION__, msg.c_str());
         return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT, msg.c_str());
+    }
+
+    if (flags::multi_resolution_concurrent_readers()) {
+        binder::Status res = checkMultiResMode(format, multiResMode, deviceInfo);
+        if (!res.isOk()) {
+            return res;
+        }
     }
 
     if (!isStreamInfoValid) {
@@ -865,7 +918,9 @@ binder::Status convertToHALStreamCombination(
 
         size_t numSurfaces = surfaces.size();
         bool isStreamInfoValid = false;
-        int32_t groupId = it.isMultiResolution() ? it.getSurfaceSetID() : -1;
+        int32_t multiResMode = it.getMultiResMode();
+        int32_t groupId = multiResMode != OutputConfiguration::MULTI_RES_OFF ?
+                it.getSurfaceSetID() : -1;
         OutputStreamInfo streamInfo;
 
         res = checkSurfaceType(numSurfaces, deferredConsumer, it.getSurfaceType(),
@@ -945,9 +1000,10 @@ binder::Status convertToHALStreamCombination(
             sp<Surface> surface;
             res = createConfiguredSurface(streamInfo, isStreamInfoValid, it, surface,
                                     flagtools::convertParcelableSurfaceTypeToSurface(surface_type),
-                                    logicalCameraId,  metadataChosen, sensorPixelModesUsed,
-                                    dynamicRangeProfile, streamUseCase, timestampBase, mirrorMode,
-                                    colorSpace, /*respectSurfaceSize*/ true, isPriviledgedClient);
+                                    logicalCameraId,  deviceInfo, metadataChosen,
+                                    sensorPixelModesUsed, dynamicRangeProfile, streamUseCase,
+                                    timestampBase, mirrorMode, colorSpace,
+                                    /*respectSurfaceSize*/ true, multiResMode, isPriviledgedClient);
 
             if (!res.isOk()) return res;
 
@@ -998,6 +1054,38 @@ binder::Status checkPhysicalCameraId(
     return binder::Status::ok();
 }
 
+binder::Status checkMultiResMode(
+        int format, int32_t multiResMode, const CameraMetadata &staticInfo) {
+    if (multiResMode == OutputConfiguration::MULTI_RES_OFF) {
+        return binder::Status::ok();
+    }
+
+    // The device doesn't support multi-resolution outputs
+    camera_metadata_ro_entry_t entry =
+            staticInfo.find(ANDROID_SCALER_MULTI_RESOLUTION_STREAM_SUPPORTED);
+    if (entry.count == 0 ||
+            entry.data.u8[0] == ANDROID_SCALER_MULTI_RESOLUTION_STREAM_SUPPORTED_FALSE) {
+        std::string msg = "Camera device doesn't support multi-resolution outputs!";
+        ALOGE("%s: %s", __FUNCTION__, msg.c_str());
+        return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT, msg.c_str());
+    }
+    if (multiResMode == OutputConfiguration::MULTI_RES_ON) {
+        return binder::Status::ok();
+    }
+
+    // The device doesn't support concurrent multi-resolution outputs
+    entry = staticInfo.find(ANDROID_SCALER_CONCURRENT_MULTI_RESOLUTION_FORMATS);
+    if (entry.count == 0 || std::find(entry.data.i32,
+            entry.data.i32 + entry.count, format) == entry.data.i32 + entry.count) {
+        std::string msg = fmt::sprintf(
+                "Camera device doesn't support concurrent multi-resolution outputs for format %d!",
+                format);
+        ALOGE("%s: %s", __FUNCTION__, msg.c_str());
+        return STATUS_ERROR(CameraService::ERROR_ILLEGAL_ARGUMENT, msg.c_str());
+    }
+    return binder::Status::ok();
+}
+
 binder::Status checkSurfaceType(size_t numBufferProducers,
         bool deferredConsumer, int surfaceType, bool isConfigurationComplete)  {
     if (numBufferProducers > MAX_SURFACES_PER_STREAM) {
@@ -1010,9 +1098,18 @@ binder::Status checkSurfaceType(size_t numBufferProducers,
     }
 
     if (deferredConsumer) {
+        bool extraValidDeferredTypes = false;
+        if (flags::seamless_transitions()) {
+            // TODO: Remove the validSurfaceType check altogether when cleaning up the flag logic.
+            extraValidDeferredTypes =
+                (surfaceType == OutputConfiguration::SURFACE_TYPE_IMAGE_READER) ||
+                (surfaceType == OutputConfiguration::SURFACE_TYPE_MEDIA_CODEC) ||
+                (surfaceType == OutputConfiguration::SURFACE_TYPE_MEDIA_RECORDER);
+        }
         bool validSurfaceType = (
                 (surfaceType == OutputConfiguration::SURFACE_TYPE_SURFACE_VIEW) ||
-                (surfaceType == OutputConfiguration::SURFACE_TYPE_SURFACE_TEXTURE));
+                (surfaceType == OutputConfiguration::SURFACE_TYPE_SURFACE_TEXTURE) ||
+                extraValidDeferredTypes);
         if (!validSurfaceType) {
             std::string msg = fmt::sprintf("Deferred target surface has invalid "
                     "surfaceType = %d.", surfaceType);

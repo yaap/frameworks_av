@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "android_companion_virtualdevice_flags.h"
+
 #define LOG_TAG "VirtualCamera"
 
 #include <android/binder_stability.h>
@@ -22,16 +24,15 @@
 
 #include "VirtualCameraProvider.h"
 #include "VirtualCameraService.h"
-#include "android-base/logging.h"
 #include "android/binder_manager.h"
 #include "android/binder_process.h"
-#include "log/log.h"
 
 using ::android::companion::virtualcamera::VirtualCameraProvider;
 using ::android::companion::virtualcamera::VirtualCameraService;
 
 namespace {
-// Default recommended RPC thread count for camera provider implementations
+// Multiple virtual cameras can be created and closed rapidly when recreating a VirtualDevice.
+// The Binder Thread pool should be large enough to handle this.
 const int HWBINDER_THREAD_COUNT = 6;
 
 constexpr char kVirtualCameraServiceName[] = "virtual_camera";
@@ -41,6 +42,7 @@ int main() {
   ALOGI("virtual_camera service is starting.");
 
   ABinderProcess_setThreadPoolMaxThreadCount(HWBINDER_THREAD_COUNT);
+  ABinderProcess_startThreadPool();
 
   std::shared_ptr<VirtualCameraProvider> defaultProvider =
       ndk::SharedRefBase::make<VirtualCameraProvider>();

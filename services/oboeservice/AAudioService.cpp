@@ -24,10 +24,12 @@
 
 #include <android/content/AttributionSourceState.h>
 #include <aaudio/AAudio.h>
+#include <audio_utils/clock.h>
 #include <audio_utils/TimerQueue.h>
 #include <media/AidlConversion.h>
 #include <mediautils/ServiceUtilities.h>
 #include <utils/String16.h>
+#include <utils/Timers.h>
 
 #include "binding/AAudioServiceMessage.h"
 #include "AAudioClientTracker.h"
@@ -56,6 +58,10 @@ using binder::Status;
 android::AAudioService::AAudioService()
     : BnAAudioService(),
       mAdapter(this) {
+    // Ensure sufficient incoming binder transaction priority.
+    setMinSchedulerPolicy(SCHED_NORMAL, ANDROID_PRIORITY_URGENT_AUDIO);
+    setInheritRt(true);
+
     // TODO consider using geteuid()
     // TODO b/182392769: use attribution source util
     mAudioClient.attributionSource.uid = VALUE_OR_FATAL(legacy2aidl_uid_t_int32_t(getuid()));
@@ -96,6 +102,22 @@ AAudioService::openStream(const StreamRequest &_request, StreamParameters* _para
                           int32_t *_aidl_return) {
     static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
 
+    const pid_t callingPid = IPCThreadState::self()->getCallingPid();
+
+    auto checkFrozen = [&](const char* where) {
+        const auto [frozen, freezeTime] =
+                AAudioClientTracker::getInstance().getFrozenStatus(callingPid);
+        const int deltaMs = (systemTime(SYSTEM_TIME_MONOTONIC) - freezeTime)
+                / NANOS_PER_MILLISECOND;
+        if (frozen) {
+            ALOGW("openStream denied for pid %d at %s - frozen for %d ms",
+                    callingPid, where, deltaMs);
+        }
+        return frozen;
+    };
+
+    if (checkFrozen("begin")) AIDL_RETURN(AAUDIO_ERROR_INTERNAL);
+
     // Create wrapper objects for simple usage of the parcelables.
     const AAudioStreamRequest request(_request);
     AAudioStreamConfiguration paramsOut;
@@ -109,7 +131,7 @@ AAudioService::openStream(const StreamRequest &_request, StreamParameters* _para
     // 4) Thread A can then get the lock and also open a shared stream.
     // Without the lock. Thread A might sneak in and reallocate an exclusive stream
     // before B can open the shared stream.
-    const std::unique_lock<std::recursive_mutex> lock(mOpenLock);
+    std::unique_lock ul(mOpenLock);
 
     aaudio_result_t result = AAUDIO_OK;
     sp<AAudioServiceStreamBase> serviceStream;
@@ -120,11 +142,6 @@ AAudioService::openStream(const StreamRequest &_request, StreamParameters* _para
     if (performanceMode != AAUDIO_PERFORMANCE_MODE_LOW_LATENCY &&
         performanceMode != AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED) {
         ALOGE("%s denied performance mode as %d for mmap path", __func__, performanceMode);
-        AIDL_RETURN(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
-    }
-    if (performanceMode == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED &&
-        !com_android_media_audioserver_mmap_pcm_offload_support()) {
-        ALOGD("%s denied mmap offload due to flag is not enabled", __func__);
         AIDL_RETURN(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
     }
     if (performanceMode == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED &&
@@ -190,6 +207,16 @@ AAudioService::openStream(const StreamRequest &_request, StreamParameters* _para
         const aaudio_handle_t handle = mStreamTracker.addStreamForHandle(serviceStream.get());
         serviceStream->setHandle(handle);
         AAudioClientTracker::getInstance().registerClientStream(pid, serviceStream);
+
+        // Double checked atomic.  This must be done after registerClientStream.
+        if (checkFrozen("end")) {
+            ul.unlock();
+            closeStream(serviceStream, true /* force */);
+            AIDL_RETURN(AAUDIO_ERROR_INTERNAL);
+        }
+
+        // Currently, port handle and io handle are not exposed when opening.
+        // TODO: b/479291234 - Need to expose the port handle and io handle when successfully open
         paramsOut.copyFrom(*serviceStream);
         *_paramsOut = std::move(paramsOut).parcelable();
         // Log open in MediaMetrics after we have the handle because we need the handle to
@@ -200,7 +227,7 @@ AAudioService::openStream(const StreamRequest &_request, StreamParameters* _para
     }
 }
 
-Status AAudioService::closeStream(int32_t streamHandle, int32_t *_aidl_return) {
+Status AAudioService::closeStream(int32_t streamHandle, bool force, int32_t *_aidl_return) {
     static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
 
     // Check permission and ownership first.
@@ -209,7 +236,7 @@ Status AAudioService::closeStream(int32_t streamHandle, int32_t *_aidl_return) {
         ALOGE("closeStream(0x%0x), illegal stream handle", streamHandle);
         AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
     }
-    AIDL_RETURN(closeStream(serviceStream));
+    AIDL_RETURN(closeStream(serviceStream, force));
 }
 
 Status AAudioService::getStreamDescription(int32_t streamHandle, Endpoint* endpoint,
@@ -327,7 +354,7 @@ Status AAudioService::updateTimestamp(int32_t streamHandle, int32_t *_aidl_retur
 }
 
 Status AAudioService::drainStream(
-        int32_t streamHandle, int64_t wakeUpNanos, bool allowSoftWakeUp,
+        int32_t streamHandle, int64_t wakeUpNanos, aaudio::DrainType drainType,
         android::media::TimerQueueHandle* handle, int32_t* _aidl_return) {
     static_assert(std::is_same_v<aaudio_result_t, std::decay_t<typeof(*_aidl_return)>>);
     if (handle == nullptr) {
@@ -340,7 +367,7 @@ Status AAudioService::drainStream(
         ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
         AIDL_RETURN(AAUDIO_ERROR_INVALID_HANDLE);
     }
-    aaudio_result_t result = serviceStream->drain(wakeUpNanos, allowSoftWakeUp, &legacyHandle);
+    aaudio_result_t result = serviceStream->drain(wakeUpNanos, drainType, &legacyHandle);
     if (result == AAUDIO_OK) {
         *handle = VALUE_OR_RETURN_BINDER_STATUS(
                 legacy2aidl_timer_queue_handle_t_TimerQueueHandle(legacyHandle));
@@ -398,16 +425,23 @@ bool AAudioService::isCallerInService() {
         clientUid == IPCThreadState::self()->getCallingUid();
 }
 
-aaudio_result_t AAudioService::closeStream(const sp<AAudioServiceStreamBase>& serviceStream) {
+aaudio_result_t AAudioService::closeStream(const sp<AAudioServiceStreamBase>& serviceStream,
+                                           bool force) {
     // This is protected by a lock in AAudioClientTracker.
     // It is safe to unregister the same stream twice.
     const pid_t pid = serviceStream->getOwnerProcessId();
     AAudioClientTracker::getInstance().unregisterClientStream(pid, serviceStream);
-    // This is protected by a lock in mStreamTracker.
-    // It is safe to remove the same stream twice.
-    mStreamTracker.removeStreamByHandle(serviceStream->getHandle());
+    aaudio_result_t result = serviceStream->close(force);
+    if (result == AAUDIO_ERROR_WOULD_BLOCK) {
+        ALOGD("%s defer removing stream", __func__);
+        result = AAUDIO_OK;
+    } else {
+        // This is protected by a lock in mStreamTracker.
+        // It is safe to remove the same stream twice.
+        mStreamTracker.removeStreamByHandle(serviceStream->getHandle());
+    }
 
-    return serviceStream->close();
+    return result;
 }
 
 sp<AAudioServiceStreamBase> AAudioService::convertHandleToServiceStream(
@@ -433,16 +467,27 @@ sp<AAudioServiceStreamBase> AAudioService::convertHandleToServiceStream(
     return serviceStream;
 }
 
-aaudio_result_t AAudioService::startClient(aaudio_handle_t streamHandle,
-                                           const android::AudioClient& client,
-                                           const audio_attributes_t *attr,
-                                           audio_port_handle_t *clientHandle) {
+aaudio_result_t AAudioService::createClient(aaudio::aaudio_handle_t streamHandle,
+                                            const android::AudioClient& client,
+                                            const audio_attributes_t& attr,
+                                            audio_port_handle_t* clientHandle,
+                                            audio_io_handle_t* ioHandle) {
     const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
     if (serviceStream.get() == nullptr) {
         ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
         return AAUDIO_ERROR_INVALID_HANDLE;
     }
-    return serviceStream->startClient(client, attr, clientHandle);
+    return serviceStream->createClient(client, attr, clientHandle, ioHandle);
+}
+
+aaudio_result_t AAudioService::startClient(aaudio_handle_t streamHandle,
+                                           audio_port_handle_t clientHandle) {
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        return AAUDIO_ERROR_INVALID_HANDLE;
+    }
+    return serviceStream->startClient(clientHandle);
 }
 
 aaudio_result_t AAudioService::stopClient(aaudio_handle_t streamHandle,
@@ -453,6 +498,16 @@ aaudio_result_t AAudioService::stopClient(aaudio_handle_t streamHandle,
         return AAUDIO_ERROR_INVALID_HANDLE;
     }
     return serviceStream->stopClient(portHandle);
+}
+
+aaudio_result_t AAudioService::releaseClient(aaudio::aaudio_handle_t streamHandle,
+                                             audio_port_handle_t clientHandle) {
+    const sp<AAudioServiceStreamBase> serviceStream = convertHandleToServiceStream(streamHandle);
+    if (serviceStream.get() == nullptr) {
+        ALOGW("%s(), invalid streamHandle = 0x%0x", __func__, streamHandle);
+        return AAUDIO_ERROR_INVALID_HANDLE;
+    }
+    return serviceStream->releaseClient(clientHandle);
 }
 
 // This is only called internally when AudioFlinger wants to tear down a stream.

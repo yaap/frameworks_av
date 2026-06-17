@@ -26,22 +26,26 @@ using aidl_utils::binderStatusFromStatusT;
 using media::VolumeShaperConfiguration;
 using media::VolumeShaperOperation;
 
+static sp<IAudioManager> getAudioManager() {
+    // use checkService() to avoid blocking if audio service is not up yet
+    const sp<IBinder> binder = defaultServiceManager()->checkService(String16("audio"));
+    if (!binder) {
+        ALOGE("%s: cannot access IAudioManager", __func__);
+        return {};
+    } else {
+        return interface_cast<IAudioManager>(binder);
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 PlayerBase::PlayerBase() : BnPlayer(),
+    mAudioManager{getAudioManager()},
         mPanMultiplierL(1.0f), mPanMultiplierR(1.0f),
         mVolumeMultiplierL(1.0f), mVolumeMultiplierR(1.0f),
         mPIId(PLAYER_PIID_INVALID), mLastReportedEvent(PLAYER_STATE_UNKNOWN)
 {
     ALOGD("PlayerBase::PlayerBase()");
-    // use checkService() to avoid blocking if audio service is not up yet
-    sp<IBinder> binder = defaultServiceManager()->checkService(String16("audio"));
-    if (binder == 0) {
-        ALOGE("PlayerBase(): binding to audio service failed, service up?");
-    } else {
-        mAudioManager = interface_cast<IAudioManager>(binder);
-    }
 }
-
 
 PlayerBase::~PlayerBase() {
     ALOGD("PlayerBase::~PlayerBase()");
@@ -49,7 +53,7 @@ PlayerBase::~PlayerBase() {
 }
 
 void PlayerBase::init(player_type_t playerType, audio_usage_t usage, audio_session_t sessionId) {
-    if (mAudioManager == 0) {
+    if (!mAudioManager) {
                 ALOGE("AudioPlayer realize: no audio service, player will not be registered");
     } else {
         mPIId = mAudioManager->trackPlayer(playerType, usage, AUDIO_CONTENT_TYPE_UNKNOWN, this,
@@ -58,7 +62,7 @@ void PlayerBase::init(player_type_t playerType, audio_usage_t usage, audio_sessi
 }
 
 void PlayerBase::triggerPortIdUpdate(audio_port_handle_t portId) const {
-    if (mAudioManager == nullptr) {
+    if (!mAudioManager) {
         ALOGE("%s: no audio service, player %d will not update portId %d",
               __func__,
               mPIId,
@@ -73,23 +77,20 @@ void PlayerBase::triggerPortIdUpdate(audio_port_handle_t portId) const {
 
 void PlayerBase::baseDestroy() {
     serviceReleasePlayer();
-    if (mAudioManager != 0) {
-        mAudioManager.clear();
-    }
 }
 
 //------------------------------------------------------------------------------
 void PlayerBase::servicePlayerEvent(player_state_t event, const DeviceIdVector& deviceIds) {
-    if (mAudioManager != 0) {
+    if (mAudioManager) {
         bool changed = false;
         {
-            Mutex::Autolock _l(mDeviceIdLock);
+            std::lock_guard _l(mDeviceIdMutex);
             changed = !areDeviceIdsEqual(deviceIds, mLastReportedDeviceIds);
             mLastReportedDeviceIds = deviceIds;
         }
 
         {
-            Mutex::Autolock _l(mPlayerStateLock);
+            std::lock_guard _l(mPlayerStateMutex);
             // PLAYER_UPDATE_DEVICE_ID is not saved as an actual state, instead it is used to update
             // device ID only.
             if ((event != PLAYER_UPDATE_DEVICE_ID) && (event != mLastReportedEvent)) {
@@ -104,7 +105,7 @@ void PlayerBase::servicePlayerEvent(player_state_t event, const DeviceIdVector& 
 }
 
 void PlayerBase::serviceReleasePlayer() {
-    if (mAudioManager != 0
+    if (mAudioManager
             && mPIId != PLAYER_PIID_INVALID) {
         mAudioManager->releasePlayer(mPIId);
     }
@@ -156,7 +157,7 @@ binder::Status PlayerBase::start() {
     ALOGD("PlayerBase::start() from IPlayer");
     DeviceIdVector deviceIds;
     {
-        Mutex::Autolock _l(mDeviceIdLock);
+        std::lock_guard _l(mDeviceIdMutex);
         deviceIds = mLastReportedDeviceIds;
     }
     (void)startWithStatus(deviceIds);
@@ -179,7 +180,7 @@ binder::Status PlayerBase::stop() {
 binder::Status PlayerBase::setVolume(float vol) {
     ALOGD("PlayerBase::setVolume() from IPlayer");
     {
-        Mutex::Autolock _l(mSettingsLock);
+        std::lock_guard _l(mSettingsMutex);
         mVolumeMultiplierL = vol;
         mVolumeMultiplierR = vol;
     }
@@ -193,7 +194,7 @@ binder::Status PlayerBase::setVolume(float vol) {
 binder::Status PlayerBase::setPan(float pan) {
     ALOGD("PlayerBase::setPan() from IPlayer");
     {
-        Mutex::Autolock _l(mSettingsLock);
+        std::lock_guard _l(mSettingsMutex);
         pan = min(max(-1.0f, pan), 1.0f);
         if (pan >= 0.0f) {
             mPanMultiplierL = 1.0f - pan;

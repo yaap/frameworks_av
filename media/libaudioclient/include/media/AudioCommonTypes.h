@@ -59,6 +59,9 @@ template<> struct hash<android::media::audio::common::AudioChannelLayout>
                 return hash_combine(seed, std::hash<int32_t>{}(acl.get<Tag::layoutMask>()));
             case Tag::voiceMask:
                 return hash_combine(seed, std::hash<int32_t>{}(acl.get<Tag::voiceMask>()));
+            case Tag::acnMask: {
+                return hash_combine(seed, std::hash<int32_t>{}(acl.get<Tag::acnMask>()));
+            }
         }
         return seed;
     }

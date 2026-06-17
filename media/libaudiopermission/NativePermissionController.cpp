@@ -59,19 +59,36 @@ Status NativePermissionController::populatePackagesForUids(
     std::lock_guard l{m_};
     if (!is_package_populated_) is_package_populated_ = true;
     package_map_.clear();
-    std::transform(initialPackageStates.begin(), initialPackageStates.end(),
-                   std::inserter(package_map_, package_map_.end()),
-                   [](const auto& x)
-                           -> std::pair<uid_t, std::vector<UidPackageState::PackageState>> {
-                       return {x.uid, x.packageStates};
-                   });
+    primary_to_pcc_map_.clear();
+    std::transform(
+            initialPackageStates.begin(), initialPackageStates.end(),
+            std::inserter(package_map_, package_map_.end()),
+            [](const auto& x) -> std::pair<uid_t, std::vector<UidPackageState::PackageState>> {
+                return {x.uid, x.packageStates};
+            });
     std::erase_if(package_map_, [](const auto& x) { return x.second.empty(); });
+    for (const auto& x : initialPackageStates) {
+        for (const auto& pkg : x.packageStates) {
+            if (pkg.pccId != -1) {
+                primary_to_pcc_map_.emplace_back(x.uid, pkg.pccId);
+            }
+        }
+    }
     return Status::ok();
 }
 
 Status NativePermissionController::updatePackagesForUid(const UidPackageState& newPackageState) {
     std::lock_guard l{m_};
     ALOGD("%s, %s", __func__, newPackageState.toString().c_str());
+
+    std::erase_if(primary_to_pcc_map_,
+                  [&](const auto& pair) { return pair.first == newPackageState.uid; });
+    for (const auto& pkg : newPackageState.packageStates) {
+        if (pkg.pccId != -1) {
+            primary_to_pcc_map_.emplace_back(newPackageState.uid, pkg.pccId);
+        }
+    }
+
     package_map_.insert_or_assign(newPackageState.uid, newPackageState.packageStates);
     const auto& cursor = package_map_.find(newPackageState.uid);
 
@@ -146,12 +163,23 @@ BinderResult<bool> NativePermissionController::validateUidPackagePair(
     if (!is_package_populated_) {
         return unexpectedExceptionCode(
                 Status::EX_ILLEGAL_STATE,
-                "NPC::validatedUidPackagePair: controller never populated by system_server");
+                "NPC::validateUidPackagePair: controller never populated by system_server");
     }
-    const auto cursor = package_map_.find(uid);
+
+    auto cursor = package_map_.find(uid);
+
+    if (cursor == package_map_.end()) {
+        auto pcc_cursor = std::find_if(
+                primary_to_pcc_map_.begin(), primary_to_pcc_map_.end(),
+                [&](const auto& pair) { return pair.second == static_cast<int>(uid); });
+        if (pcc_cursor != primary_to_pcc_map_.end()) {
+            cursor = package_map_.find(pcc_cursor->first);
+        }
+    }
+
     if (cursor == package_map_.end()) {
         return unexpectedExceptionCode(Status::EX_ILLEGAL_ARGUMENT,
-                                      ("NPC::validateUidPackagePair: uid not found: " +
+                                       ("NPC::validateUidPackagePair: uid not found: " +
                                         std::to_string(uid) + " for package " + packageName)
                                                .c_str());
     }
@@ -161,14 +189,13 @@ BinderResult<bool> NativePermissionController::validateUidPackagePair(
 
 BinderResult<bool> NativePermissionController::checkPermission(PermissionEnum perm,
                                                                uid_t uid) const {
-    ALOGV("%s: checking %d for %u", __func__, static_cast<int>(perm), uid);
     if (uid == AID_ROOT || uid == AID_SYSTEM || uid == getuid()) return true;
     std::lock_guard l{m_};
     const auto& uids = permission_map_[static_cast<size_t>(perm)];
     if (!uids.empty()) {
         const bool ret = std::binary_search(uids.begin(), uids.end(), uid);
         // Log locally until all call-sites log errors well
-        ALOGD_IF(!ret, "%s: missing %d for %u", __func__, static_cast<int>(perm), uid);
+        ALOGV_IF(!ret, "%s: missing %d for %u", __func__, static_cast<int>(perm), uid);
         return ret;
     } else {
         return unexpectedExceptionCode(

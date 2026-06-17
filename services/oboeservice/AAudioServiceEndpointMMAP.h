@@ -53,18 +53,26 @@ public:
     void close() override EXCLUDES(mMmapStreamLock);
 
     aaudio_result_t startStream(android::sp<AAudioServiceStreamBase> stream,
-                                audio_port_handle_t *clientHandle) override;
+                                audio_port_handle_t clientHandle) override
+                                EXCLUDES(mMmapStreamLock);
 
     aaudio_result_t stopStream(android::sp<AAudioServiceStreamBase> stream,
                                audio_port_handle_t clientHandle) override;
 
-    aaudio_result_t startClient(const android::AudioClient& client,
-                                const audio_attributes_t *attr,
-                                audio_port_handle_t *clientHandle)  override
-                                EXCLUDES(mMmapStreamLock);
+    aaudio_result_t createClient(const android::AudioClient& client,
+                                 const audio_attributes_t& attr,
+                                 audio_port_handle_t* clientHandle,
+                                 audio_io_handle_t* ioHandle) final
+                                 EXCLUDES(mMmapStreamLock);
 
-    aaudio_result_t stopClient(audio_port_handle_t clientHandle)  override
+    aaudio_result_t startClient(audio_port_handle_t clientHandle) final EXCLUDES(mMmapStreamLock);
+
+    aaudio_result_t stopClient(audio_port_handle_t clientHandle) final EXCLUDES(mMmapStreamLock);
+
+    aaudio_result_t releaseClient(audio_port_handle_t clientHandle) final
             EXCLUDES(mMmapStreamLock);
+
+    void releaseClientWhenWakeUp(audio_port_handle_t clientHandle) final EXCLUDES(mLockStreams);
 
     aaudio_result_t standby() override EXCLUDES(mMmapStreamLock);
 
@@ -137,9 +145,6 @@ private:
 
     struct audio_mmap_buffer_info             mMmapBufferinfo;
 
-    // There is only one port associated with an MMAP endpoint.
-    audio_port_handle_t                       mPortHandle = AUDIO_PORT_HANDLE_NONE;
-
     android::AAudioService                    &mAAudioService;
 
     std::unique_ptr<SharedMemoryWrapper>      mAudioDataWrapper;
@@ -153,6 +158,10 @@ private:
     int32_t                                   mFrozenPositionCount = 0;
     int32_t                                   mFrozenTimestampCount = 0;
     int64_t                                   mDataReportOffsetNanos = 0;
+
+    bool                                      mNeedToCatchUp GUARDED_BY(mMmapStreamLock) {false};
+
+    bool mShouldReleaseClientWhenWakeUp GUARDED_BY(mLockStreams){false};
 
 };
 

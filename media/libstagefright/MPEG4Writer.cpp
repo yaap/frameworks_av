@@ -350,6 +350,7 @@ public:
     bool mIsHeif;
     bool mIsMPEG4;
     bool mGotStartKeyFrame;
+    bool mRequiresStartKeyFrame;
     bool mIsMalformed;
     TrackId mTrackId;
     int64_t mTrackDurationUs;
@@ -951,7 +952,16 @@ status_t MPEG4Writer::start(MetaData *param) {
      */
     int32_t fileSizeBits = fpathconf(mFd, _PC_FILESIZEBITS);
     ALOGD("fpathconf _PC_FILESIZEBITS:%" PRId32, fileSizeBits);
-    fileSizeBits = std::min(fileSizeBits, 52 /* cap it below 4 peta bytes */);
+
+    if (fileSizeBits < 0) {
+        ALOGW("fpathconf(%d) failed with err: %s. Defaulting to 4GB.", mFd, strerror(errno));
+        // Fallback to 32-bit (4GB) limit to prevent data corruption on FAT32 if the
+        // filesystem capabilities cannot be determined.
+        fileSizeBits = 32;
+    } else {
+        fileSizeBits = std::min(fileSizeBits, 52 /* cap it below 4 peta bytes */);
+    }
+
     int64_t maxFileSizeBytes = ((int64_t)1 << fileSizeBits) - 1;
     if (mMaxFileSizeLimitBytes > maxFileSizeBytes) {
         mMaxFileSizeLimitBytes = maxFileSizeBytes;
@@ -2259,6 +2269,7 @@ MPEG4Writer::Track::Track(MPEG4Writer* owner, const sp<MediaSource>& source, uin
       mResumed(false),
       mStarted(false),
       mGotStartKeyFrame(false),
+      mRequiresStartKeyFrame(false),
       mIsMalformed(false),
       mTrackId(aTrackId),
       mTrackDurationUs(0),
@@ -2316,6 +2327,11 @@ MPEG4Writer::Track::Track(MPEG4Writer* owner, const sp<MediaSource>& source, uin
     mIsMPEG4 = !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_MPEG4) ||
                !strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_AAC);
 
+    int32_t aacProfile = 0;
+    mMeta->findInt32(kKeyAACProfile, &aacProfile);
+    mRequiresStartKeyFrame = mIsVideo || (!strcasecmp(MEDIA_MIMETYPE_AUDIO_AAC, mime)
+                                          && aacProfile == AACObjectXHE);
+
     // store temporal layer count
     if (mIsVideo) {
         int32_t count;
@@ -2354,6 +2370,7 @@ void MPEG4Writer::Track::resetInternal() {
     mResumed = false;
     mStarted = false;
     mGotStartKeyFrame = false;
+    mRequiresStartKeyFrame = false;
     mIsMalformed = false;
     mTrackDurationUs = 0;
     mEstimatedTrackSizeBytes = 0;
@@ -3984,13 +4001,14 @@ status_t MPEG4Writer::Track::threadEntry() {
         CHECK(meta_data->findInt64(kKeyTime, &timestampUs));
         timestampUs += mFirstSampleStartOffsetUs;
 
-        // For video, skip the first several non-key frames until getting the first key frame.
-        if (mIsVideo && !mGotStartKeyFrame && !isSync) {
-            ALOGD("Video skip non-key frame");
+        // For when the key frames are needed,skip the first several non-key frames until getting
+        // the first key frame.
+        if (mRequiresStartKeyFrame && !mGotStartKeyFrame && !isSync) {
+            ALOGD("Skip non-key frame");
             copy->release();
             continue;
         }
-        if (mIsVideo && isSync) {
+        if (mRequiresStartKeyFrame && isSync) {
             mGotStartKeyFrame = true;
         }
 ////////////////////////////////////////////////////////////////////////////////
@@ -4359,15 +4377,16 @@ bool MPEG4Writer::Track::isTrackMalFormed() {
             mIsMalformed = true;
             return true;
         }
-        if (mIsVideo && mStssTableEntries->count() == 0) {  // no sync frames for video
+        if (mRequiresStartKeyFrame && mStssTableEntries->count() == 0) {  // no sync frames
             ALOGE("There are no sync frames for video track");
             mIsMalformed = true;
             return true;
         }
     } else {
         // Through MediaMuxer, empty tracks can be added. No sync frames for video.
-        if (mIsVideo && mStszTableEntries->count() > 0 && mStssTableEntries->count() == 0) {
-            ALOGE("There are no sync frames for video track");
+        if (mRequiresStartKeyFrame && mStszTableEntries->count() > 0
+            && mStssTableEntries->count() == 0) {
+            ALOGE("There are no sync frames for track requiring them");
             mIsMalformed = true;
             return true;
         }
@@ -4660,6 +4679,8 @@ void MPEG4Writer::Track::writeStblBox() {
         writeSttsBox();
         if (mIsVideo) {
             writeCttsBox();
+        }
+        if (mRequiresStartKeyFrame) {
             writeStssBox();
         }
         writeStszBox();
@@ -4945,8 +4966,18 @@ void MPEG4Writer::Track::writeMp4aEsdsBox() {
     mOwner->writeInt8(0x40);   // objectTypeIndication ISO/IEC 14492-2
     mOwner->writeInt8(0x15);   // streamType AudioStream
 
-    mOwner->writeInt16(0x03);  // XXX
-    mOwner->writeInt8(0x00);   // buffer size 24-bit (0x300)
+    const char *mime = NULL;
+    sp<MetaData> meta = mSource->getFormat();
+    int32_t aacProfile = 0;
+    meta->findInt32(kKeyAACProfile, &aacProfile);
+    meta->findCString(kKeyMIMEType, &mime);
+    if (mime && !strcasecmp(MEDIA_MIMETYPE_AUDIO_AAC, mime) && aacProfile == AACObjectXHE) {
+        mOwner->writeInt16(0x18);
+        mOwner->writeInt8(0x00);   // buffer size 24-bit (0x1800)
+    } else {
+        mOwner->writeInt16(0x03);  // XXX
+        mOwner->writeInt8(0x00);   // buffer size 24-bit (0x300)
+    }
 
     int32_t avgBitrate = 0;
     (void)mMeta->findInt32(kKeyBitRate, &avgBitrate);

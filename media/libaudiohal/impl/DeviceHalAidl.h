@@ -193,6 +193,10 @@ class DeviceHalAidl : public DeviceHalInterface, public ConversionHelperAidl,
                              struct audio_port_v7* mixPort,
                              int32_t mixPortHalId) override;
 
+    status_t getFlushFromFrameSupport(
+            const media::audio::common::AudioPortConfig& config,
+            media::audio::common::FlushFromFrameSupport* support) const override;
+
     status_t dump(int fd, const Vector<String16>& args) override;
 
   private:
@@ -225,6 +229,8 @@ class DeviceHalAidl : public DeviceHalInterface, public ConversionHelperAidl,
     status_t filterAndUpdateBtScoParameters(AudioParameter &parameters);
     status_t filterAndUpdateScreenParameters(AudioParameter &parameters);
     status_t filterAndUpdateTelephonyParameters(AudioParameter &parameters);
+    ::aidl::android::media::audio::IHalAdapterVendorExtension::ParameterScope getParameterScope()
+            const;
     status_t parseAndGetVendorParameters(const AudioParameter& parameterKeys, String8* values);
     status_t parseAndSetVendorParameters(const AudioParameter& parameters);
 

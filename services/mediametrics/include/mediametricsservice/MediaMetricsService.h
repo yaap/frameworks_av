@@ -20,30 +20,40 @@
 #include <deque>
 #include <future>
 #include <mutex>
+#include <queue>
 #include <unordered_map>
 
-// IMediaMetricsService must include Vector, String16, Errors
 #include <android-base/thread_annotations.h>
+#ifdef METRICS_IN_MODULE
+#include <aidl/android/media/BnMediaMetricsService.h>
+#else
 #include <android/media/BnMediaMetricsService.h>
-#include <mediautils/ServiceUtilities.h>
+#endif
 #include <stats_pull_atom_callback.h>
 #include <utils/String8.h>
 
 #include "AudioAnalytics.h"
 
+#include <media/MediaMetricsInternal.h>
+
 namespace android {
 
-class MediaMetricsService : public media::BnMediaMetricsService
+class MediaMetricsService :
+#ifdef METRICS_IN_MODULE
+        public aidl::android::media::BnMediaMetricsService
+#else
+        public media::BnMediaMetricsService
+#endif
 {
 public:
     MediaMetricsService();
     ~MediaMetricsService() override;
 
-    // AIDL interface
-    binder::Status submitBuffer(const std::vector<uint8_t>& buffer) override {
-        status_t status = submitBuffer((char *)buffer.data(), buffer.size());
-        return binder::Status::fromStatusT(status);
-    }
+#ifdef METRICS_IN_MODULE
+    ::ndk::ScopedAStatus submitStructuredItem(const StructuredItem& p) override;
+#else
+    binder::Status submitStructuredItem(const StructuredItem& p) override;
+#endif
 
     /**
      * Submits the indicated record to the mediaanalytics service.
@@ -52,17 +62,13 @@ public:
      * \return status failure, which is negative on binder transaction failure.
      *         As the transaction is one-way, remote failures will not be reported.
      */
-    status_t submit(mediametrics::Item *item) {
-        return submitInternal(item, false /* release */);
-    }
+    status_t submitInternal(std::shared_ptr<mediametrics::Item>& item);
 
-    status_t submitBuffer(const char *buffer, size_t length) {
-        mediametrics::Item *item = new mediametrics::Item();
-        return item->readFromByteString(buffer, length)
-                ?: submitInternal(item, true /* release */);
-    }
-
+#ifdef METRICS_IN_MODULE
+    status_t dump(int fd, const char** args, uint32_t argc);
+#else
     status_t dump(int fd, const Vector<String16>& args) override;
+#endif
 
     static constexpr const char * const kServiceName = "media.metrics";
 
@@ -84,22 +90,18 @@ public:
      */
     static std::pair<std::string, int64_t> getSanitizedPackageNameAndVersionCode(uid_t uid);
 
-protected:
-
-    // Internal call where release is true if ownership of item is transferred
-    // to the service (that is, the service will eventually delete the item).
-    status_t submitInternal(mediametrics::Item *item, bool release);
-
 private:
     void processExpirations();
     // input validation after arrival from client
-    static bool isContentValid(const mediametrics::Item *item, bool isTrusted);
+    static bool isContentValid(const std::shared_ptr<mediametrics::Item>& item,
+                               bool isTrusted);
     bool isRateLimited(mediametrics::Item *) const;
     void saveItem(const std::shared_ptr<const mediametrics::Item>& item);
 
     bool expirations(const std::shared_ptr<const mediametrics::Item>& item) REQUIRES(mLock);
 
     // support for generating output
+    status_t ldump(int fd, const Vector<String16>& args);
     std::string dumpQueue(int64_t sinceNs, const char* prefix) REQUIRES(mLock);
     std::string dumpHeaders(int64_t sinceNs, const char* prefix) REQUIRES(mLock);
 
@@ -153,6 +155,13 @@ private:
     using ItemKey = std::string;
     using WeakItemQueue = std::deque<std::weak_ptr<const mediametrics::Item>>;
     std::unordered_map<ItemKey, WeakItemQueue> mPullableItems GUARDED_BY(mLock);
+
+    // cache of uid -> packageinfo mapping
+    static std::mutex sLock;
+    static std::unordered_map<int, std::string> sUid2Packages GUARDED_BY(sLock);
+    static std::queue<int> sCachedUids GUARDED_BY(sLock);
+    static constexpr int MAX_CACHED_UIDS = 10;
+
 };
 
 } // namespace android

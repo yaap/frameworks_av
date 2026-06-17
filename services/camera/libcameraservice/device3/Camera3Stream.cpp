@@ -58,7 +58,7 @@ Camera3Stream::Camera3Stream(int id,
         android_dataspace dataSpace, camera_stream_rotation_t rotation,
         const std::string& physicalCameraId,
         const std::unordered_set<int32_t> &sensorPixelModesUsed,
-        int setId, bool isMultiResolution, int64_t dynamicRangeProfile,
+        int setId, int multiResMode, int64_t dynamicRangeProfile,
         int64_t streamUseCase, bool deviceTimeBaseIsRealtime, int timestampBase,
         int32_t colorSpace) :
     camera_stream(),
@@ -85,7 +85,7 @@ Camera3Stream::Camera3Stream(int id,
     mOriginalDataSpace(dataSpace),
     mPhysicalCameraId(physicalCameraId),
     mLastTimestamp(0),
-    mIsMultiResolution(isMultiResolution),
+    mMultiResMode(multiResMode),
     mDeviceTimeBaseIsRealtime(deviceTimeBaseIsRealtime),
     mTimestampBase(timestampBase) {
 
@@ -118,11 +118,15 @@ int Camera3Stream::getStreamSetId() const {
 }
 
 int Camera3Stream::getHalStreamGroupId() const {
-    return mIsMultiResolution ? mSetId : -1;
+    return isMultiResolution() ? mSetId : -1;
 }
 
 bool Camera3Stream::isMultiResolution() const {
-    return mIsMultiResolution;
+    return mMultiResMode != OutputConfiguration::MULTI_RES_OFF;
+}
+
+int Camera3Stream::getMultiResMode() const {
+    return mMultiResMode;
 }
 
 uint32_t Camera3Stream::getWidth() const {
@@ -155,6 +159,18 @@ void Camera3Stream::setUsage(uint64_t usage) {
 
 void Camera3Stream::setFormatOverride(bool formatOverridden) {
     mFormatOverridden = formatOverridden;
+}
+
+const std::vector<gui::AdditionalOptions>& Camera3Stream::getAdditionalOptions() const {
+    return mAdditionalOptions;
+}
+
+void Camera3Stream::setAdditionalOptions(const std::vector<GrallocExtendableType>&
+                                            additionalOptions) {
+    mAdditionalOptions.reserve(additionalOptions.size());
+    for (const auto& option: additionalOptions) {
+        mAdditionalOptions.emplace_back(option.name, option.value);
+    }
 }
 
 bool Camera3Stream::isFormatOverridden() const {
@@ -595,7 +611,7 @@ status_t Camera3Stream::cancelPrepareLocked() {
         mPreparedBuffers.editItemAt(i).release_fence = -1;
         mPreparedBuffers.editItemAt(i).status = CAMERA_BUFFER_STATUS_ERROR;
         returnBufferLocked(mPreparedBuffers[i], /*timestamp*/0, /*readoutTimestamp*/0,
-                /*transform*/ -1);
+                /*transforms*/{});
     }
     mPreparedBuffers.clear();
     mPreparedBufferIdx = 0;
@@ -764,7 +780,8 @@ void Camera3Stream::removeOutstandingBuffer(const camera_stream_buffer &buffer) 
 
 status_t Camera3Stream::returnBuffer(const camera_stream_buffer &buffer,
         nsecs_t timestamp, nsecs_t readoutTimestamp, bool timestampIncreasing,
-         const std::vector<size_t>& surface_ids, uint64_t frameNumber, int32_t transform) {
+         const std::vector<size_t>& surface_ids, uint64_t frameNumber,
+         const std::vector<int32_t>& transforms) {
     ATRACE_HFR_CALL();
     Mutex::Autolock l(mLock);
 
@@ -794,7 +811,7 @@ status_t Camera3Stream::returnBuffer(const camera_stream_buffer &buffer,
      *
      * Do this for getBuffer as well.
      */
-    status_t res = returnBufferLocked(b, timestamp, readoutTimestamp, transform, surface_ids);
+    status_t res = returnBufferLocked(b, timestamp, readoutTimestamp, transforms, surface_ids);
     if (res == OK) {
         fireBufferListenersLocked(b, /*acquired*/false, /*output*/true, timestamp, frameNumber);
     }
@@ -976,7 +993,8 @@ status_t Camera3Stream::getBufferLocked(camera_stream_buffer *,
 }
 
 status_t Camera3Stream::returnBufferLocked(const camera_stream_buffer &,
-                                           nsecs_t, nsecs_t, int32_t, const std::vector<size_t>&) {
+                                           nsecs_t, nsecs_t, const std::vector<int32_t>&,
+                                           const std::vector<size_t>&) {
     ALOGE("%s: This type of stream does not support output", __FUNCTION__);
     return INVALID_OPERATION;
 }

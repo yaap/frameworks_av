@@ -19,8 +19,16 @@
 #include <deque>
 #include <mutex>
 
+#include <audio_utils/mutex.h>
+#include <audio_utils/threads.h>
+#include <utils/Log.h>
+
 #include "Runnable.h"
 #include "jthread.h"
+
+#pragma push_macro("LOG_TAG")
+#undef LOG_TAG
+#define LOG_TAG "mediautils::SingleThreadExecutor"
 
 namespace android::mediautils {
 
@@ -30,19 +38,64 @@ namespace android::mediautils {
  */
 class SingleThreadExecutor {
   public:
-    SingleThreadExecutor() : thread_([this](stop_token stok) { run(stok); }) {}
+    /**
+     * Default constructor for SingleThreadExecutor.
+     * The worker thread is started immediately with default
+     * inherited priority.
+     *
+     * @param name optional name for the worker thread.
+     */
+    explicit SingleThreadExecutor(std::string_view name = "")
+        : SingleThreadExecutor(name, kPriorityUseDefault) {}
 
-    ~SingleThreadExecutor() { shutdown(/* dropTasks= */ true); }
+    /**
+     * Constructor for SingleThreadExecutor with a specified priority.
+     * The worker thread is started immediately with the given priority.
+     *
+     * @param priority the unified priority to set for the worker thread.
+     */
+    explicit SingleThreadExecutor(int priority)
+        : SingleThreadExecutor("", priority) {}
+
+    /**
+     * Constructor for SingleThreadExecutor with a specified name and priority.
+     * The worker thread is started immediately with the given priority.
+     *
+     * The linux kernel unified scheduler priority values are as follows:
+     * 0 - 98    (A real time priority rtprio between 99 and 1)
+     * 100 - 139 (A Completely Fair Scheduler niceness between -20 and 19)
+     *
+     * A priority value of 99 is changed to 98.
+     *
+     * See audio_utils/threads.h for a description of unified priority.
+     *
+     * @param name name for the worker thread.
+     * @param priority the unified priority to set for the worker thread.
+     */
+    SingleThreadExecutor(std::string_view name, int priority)
+        : thread_([this, nameStr = std::string(name), priority](stop_token stok) {
+            if (!nameStr.empty()) {
+                audio_utils::set_thread_name(nameStr);
+            }
+            if (priority != kPriorityUseDefault) {
+                const status_t status = audio_utils::set_thread_priority(priority);
+                ALOGW_IF(status != OK, "%s: set priority %d failed with status %d",
+                        __func__, priority, status);
+            }
+            run(stok);
+        }) {}
 
     void enqueue(Runnable r) {
-        if (!r) {
+        if (!r || thread_.stop_requested()) {
             return;
         } else {
             std::lock_guard l{mutex_};
-            if (thread_.stop_requested()) return;
             task_list_.push_back(std::move(r));
+            if (task_list_.size() == 1) {
+                // necessary under lock until our cv impl internally locks
+                cv_.notify_one();
+            }
         }
-        cv_.notify_one();
     }
 
     /**
@@ -50,27 +103,28 @@ class SingleThreadExecutor {
      * Note: does not join thread in this method and no task cancellation.
      */
     void shutdown(bool dropTasks = false) {
-        {
+        if (dropTasks) {
             std::lock_guard l{mutex_};
-            if (thread_.stop_requested()) return;
-            if (dropTasks) {
-                task_list_.clear();
-            }
-            thread_.request_stop();  // fancy atomic bool, so no deadlock risk
+            task_list_.clear();
         }
-        // This condition variable notification is necessary since the stop_callback functionality
-        // of stop_token is not fully implemented
-        cv_.notify_one();
+        thread_.request_stop();
     }
 
 
   private:
+    static constexpr int kPriorityUseDefault = -1;
+
     void run(stop_token stok) {
-        std::unique_lock l{mutex_};
+        stop_callback cb {stok, [this]() {
+            // This lock is necessary to prevent a missed notification on stop.
+            // In particular, by grabbing the lock, the reader is either waiting already (so we
+            // don't miss the notify), or running the task, in which case, when they re-lock, they
+            // will re-check the stop_token before waiting again.
+            std::unique_lock l{mutex_};
+            cv_.notify_one();
+        }};
+        audio_utils::unique_lock l{mutex_};
         while (true) {
-            cv_.wait_for(l, std::chrono::seconds(3), [this, stok]() {
-                return !task_list_.empty() || stok.stop_requested();
-            });
             if (!task_list_.empty()) {
                 Runnable r {std::move(task_list_.front())};
                 task_list_.pop_front();
@@ -79,13 +133,19 @@ class SingleThreadExecutor {
                 l.lock();
             } else if (stok.stop_requested()) {
                 break;
-            } // else cv timeout
+            } else {
+                cv_.wait(l);
+            }
         }
     }
 
     std::condition_variable cv_;
     std::mutex mutex_;
-    std::deque<Runnable> task_list_;
+    std::deque<Runnable> task_list_ GUARDED_BY(mutex_);
+    // Must be the final declaration to ensure that it's destructor runs first.
+    // Join on destruction means that this class *MUST NOT* have virtual dispatch
     jthread thread_;
 };
 }  // namespace android::mediautils
+
+#pragma pop_macro("LOG_TAG")

@@ -41,6 +41,7 @@ class AudioPolicyMix;
 class DeviceDescriptor;
 class HwAudioOutputDescriptor;
 class SwAudioOutputDescriptor;
+class SourceClientDescriptor;
 
 class ClientDescriptor: public RefBase
 {
@@ -65,6 +66,20 @@ public:
     virtual bool isInternal() const { return false; }
     virtual bool isCallRx() const { return false; }
     virtual bool isCallTx() const { return false; }
+    /**
+     * @brief portForVolume
+     * @return either a port ID of a sp<DeviceDescriptor>:
+     * For a client descriptor corresponding to an AudioTrack (software volume):
+     *   the AudioTrack port ID
+     * For a client descriptor corresponding to an AudioSource with a software patch
+     *   the source device port ID
+     * For a client descriptor corresponding to an AudioSource with a hardware patch
+     * and a source device with a gain controller (hardware volume):
+     *   the source device descriptor
+     */
+    virtual std::variant<audio_port_handle_t, sp<DeviceDescriptor>> portForVolume() const {
+        return mPortId;
+    }
     audio_port_handle_t portId() const { return mPortId; }
     uid_t uid() const { return mUid; }
     audio_session_t session() const { return mSessionId; };
@@ -140,6 +155,14 @@ public:
         return mPrimaryMix.unsafe_get() && !mPrimaryMix.promote();
     }
 
+    void setPrimaryMix(sp<AudioPolicyMix> primaryMix)  {
+        mPrimaryMix = primaryMix;
+    }
+
+    void clearPrimaryMix()  {
+        mPrimaryMix.clear();
+    }
+
     void setActive(bool active) override
     {
         int delta = active ? 1 : -1;
@@ -185,13 +208,17 @@ public:
         return mIsSpatialized;
     }
 
+    virtual sp<SourceClientDescriptor> asSourceClient() {
+        return {};
+    }
+
 private:
     const audio_stream_type_t mStream;
     const product_strategy_t mStrategy;
     const VolumeSource mVolumeSource;
     const audio_output_flags_t mFlags;
     std::vector<wp<SwAudioOutputDescriptor>> mSecondaryOutputs;
-    const wp<AudioPolicyMix> mPrimaryMix;
+    wp<AudioPolicyMix> mPrimaryMix;
     /**
      * required for duplicating thread, prevent from removing active client from an output
      * involved in a duplication.
@@ -265,6 +292,7 @@ public:
     bool canCloseOutput() const { return mCloseOutput; }
     bool isConnected() const { return mPatchHandle != AUDIO_PATCH_HANDLE_NONE; }
     audio_patch_handle_t getPatchHandle() const { return mPatchHandle; }
+    void setSrcDevice(const sp<DeviceDescriptor>& srcDevice)  { mSrcDevice = srcDevice; }
     sp<DeviceDescriptor> srcDevice() const { return mSrcDevice; }
     sp<DeviceDescriptor> sinkDevice() const { return mSinkDevice; }
     wp<SwAudioOutputDescriptor> swOutput() const { return mSwOutput; }
@@ -274,13 +302,34 @@ public:
     bool isInternal() const override { return mIsInternal; }
     bool isCallRx() const override { return mIsCallRx; }
     bool isCallTx() const override { return mIsCallTx; }
+    std::variant<audio_port_handle_t, sp<DeviceDescriptor>> portForVolume() const override;
+
+    void addSecondaryPatch(audio_patch_handle_t patchHandle, wp<SwAudioOutputDescriptor> output) {
+        mSecondaryPatches.emplace(patchHandle, output);
+    };
+
+    void removeSecondaryPatch(audio_patch_handle_t patchHandle) {
+        mSecondaryPatches.erase(patchHandle);
+    };
+
+    const std::map<audio_patch_handle_t, wp<SwAudioOutputDescriptor>>& getSecondaryPatches() const {
+        return mSecondaryPatches;
+    };
+
+    void clearSecondaryPatches() {
+        return mSecondaryPatches.clear();
+    };
+
+    sp<SourceClientDescriptor> asSourceClient() final {
+        return this;
+    }
 
     using ClientDescriptor::dump;
     void dump(String8 *dst, int spaces) const override;
 
  private:
     audio_patch_handle_t mPatchHandle = AUDIO_PATCH_HANDLE_NONE;
-    const sp<DeviceDescriptor> mSrcDevice;
+    sp<DeviceDescriptor> mSrcDevice;
     sp<DeviceDescriptor> mSinkDevice;
     wp<SwAudioOutputDescriptor> mSwOutput;
     wp<HwAudioOutputDescriptor> mHwOutput;
@@ -307,6 +356,8 @@ public:
     bool mIsInternal = false;
     bool mIsCallRx = false;
     bool mIsCallTx = false;
+
+    std::map<audio_patch_handle_t, wp<SwAudioOutputDescriptor>> mSecondaryPatches;
 };
 
 class SourceClientCollection :
@@ -338,13 +389,18 @@ public:
         if (it == mClients.end()) return nullptr;
         return it->second;
     }
-    virtual void removeClient(audio_port_handle_t portId) {
+    virtual bool removeClient(audio_port_handle_t portId, bool checkExists = true) {
         auto it = mClients.find(portId);
-        LOG_ALWAYS_FATAL_IF(it == mClients.end(),
-                "%s(%d): client does not exist", __func__, portId);
-        LOG_ALWAYS_FATAL_IF(it->second->active(),
-                "%s(%d): removing client still active!", __func__, portId);
+        if (checkExists) {
+            LOG_ALWAYS_FATAL_IF(it == mClients.end(),
+                    "%s(%d): client does not exist", __func__, portId);
+            LOG_ALWAYS_FATAL_IF(it->second->active(),
+                    "%s(%d): removing client still active!", __func__, portId);
+        } else if (it == mClients.end()) {
+            return false;
+        }
         (void)mClients.erase(it);
+        return true;
     }
     size_t getClientCount() const {
         return mClients.size();

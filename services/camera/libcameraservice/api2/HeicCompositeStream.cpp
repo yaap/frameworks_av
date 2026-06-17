@@ -132,6 +132,16 @@ bool HeicCompositeStream::isHeicCompositeStreamInfo(const OutputStreamInfo& stre
             (streamInfo.format == HAL_PIXEL_FORMAT_BLOB));
 }
 
+bool HeicCompositeStream::isHeicCompositeStreamOutput(const OutputConfiguration& output,
+                                                    bool isCompositeHeicDisabled,
+                                                    bool isCompositeHeicUltraHDRDisabled) {
+    return (((output.getDataspace() == static_cast<android_dataspace_t>(HAL_DATASPACE_HEIF) &&
+              !isCompositeHeicDisabled) ||
+             (output.getDataspace() == static_cast<android_dataspace_t>(kUltraHDRDataSpace) &&
+              !isCompositeHeicUltraHDRDisabled)) &&
+            (output.getFormat() == HAL_PIXEL_FORMAT_BLOB));
+}
+
 bool HeicCompositeStream::isHeicCompositeStream(const sp<Surface>& surface,
                                                 bool isCompositeHeicDisabled,
                                                 bool isCompositeHeicUltraHDRDisabled) {
@@ -159,28 +169,19 @@ bool HeicCompositeStream::isHeicCompositeStream(const sp<Surface>& surface,
               !isCompositeHeicUltraHDRDisabled)));
 }
 
-status_t HeicCompositeStream::createInternalStreams(const std::vector<SurfaceHolder>& consumers,
-        bool /*hasDeferredConsumer*/, uint32_t width, uint32_t height, int format,
-        camera_stream_rotation_t rotation, int *id, const std::string& physicalCameraId,
-        const std::unordered_set<int32_t> &sensorPixelModesUsed,
-        std::vector<int> *surfaceIds,
-        int /*streamSetId*/, bool /*isShared*/, int32_t colorSpace,
-        int64_t /*dynamicProfile*/, int64_t /*streamUseCase*/, bool useReadoutTimestamp) {
-
+status_t HeicCompositeStream::createInternalStreams(
+        const std::vector<SurfaceHolder>& consumers, bool hasDeferredConsumer, uint32_t width,
+        uint32_t height, int format, camera_stream_rotation_t rotation, int* id,
+        const std::string& physicalCameraId,
+        const std::unordered_set<int32_t>& sensorPixelModesUsed, std::vector<int>* surfaceIds,
+        int /*streamSetId*/, bool /*isShared*/, int32_t colorSpace, int64_t /*dynamicProfile*/,
+        int64_t /*streamUseCase*/, bool useReadoutTimestamp, int dataspace) {
     sp<CameraDeviceBase> device = mDevice.promote();
     if (!device.get()) {
         ALOGE("%s: Invalid camera device!", __FUNCTION__);
         return NO_INIT;
     }
 
-    ANativeWindow* anw = consumers[0].mSurface.get();
-    int dataspace;
-    status_t res;
-    if ((res = anw->query(anw, NATIVE_WINDOW_DEFAULT_DATASPACE, &dataspace)) != OK) {
-        ALOGE("%s: Failed to query Surface dataspace: %s (%d)", __FUNCTION__, strerror(-res),
-                res);
-        return res;
-    }
     if ((dataspace == static_cast<int>(kUltraHDRDataSpace)) && flags::camera_heif_gainmap()) {
         mHDRGainmapEnabled = true;
         mInternalDataSpace = static_cast<android_dataspace_t>(HAL_DATASPACE_BT2020_HLG);
@@ -188,7 +189,7 @@ status_t HeicCompositeStream::createInternalStreams(const std::vector<SurfaceHol
         mAppSegmentSupported = false;
     }
 
-    res = initializeCodec(width, height, device);
+    status_t res = initializeCodec(width, height, device);
     if (res != OK) {
         ALOGE("%s: Failed to initialize HEIC/HEVC codec: %s (%d)",
                 __FUNCTION__, strerror(-res), res);
@@ -211,7 +212,7 @@ status_t HeicCompositeStream::createInternalStreams(const std::vector<SurfaceHol
         res = device->createStream(mAppSegmentSurface, mAppSegmentMaxSize, 1, format,
                 kAppSegmentDataSpace, rotation, &mAppSegmentStreamId, physicalCameraId,
                 sensorPixelModesUsed, &sourceSurfaceId, camera3::CAMERA3_STREAM_SET_ID_INVALID,
-                /*isShared*/false, /*isMultiResolution*/false,
+                /*isShared*/false, OutputConfiguration::MULTI_RES_OFF,
                 /*consumerUsage*/0, ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
                 ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
                 OutputConfiguration::TIMESTAMP_BASE_DEFAULT,
@@ -265,8 +266,8 @@ status_t HeicCompositeStream::createInternalStreams(const std::vector<SurfaceHol
         HAL_PIXEL_FORMAT_YCbCr_420_888 : HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;
     res = device->createStream(mMainImageSurface, width, height, srcStreamFmt, mInternalDataSpace,
             rotation, id, physicalCameraId, sensorPixelModesUsed, surfaceIds,
-            camera3::CAMERA3_STREAM_SET_ID_INVALID, /*isShared*/false, /*isMultiResolution*/false,
-            /*consumerUsage*/0, mHDRGainmapEnabled ?
+            camera3::CAMERA3_STREAM_SET_ID_INVALID, /*isShared*/false,
+            OutputConfiguration::MULTI_RES_OFF, /*consumerUsage*/0, mHDRGainmapEnabled ?
             ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HLG10 :
             ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
             ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
@@ -283,7 +284,9 @@ status_t HeicCompositeStream::createInternalStreams(const std::vector<SurfaceHol
         return res;
     }
 
-    mOutputSurface = consumers[0].mSurface;
+    if (!hasDeferredConsumer) {
+        mOutputSurface = consumers[0].mSurface;
+    }
     res = registerCompositeStreamListener(mMainImageStreamId);
     if (res != OK) {
         ALOGE("%s: Failed to register HAL main image stream: %s (%d)", __FUNCTION__,
@@ -654,15 +657,182 @@ void HeicCompositeStream::onHeicCodecError() {
     mErrorState = true;
 }
 
-status_t HeicCompositeStream::configureStream() {
-    if (isRunning()) {
-        // Processing thread is already running, nothing more to do.
-        return NO_ERROR;
+status_t HeicCompositeStream::updateStream(int streamId,
+        const std::vector<SurfaceHolder>& newSurfaces, KeyedVector<sp<Surface>, size_t> * outputMap,
+        int64_t* lastFrameNumber) {
+
+    if (newSurfaces.size() > 1) {
+        ALOGE("%s: Multiple output surfaces are not supported!", __FUNCTION__);
+        return BAD_VALUE;
+    }
+
+    if (outputMap == nullptr) {
+        return BAD_VALUE;
+    }
+
+    if (lastFrameNumber == nullptr) {
+        return BAD_VALUE;
+    }
+
+    if (streamId != getStreamId()) {
+        ALOGE("%s: Unexpected streamId: %d vs. expected: %d", __FUNCTION__, streamId,
+              getStreamId());
+        return BAD_VALUE;
+    }
+
+    if ((newSurfaces.empty() && mOutputSurface.get() == nullptr) ||
+            (newSurfaces.size() >= 1 && (newSurfaces[0].mSurface == mOutputSurface))) {
+        // Trivial case, the client doesn't request any changes to the current output
+        outputMap->add(mOutputSurface, mMainImageSurfaceId);
+        return OK;
+    }
+
+
+    sp<CameraDeviceBase> device = mDevice.promote();
+    if (!device.get()) {
+        ALOGE("%s: Invalid camera device!", __FUNCTION__);
+        return NO_INIT;
+    }
+
+    if (mMainImageSurface.get() != nullptr) {
+        KeyedVector<sp<Surface>, size_t> outMap;
+        auto res = device->updateInternalStream(mMainImageStreamId, mMainImageSurfaceId,
+                &outMap, lastFrameNumber);
+        if (res != OK) {
+            ALOGE("%s: Unable to update internal the main image stream!", __FUNCTION__);
+            return res;
+        }
+
+        mMainImageSurfaceId = outMap.valueAt(0);
+    }
+
+    if (mAppSegmentSurface.get() != nullptr) {
+        KeyedVector<sp<Surface>, size_t> outMap;
+        int64_t lastFrame = -1;
+        auto res = device->updateInternalStream(mAppSegmentStreamId, mAppSegmentSurfaceId,
+                &outMap, &lastFrame);
+        if (res != OK) {
+            ALOGE("%s: Unable to update internal app segment stream!", __FUNCTION__);
+            return res;
+        }
+
+        mAppSegmentSurfaceId = outMap.valueAt(0);
+    }
+
+    Mutex::Autolock l(mMutex);
+    if (mOutputSurface.get() != nullptr) {
+        // Due to asynchronous nature of HEIC/HEIF encoding and muxing
+        // we need to ensure that an ongoing encoding sequence is not
+        // interrupted and completes until compression and muxing are done.
+        // Any additional pending requests must be aborted.
+        std::queue<int64_t> mainImageQueue;
+        std::queue<int64_t> appSegmentQueue;
+        std::queue<int64_t> codecQueue;
+        std::queue<int64_t> codecGainmapQueue;
+        for (auto &inputFrame : mPendingInputFrames) {
+            if (inputFrame.second.yuvBuffer.data == nullptr) {
+                inputFrame.second.error = true;
+            } else {
+                if (!mMainImageFrameNumbers.empty() &&
+                        mMainImageFrameNumbers.front() == inputFrame.first) {
+                    mainImageQueue.push(inputFrame.first);
+                    mMainImageFrameNumbers.pop();
+                }
+                if (!mAppSegmentFrameNumbers.empty() &&
+                        mAppSegmentFrameNumbers.front() == inputFrame.first) {
+                    appSegmentQueue.push(inputFrame.first);
+                    mAppSegmentFrameNumbers.pop();
+                }
+                if (!mCodecOutputBufferFrameNumbers.empty() &&
+                        mCodecOutputBufferFrameNumbers.front() == inputFrame.first) {
+                    codecQueue.push(inputFrame.first);
+                    mCodecOutputBufferFrameNumbers.pop();
+                }
+                if (!mCodecGainmapOutputBufferFrameNumbers.empty() &&
+                        mCodecGainmapOutputBufferFrameNumbers.front() == inputFrame.first) {
+                    codecGainmapQueue.push(inputFrame.first);
+                    mCodecGainmapOutputBufferFrameNumbers.pop();
+                }
+            }
+            inputFrame.second.outputUpdated = true;
+            if (inputFrame.second.currentSurface == nullptr) {
+                inputFrame.second.currentSurface = mOutputSurface;
+            }
+        }
+        mMainImageFrameNumbers.swap(mainImageQueue);
+        mAppSegmentFrameNumbers.swap(appSegmentQueue);
+        mCodecOutputBufferFrameNumbers.swap(codecQueue);
+        mCodecGainmapOutputBufferFrameNumbers.swap(codecGainmapQueue);
+
+        auto res = mOutputSurface->disconnect(NATIVE_WINDOW_API_CAMERA);
+        if (res != OK) {
+            ALOGE("%s: Unable to disconnect to native window for stream %d",
+                    __FUNCTION__, mMainImageStreamId);
+            return res;
+        }
+
+        mOutputSurface = nullptr;
+    }
+
+    if (!newSurfaces.empty()) {
+        mOutputSurface = newSurfaces[0].mSurface;
+    }
+
+    status_t res = configureStream(false /*outputConnected*/);
+    if (res == NO_ERROR && (mOutputSurface.get() != nullptr)) {
+        outputMap->add(mOutputSurface, mMainImageStreamId);
+    }
+
+    return res;
+}
+
+status_t HeicCompositeStream::setConsumerSurfaces(int streamId,
+                                                  const std::vector<SurfaceHolder>& consumers,
+                                                  std::vector<int>* surfaceIds /*out*/) {
+    if ((surfaceIds == nullptr) || consumers.empty()) {
+        return BAD_VALUE;
+    }
+
+    if (consumers.size() > 1) {
+        ALOGE("%s: Multiple output surfaces are not supported!", __FUNCTION__);
+        return BAD_VALUE;
+    }
+
+    if (streamId != getStreamId()) {
+        ALOGE("%s: Unexpected streamId: %d vs. expected: %d", __FUNCTION__, streamId,
+              getStreamId());
+        return BAD_VALUE;
+    }
+
+    if (mOutputSurface.get() != nullptr) {
+        ALOGE("%s: Composite stream is not deferred!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    mOutputSurface = consumers[0].mSurface;
+    auto ret = configureStream(false /*outputConnected*/);
+    if (ret == OK) {
+        surfaceIds->push_back(mMainImageSurfaceId);
+    }
+
+    return OK;
+}
+
+status_t HeicCompositeStream::configureStream(bool outputConnected) {
+    if (!flags::seamless_transitions() || outputConnected) {
+        if (isRunning()) {
+            // Processing thread is already running, nothing more to do.
+            return NO_ERROR;
+        }
     }
 
     if (mOutputSurface.get() == nullptr) {
-        ALOGE("%s: No valid output surface set!", __FUNCTION__);
-        return NO_INIT;
+        if (flags::seamless_transitions()) {
+            return NO_ERROR;
+        } else {
+            ALOGE("%s: No valid output surface set!", __FUNCTION__);
+            return NO_INIT;
+        }
     }
 
     auto res = mOutputSurface->connect(NATIVE_WINDOW_API_CAMERA, mStreamSurfaceListener);
@@ -705,6 +875,10 @@ status_t HeicCompositeStream::configureStream() {
         ALOGE("%s: Unable to set buffer dimension %zu x 1 for stream %d: %s (%d)",
                 __FUNCTION__, mMaxHeicBufferSize, mMainImageStreamId, strerror(-res), res);
         return res;
+    }
+
+    if (flags::seamless_transitions() && isRunning()) {
+        return NO_ERROR;
     }
 
     sp<camera3::StatusTracker> statusTracker = mStatusTracker.promote();
@@ -823,6 +997,7 @@ void HeicCompositeStream::compilePendingInputLocked() {
             ALOGE("%s: mPendingInputFrames doesn't contain frameNumber %" PRId64, __FUNCTION__,
                     mAppSegmentFrameNumbers.front());
             mInputAppSegmentBuffers.erase(it);
+            mAppSegmentConsumer->unlockBuffer(imgBuffer);
             mAppSegmentFrameNumbers.pop();
             continue;
         }
@@ -866,6 +1041,7 @@ void HeicCompositeStream::compilePendingInputLocked() {
             ALOGE("%s: mPendingInputFrames doesn't contain frameNumber %" PRId64, __FUNCTION__,
                     mMainImageFrameNumbers.front());
             mInputYuvBuffers.erase(it);
+            mMainImageConsumer->unlockBuffer(imgBuffer);
             mMainImageFrameNumbers.pop();
             continue;
         }
@@ -1057,6 +1233,9 @@ bool HeicCompositeStream::getNextReadyInputLocked(int64_t *frameNumber /*out*/) 
                 it.second.gainmapFormat = mGainmapFormat->dup();
                 it.second.gainmapFormat->setInt32("gainmap", 1);
             }
+            if (it.second.currentSurface == nullptr) {
+                it.second.currentSurface = mOutputSurface;
+            }
             newInputAvailable = true;
             break;
         }
@@ -1225,13 +1404,16 @@ status_t HeicCompositeStream::processInputFrame(int64_t frameNumber,
 }
 
 status_t HeicCompositeStream::startMuxerForInputFrame(int64_t frameNumber, InputFrame &inputFrame) {
-    sp<ANativeWindow> outputANW = mOutputSurface;
+    sp<ANativeWindow> outputANW = inputFrame.currentSurface;
 
-    auto res = outputANW->dequeueBuffer(mOutputSurface.get(), &inputFrame.anb, &inputFrame.fenceFd);
-    if (res != OK) {
-        ALOGE("%s: Error retrieving output buffer: %s (%d)", __FUNCTION__, strerror(-res),
-                res);
-        return res;
+    if (!inputFrame.outputUpdated && (inputFrame.currentSurface != nullptr)) {
+        auto res = outputANW->dequeueBuffer(inputFrame.currentSurface.get(), &inputFrame.anb,
+                &inputFrame.fenceFd);
+        if (res != OK) {
+            ALOGE("%s: Error retrieving output buffer: %s (%d)", __FUNCTION__, strerror(-res),
+                    res);
+            return res;
+        }
     }
     mDequeuedOutputBufferCnt++;
 
@@ -1252,7 +1434,7 @@ status_t HeicCompositeStream::startMuxerForInputFrame(int64_t frameNumber, Input
         return NO_INIT;
     }
 
-    res = inputFrame.muxer->setOrientationHint(inputFrame.orientation);
+    auto res = inputFrame.muxer->setOrientationHint(inputFrame.orientation);
     if (res != OK) {
         ALOGE("%s: Failed to setOrientationHint: %s (%d)", __FUNCTION__,
                 strerror(-res), res);
@@ -1651,8 +1833,31 @@ status_t HeicCompositeStream::processOneCodecGainmapOutputFrame(int64_t frameNum
 
 status_t HeicCompositeStream::processCompletedInputFrame(int64_t frameNumber,
         InputFrame &inputFrame) {
-    sp<ANativeWindow> outputANW = mOutputSurface;
     inputFrame.muxer->stop();
+
+    if (inputFrame.outputUpdated || inputFrame.currentSurface == nullptr) {
+        ALOGI("%s: Output surface updated during processing dropping output frame!", __FUNCTION__);
+        close(inputFrame.fileFd);
+        inputFrame.fileFd = -1;
+
+        if (inputFrame.anb != nullptr && inputFrame.currentSurface != nullptr) {
+            sp<ANativeWindow> outputANW = inputFrame.currentSurface;
+
+            auto res = outputANW->cancelBuffer(inputFrame.currentSurface.get(), inputFrame.anb,
+                    /*fence*/ -1);
+            if (res != OK) {
+                ALOGE("%s: Failed to cancel buffer to Heic stream: %s (%d)", __FUNCTION__,
+                        strerror(-res), res);
+                return res;
+            }
+            inputFrame.anb = nullptr;
+        }
+
+        mDequeuedOutputBufferCnt--;
+        return OK;
+    }
+    sp<ANativeWindow> outputANW = inputFrame.currentSurface;
+    sp<Surface> currentOutput = inputFrame.currentSurface;
 
     // Copy the content of the file to memory.
     sp<GraphicBuffer> gb = GraphicBuffer::from(inputFrame.anb);
@@ -1691,17 +1896,18 @@ status_t HeicCompositeStream::processCompletedInputFrame(int64_t frameNumber,
     };
     memcpy(header, &blobHeader, sizeof(CameraBlob));
 
-    res = native_window_set_buffers_timestamp(mOutputSurface.get(), inputFrame.timestamp);
+    res = native_window_set_buffers_timestamp(currentOutput.get(), inputFrame.timestamp);
     if (res != OK) {
         ALOGE("%s: Stream %d: Error setting timestamp: %s (%d)",
                __FUNCTION__, getStreamId(), strerror(-res), res);
         return res;
     }
 
-    res = outputANW->queueBuffer(mOutputSurface.get(), inputFrame.anb, /*fence*/ -1);
+    res = outputANW->queueBuffer(currentOutput.get(), inputFrame.anb, /*fence*/ -1);
     if (res != OK) {
         ALOGE("%s: Failed to queueBuffer to Heic stream: %s (%d)", __FUNCTION__,
                 strerror(-res), res);
+        outputANW->cancelBuffer(currentOutput.get(), inputFrame.anb, /*fence*/ -1);
         return res;
     }
     inputFrame.anb = nullptr;
@@ -1709,7 +1915,7 @@ status_t HeicCompositeStream::processCompletedInputFrame(int64_t frameNumber,
 
     ALOGV("%s: [%" PRId64 "]", __FUNCTION__, frameNumber);
     ATRACE_ASYNC_END("HEIC capture", frameNumber);
-    return OK;
+    return res;
 }
 
 
@@ -1747,11 +1953,13 @@ void HeicCompositeStream::releaseInputFrameLocked(int64_t frameNumber,
     while (!inputFrame->codecInputBuffers.empty()) {
         auto it = inputFrame->codecInputBuffers.begin();
         inputFrame->codecInputBuffers.erase(it);
+        mCodecInputBuffers.push_back(it->index);
     }
 
     while (!inputFrame->gainmapCodecInputBuffers.empty()) {
         auto it = inputFrame->gainmapCodecInputBuffers.begin();
         inputFrame->gainmapCodecInputBuffers.erase(it);
+        mGainmapCodecInputBuffers.push_back(it->index);
     }
 
     if (inputFrame->error || mErrorState) {
@@ -1765,8 +1973,8 @@ void HeicCompositeStream::releaseInputFrameLocked(int64_t frameNumber,
     }
 
     if (inputFrame->anb != nullptr) {
-        sp<ANativeWindow> outputANW = mOutputSurface;
-        outputANW->cancelBuffer(mOutputSurface.get(), inputFrame->anb, /*fence*/ -1);
+        sp<ANativeWindow> outputANW = inputFrame->currentSurface;
+        outputANW->cancelBuffer(inputFrame->currentSurface.get(), inputFrame->anb, /*fence*/ -1);
         inputFrame->anb = nullptr;
 
         mDequeuedOutputBufferCnt--;
@@ -2557,8 +2765,8 @@ void HeicCompositeStream::CodecCallbackHandler::onMessageReceived(const sp<AMess
                          ALOGE("CB_ERROR: err is expected.");
                          break;
                      }
-                     if (!msg->findInt32("action", &actionCode)) {
-                         ALOGE("CB_ERROR: action is expected.");
+                     if (!msg->findInt32("actionCode", &actionCode)) {
+                         ALOGE("CB_ERROR: actionCode is expected.");
                          break;
                      }
                      msg->findString("detail", &detail);

@@ -58,7 +58,6 @@ cc_defaults {
         "libcamera_metadata",
         "libfmq",
         "libgui",
-        "libguiflags",
         "libhardware",
         "libhidlbase",
         "libimage_io",
@@ -78,6 +77,8 @@ cc_defaults {
         "libvendorsupport",
         "libxml2",
         "libyuv",
+        "libstatssocket",
+        "libstatspull",
         "android.companion.virtual.virtualdevice_aidl-cpp",
         "android.companion.virtualdevice.flags-aconfig-cc",
         "android.hardware.camera.common@1.0",
@@ -94,8 +95,8 @@ cc_defaults {
         "android.hardware.common.fmq-V1-cpp",
         "camera_platform_flags_c_lib",
         "com.android.window.flags.window-aconfig_flags_c_lib",
-        "media_permission-aidl-cpp",
         "process_info_service_aidl-cpp",
+        "lights_flags_cc_lib",
     ],
 
     static_libs: [
@@ -109,20 +110,21 @@ cc_defaults {
         "android.frameworks.cameraservice.service-V3-ndk",
         "android.frameworks.cameraservice.device-V3-ndk",
         "android.hardware.camera.common-V1-ndk",
-        "android.hardware.camera.device-V3-ndk",
+        "android.hardware.camera.device-V4-ndk",
         "android.hardware.camera.metadata-V3-ndk",
         "android.hardware.camera.provider@2.4",
         "android.hardware.camera.provider@2.5",
         "android.hardware.camera.provider@2.6",
         "android.hardware.camera.provider@2.7",
-        "android.hardware.camera.provider-V3-ndk",
+        "android.hardware.camera.provider-V4-ndk",
         "libaidlcommonsupport",
         "libbinderthreadstateutils",
         "libcameraservice_device_independent",
         "libdynamic_depth",
         "libprocessinfoservice_aidl",
         "libvirtualdevicebuildflags",
-        "media_permission-aidl-cpp",
+        "libstatslog_framework",
+        "libperfetto_client_experimental",
     ],
 }
 
@@ -285,6 +287,7 @@ cc_library_static {
         "liblog",
         "libutils",
         "libxml2",
+        "libstatspull",
     ],
 
     target: {
@@ -316,10 +319,43 @@ cc_library_static {
 }
 
 cc_library_static {
+    name: "libstatslog_framework",
+    generated_sources: ["statslog_framework.cpp"],
+    generated_headers: ["statslog_framework.h"],
+    min_sdk_version: "29",
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+    export_generated_headers: ["statslog_framework.h"],
+    shared_libs: [
+        "libstatssocket",
+        "libstatspull",
+    ],
+}
+
+genrule {
+    name: "statslog_framework.h",
+    tools: ["stats-log-api-gen"],
+    cmd: "$(location stats-log-api-gen) --header $(genDir)/statslog_framework.h --module framework --namespace android,framework,stats",
+    out: [
+        "statslog_framework.h",
+    ],
+}
+
+genrule {
+    name: "statslog_framework.cpp",
+    tools: ["stats-log-api-gen"],
+    cmd: "$(location stats-log-api-gen) --cpp $(genDir)/statslog_framework.cpp --module framework --namespace android,framework,stats --importHeader statslog_framework.h",
+    out: [
+        "statslog_framework.cpp",
+    ],
+}
+
+cc_library_static {
     name: "libcameraservice_ext_lib",
     srcs: [
         "common/CameraProviderExtension.cpp",
     ],
     export_include_dirs: ["."],
 }
-

@@ -53,6 +53,7 @@
 
 namespace android {
 using namespace camera2;
+using namespace hardware::camera2;
 
 namespace flags = com::android::internal::camera::flags;
 namespace wm_flags = com::android::window::flags;
@@ -138,10 +139,7 @@ status_t Camera2Client::initializeImpl(TProviderPtr providerPtr, const std::stri
     // The 'mRotateAndCropMode' value only accounts for the necessary adjustment
     // when the display rotates. The sensor orientation still needs to be calculated
     // and applied similar to the Camera2 path.
-    bool enableTransformInverseDisplay = true;
-    if (wm_flags::enable_camera_compat_for_desktop_windowing()) {
-        enableTransformInverseDisplay &= mCompatInfo.shouldAllowTransformInverseDisplay();
-    }
+    bool enableTransformInverseDisplay = mCompatInfo.shouldAllowTransformInverseDisplay();
     CameraUtils::getRotationTransform(staticInfo, OutputConfiguration::MIRROR_MODE_AUTO,
             enableTransformInverseDisplay, &mRotateAndCropPreviewTransform);
 
@@ -507,6 +505,7 @@ binder::Status Camera2Client::disconnect() {
     ALOGV("Camera %d: Disconnecting device", mCameraId);
 
     bool hasDeviceError = mDevice->hasDeviceError();
+    int32_t deviceErrorState = mDevice->getErrorState();
     mDevice->disconnect();
 
     {
@@ -519,7 +518,8 @@ binder::Status Camera2Client::disconnect() {
     }
 
     int32_t closeLatencyMs = ns2ms(systemTime() - startTime);
-    mCameraServiceProxyWrapper->logClose(mCameraIdStr, closeLatencyMs, hasDeviceError);
+    mCameraServiceProxyWrapper->logClose(mCameraIdStr, closeLatencyMs, hasDeviceError,
+        deviceErrorState);
 
     return res;
 }
@@ -2413,16 +2413,16 @@ status_t Camera2Client::setVideoTarget(const sp<SurfaceType>& target) {
     return OK;
 }
 
-status_t Camera2Client::setAudioRestriction(int /*mode*/) {
+status_t Camera2Client::setAudioRestriction(ICameraDeviceUser::AudioRestriction /*mode*/) {
     // Empty implementation. setAudioRestriction is hidden interface and not
     // supported by android.hardware.Camera API
     return INVALID_OPERATION;
 }
 
-int32_t Camera2Client::getGlobalAudioRestriction() {
+ICameraDeviceUser::AudioRestriction Camera2Client::getGlobalAudioRestriction() {
     // Empty implementation. getAudioRestriction is hidden interface and not
     // supported by android.hardware.Camera API
-    return INVALID_OPERATION;
+    return hardware::camera2::ICameraDeviceUser::AudioRestriction::NONE;
 }
 
 status_t Camera2Client::setCameraServiceWatchdog(bool enabled) {

@@ -62,7 +62,7 @@ public:
                               ::aaudio::StreamParameters* paramsOut,
                               int32_t* _aidl_return) override;
 
-    binder::Status closeStream(int32_t streamHandle, int32_t* _aidl_return) override;
+    binder::Status closeStream(int32_t streamHandle, bool force, int32_t* _aidl_return) override;
 
     binder::Status
     getStreamDescription(int32_t streamHandle, ::aaudio::Endpoint* endpoint,
@@ -90,7 +90,7 @@ public:
 
     binder::Status drainStream(int32_t streamHandle,
                                int64_t wakeUpNanos,
-                               bool allowSoftWakeUp,
+                               aaudio::DrainType drainType,
                                android::media::TimerQueueHandle* handle,
                                int32_t* _aidl_return) override;
 
@@ -109,13 +109,20 @@ public:
             android::media::audio::common::AudioPlaybackRate* rateOut,
             int32_t* _aidl_return) override;
 
+    aaudio_result_t createClient(aaudio::aaudio_handle_t streamHandle,
+                                 const android::AudioClient& client,
+                                 const audio_attributes_t& attr,
+                                 audio_port_handle_t* clientHandle,
+                                 audio_io_handle_t* ioHandle);
+
     aaudio_result_t startClient(aaudio::aaudio_handle_t streamHandle,
-                                const android::AudioClient& client,
-                                const audio_attributes_t *attr,
-                                audio_port_handle_t *clientHandle);
+                                audio_port_handle_t clientHandle);
 
     aaudio_result_t stopClient(aaudio::aaudio_handle_t streamHandle,
-                                       audio_port_handle_t clientHandle);
+                               audio_port_handle_t clientHandle);
+
+    aaudio_result_t releaseClient(aaudio::aaudio_handle_t streamHandle,
+                                  audio_port_handle_t clientHandle);
 
  // ===============================================================================
  // The following public methods are only called from the service and NOT by Binder.
@@ -127,7 +134,8 @@ public:
      * This is only called from within the Service.
      * It bypasses the permission checks in closeStream(handle).
      */
-    aaudio_result_t closeStream(const sp<aaudio::AAudioServiceStreamBase>& serviceStream);
+    aaudio_result_t closeStream(const sp<aaudio::AAudioServiceStreamBase>& serviceStream,
+                                bool force);
 
 private:
     class Adapter : public aaudio::AAudioBinderAdapter {
@@ -138,16 +146,28 @@ private:
                 : aaudio::AAudioBinderAdapter(service, DEFAULT_AAUDIO_SERVICE_ID),
                   mService(service) {}
 
+        aaudio_result_t createClient(const aaudio::AAudioHandleInfo& streamHandleInfo,
+                                     const android::AudioClient& client,
+                                     const audio_attributes_t& attr,
+                                     audio_port_handle_t* clientHandle,
+                                     audio_io_handle_t* ioHandle) final {
+            return mService->createClient(
+                    streamHandleInfo.getHandle(), client, attr, clientHandle, ioHandle);
+        }
+
         aaudio_result_t startClient(const aaudio::AAudioHandleInfo& streamHandleInfo,
-                                    const android::AudioClient &client,
-                                    const audio_attributes_t *attr,
-                                    audio_port_handle_t *clientHandle) override {
-            return mService->startClient(streamHandleInfo.getHandle(), client, attr, clientHandle);
+                                    audio_port_handle_t clientHandle) override {
+            return mService->startClient(streamHandleInfo.getHandle(), clientHandle);
         }
 
         aaudio_result_t stopClient(const aaudio::AAudioHandleInfo& streamHandleInfo,
                                    audio_port_handle_t clientHandle) override {
             return mService->stopClient(streamHandleInfo.getHandle(), clientHandle);
+        }
+
+        aaudio_result_t releaseClient(const aaudio::AAudioHandleInfo& streamHandleInfo,
+                                      audio_port_handle_t clientHandle) final {
+            return mService->releaseClient(streamHandleInfo.getHandle(), clientHandle);
         }
 
     private:

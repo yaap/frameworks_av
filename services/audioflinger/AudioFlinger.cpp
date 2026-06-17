@@ -29,10 +29,10 @@
 #include <afutils/FallibleLockGuard.h>
 #include <afutils/NBAIO_Tee.h>
 #include <afutils/PropertyUtils.h>
-#include <afutils/TypedLogger.h>
 #include <android-base/errors.h>
 #include <android-base/stringprintf.h>
 #include <android/media/IAudioPolicyService.h>
+#include <audio_utils/CommandThread.h>
 #include <audiomanager/IAudioManager.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
@@ -94,6 +94,7 @@ using media::IEffectClient;
 using media::audio::common::AudioMMapPolicyInfo;
 using media::audio::common::AudioMMapPolicyType;
 using media::audio::common::AudioMode;
+using media::audio::common::FlushFromFrameSupport;
 using android::content::AttributionSourceState;
 using android::detail::AudioHalVersionInfo;
 using com::android::media::permission::INativePermissionController;
@@ -242,6 +243,7 @@ BINDER_METHOD_ENTRY(getSoundDoseInterface) \
 BINDER_METHOD_ENTRY(getAudioPolicyConfig) \
 BINDER_METHOD_ENTRY(getAudioMixPort) \
 BINDER_METHOD_ENTRY(resetReferencesForTest) \
+BINDER_METHOD_ENTRY(getFlushFromFrameSupport) \
 
 // singleton for Binder Method Statistics for IAudioFlinger
 static auto& getIAudioFlingerStatistics() {
@@ -281,14 +283,22 @@ class DevicesFactoryHalCallbackImpl : public DevicesFactoryHalCallback {
         // Start a detached thread to execute notification in parallel.
         // This is done to prevent mutual blocking of audio_flinger and
         // audio_policy services during system initialization.
-        std::thread notifier([]() {
+        AudioFlinger::getAsyncCallbackThread().add("onNewAudioModulesAvailable", []() {
             AudioSystem::onNewAudioModulesAvailable();
         });
-        notifier.detach();
     }
 };
 
 // ----------------------------------------------------------------------------
+
+// static
+audio_utils::CommandThread& AudioFlinger::getAsyncCallbackThread()
+{
+    [[clang::no_destroy]] static audio_utils::CommandThread commandThread(
+            "AF_AsyncCallback",
+            audio_utils::nice_to_unified_priority(ANDROID_PRIORITY_AUDIO));
+    return commandThread;
+}
 
 void AudioFlinger::instantiate() {
     sp<IServiceManager> sm(defaultServiceManager());
@@ -617,10 +627,6 @@ status_t AudioFlinger::openMmapStreamImpl(bool isOutput,
         }
     }
     if (ret != NO_ERROR) {
-        if (!isOutput) {
-            audio_utils::lock_guard _l(mutex());
-            setHasAlreadyCaptured_l(adjAttributionSource.uid);
-        }
         return ret;
     }
 
@@ -641,6 +647,10 @@ status_t AudioFlinger::openMmapStreamImpl(bool isOutput,
         config->channel_mask = thread->channelMask();
         config->format = thread->format();
         interface = IAfMmapThread::createMmapStreamInterfaceAdapter(thread);
+
+        if (!isOutput) {
+            setHasAlreadyCaptured_l(adjAttributionSource.uid);
+        }
     } else {
         l.unlock();
         if (isOutput) {
@@ -1154,7 +1164,7 @@ status_t AudioFlinger::createTrack(const media::CreateTrackRequest& _input,
                                       input.sharedBuffer, sessionId, &output.flags,
                                       callingPid, adjAttributionSource, input.clientInfo.clientTid,
                                       &lStatus, portId, input.audioTrackCallback, isSpatialized,
-                                      isBitPerfect, &output.afTrackFlags);
+                                      isBitPerfect, &output.afTrackFlags, input.codecProvenance);
         LOG_ALWAYS_FATAL_IF((lStatus == NO_ERROR) && (track == 0));
         // we don't abort yet if lStatus != NO_ERROR; there is still work to be done regardless
 
@@ -1721,6 +1731,18 @@ void AudioFlinger::updateDownStreamPatches_l(const struct audio_patch *patch,
     }
 }
 
+IAfRecordThread* AudioFlinger::getRecordThreadForDevice_l(audio_devices_t deviceType,
+                                            const String8& address) const {
+    AudioDeviceTypeAddr ada(deviceType, address.c_str());
+
+    const auto& it = std::find_if(mRecordThreads.begin(), mRecordThreads.end(),
+            [ada](const auto& iter) {
+                return ada.equals(iter.second->inDeviceTypeAddr());
+            });
+
+    return (it != mRecordThreads.end()) ? it->second.get() : nullptr;
+}
+
 // Filter reserved keys from setParameters() before forwarding to audio HAL or acting upon.
 // Some keys are used for audio routing and audio path configuration and should be reserved for use
 // by audio policy and audio flinger for functional, privacy and security reasons.
@@ -2074,7 +2096,12 @@ void AudioFlinger::registerClient(const sp<media::IAudioFlingerClient>& client)
 
             mNotificationClients[pid] = notificationClient;
             sp<IBinder> binder = IInterface::asBinder(client);
-            binder->linkToDeath(notificationClient);
+            status_t status = binder->linkToDeath(notificationClient);
+            ALOGW_IF(status != NO_ERROR, "%s: linkToDeath returned %d",
+                    __func__, status);
+            status = binder->addFrozenStateChangeCallback(notificationClient);
+            ALOGW_IF(status != NO_ERROR, "%s: addFrozenStateChangeCallback returned %d",
+                    __func__, status);
         }
     }
 
@@ -2128,6 +2155,38 @@ void AudioFlinger::removeNotificationClient(pid_t pid)
     }
 }
 
+void AudioFlinger::onClientUnfrozen(pid_t pid)
+{
+    ALOGV("%s: pid:%d", __func__, pid);
+    audio_utils::lock_guard _l(mutex());
+
+    // template lambda to iterate over Threads.
+    auto unfreezeThreads = [pid](const auto& threads) {
+        for (const auto& [_, thread] : threads) {
+            thread->onClientUnfrozen(pid);
+        }
+    };
+    unfreezeThreads(mPlaybackThreads);
+    unfreezeThreads(mRecordThreads);
+    unfreezeThreads(mMmapThreads);
+}
+
+void AudioFlinger::onClientFrozen(pid_t pid)
+{
+    ALOGV("%s: pid:%d", __func__, pid);
+    audio_utils::lock_guard _l(mutex());
+
+    // template lambda to iterate over Threads.
+    auto freezeThreads = [pid](const auto& threads) {
+        for (const auto& [_, thread] : threads) {
+            thread->onClientFrozen(pid);
+        }
+    };
+    freezeThreads(mPlaybackThreads);
+    freezeThreads(mRecordThreads);
+    freezeThreads(mMmapThreads);
+}
+
 void AudioFlinger::ioConfigChanged(audio_io_config_event_t event,
                                    const sp<AudioIoDescriptor>& ioDesc,
                                    pid_t pid) {
@@ -2172,10 +2231,10 @@ const IPermissionProvider& AudioFlinger::getPermissionProvider() {
     return mAudioPolicyServiceLocal.load()->getPermissionProvider();
 }
 
-bool AudioFlinger::isHardeningOverrideEnabled() const {
+media::IAudioPolicyService::HardeningOverride AudioFlinger::getHardeningOverride() const {
     // This is inited as part of service construction, prior to binder registration,
     // so it should always be non-null.
-    return mAudioPolicyServiceLocal.load()->isHardeningOverrideEnabled();
+    return mAudioPolicyServiceLocal.load()->getHardeningOverride();
 }
 
 // removeClient_l() must be called with AudioFlinger::clientMutex() held
@@ -2225,8 +2284,55 @@ AudioFlinger::NotificationClient::~NotificationClient()
 
 void AudioFlinger::NotificationClient::binderDied(const wp<IBinder>& who __unused)
 {
+    audio_utils::set_priority_for_binder_callback(__func__);
+
     const auto keep = sp<NotificationClient>::fromExisting(this);
     mAudioFlinger->removeNotificationClient(mPid);
+}
+
+void AudioFlinger::NotificationClient::onStateChanged(
+        const android::wp<IBinder>& who __unused, State state)
+{
+    audio_utils::set_priority_for_binder_callback(__func__);
+
+    bool frozen;
+    const char* fstring;
+    if (state == IBinder::FrozenStateChangeCallback::State::FROZEN) {
+        frozen = true;
+        fstring = "frozen";
+        mFreezeTime = systemTime(SYSTEM_TIME_MONOTONIC);
+    } else if (state == IBinder::FrozenStateChangeCallback::State::UNFROZEN) {
+        frozen = false;
+        fstring = "unfrozen";
+    } else {
+        ALOGW("%s: unknown state: %d", __func__, state);
+        return;
+    }
+
+    mFrozen = frozen;
+
+    // Querying activeWhileFrozen from AudioPowerManager is lighter weight
+    // than locking the PlaybackThreads if those are active.
+    auto& apm = media::psh_utils::AudioPowerManager::getAudioPowerManager();
+    const bool activeWhileFrozen = apm.setFrozen(mPid, frozen);
+
+    if (activeWhileFrozen) {
+        // We only trigger AudioFlinger frozen state operations if there is legitimate
+        // audio activity for that pid.  This prevents unnecessary locking and unlocking of
+        // Threads which may be intrusive on performance.
+        //
+        // Note: in the future consider mediautils::UidInfo::getInfo(mUid)->package.c_str()
+        ALOGW("%s: pid:%d  uid:%d  new state:%s - active while frozen",
+                __func__, mPid, mUid, fstring);
+        if (frozen) {
+            mAudioFlinger->onClientFrozen(mPid);
+        } else {
+            mAudioFlinger->onClientUnfrozen(mPid);
+        }
+    } else {
+        ALOGD("%s: pid:%d  uid:%d  state:%s - no freeze activity", __func__, mPid, mUid, fstring);
+    }
+    ALOGV("%s: priority: %d", __func__, audio_utils::get_thread_priority(gettid()));
 }
 
 status_t AudioFlinger::createRecord(const media::CreateRecordRequest& _input,
@@ -2255,6 +2361,22 @@ status_t AudioFlinger::createRecord(const media::CreateRecordRequest& _input,
     // TODO pass wrapped object around
     adjAttributionSource = std::move(validatedAttrSource).unwrapInto();
 
+    sp<NotificationClient> notificationClient; // acquire notificationClient outside of AF lock.
+
+    auto checkFrozen = [&](const char* where, sp<NotificationClient> nc) {
+        if (!nc) return false;
+
+        const auto [frozen, freezeTime] = nc->getFrozenStatus();
+        const int deltaMs = (systemTime(SYSTEM_TIME_MONOTONIC) - freezeTime)
+                / NANOS_PER_MILLISECOND;
+        if (frozen) {
+            ALOGW("createRecord: record request denied for pid %d at %s - frozen for %d ms",
+                    adjAttributionSource.pid, where, deltaMs);
+            lStatus = PERMISSION_DENIED;
+        }
+        return frozen;
+    };
+
     // further format checks are performed by createRecordTrack_l()
     if (!audio_is_valid_format(input.config.format)) {
         ALOGE("createRecord() invalid format %#x", input.config.format);
@@ -2281,6 +2403,16 @@ status_t AudioFlinger::createRecord(const media::CreateRecordRequest& _input,
     output.flags = input.flags;
 
     client = registerClient(adjAttributionSource.pid, adjAttributionSource.uid);
+    {
+        audio_utils::lock_guard _cl(clientMutex());
+        if (const auto it = mNotificationClients.find(callingPid);
+             it != mNotificationClients.end()) {
+             notificationClient = it->second;
+        }
+    }
+
+    // Check to see if we are frozen.
+    if (checkFrozen("begin", notificationClient)) goto Exit; // lStatus reads PERMISSION_DENIED.
 
     // Not a conventional loop, but a retry loop for at most two iterations total.
     // Try first maybe with FAST flag then try again without FAST flag if that fails.
@@ -2333,6 +2465,10 @@ status_t AudioFlinger::createRecord(const media::CreateRecordRequest& _input,
                                                   input.clientInfo.clientTid,
                                                   &lStatus, portId, input.maxSharedAudioHistoryMs);
         LOG_ALWAYS_FATAL_IF((lStatus == NO_ERROR) && (recordTrack == 0));
+
+        // Double checked atomic rollback.
+        if (checkFrozen("end", notificationClient)) goto Exit; // lStatus reads PERMISSION_DENIED.
+
 
         // lStatus == BAD_TYPE means FAST flag was rejected: request a new input from
         // audio policy manager without FAST constraint
@@ -3902,14 +4038,21 @@ void AudioFlinger::updateSecondaryOutputsForTrack_l(
         // TODO: We could check compatibility of the secondaryThread with the PatchTrack
         // for fast usage: thread has fast mixer, sample rate matches, etc.;
         // for now, we exclude fast tracks by removing the Fast flag.
-        constexpr audio_output_flags_t kIncompatiblePatchTrackFlags =
-                static_cast<audio_output_flags_t>(AUDIO_OUTPUT_FLAG_FAST
-                        | AUDIO_OUTPUT_FLAG_DIRECT | AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD);
+        const audio_output_flags_t kIncompatiblePatchTrackFlags =
+                com::android::media::audioserver::capture_offloaded_audio()
+                        ? static_cast<audio_output_flags_t>(AUDIO_OUTPUT_FLAG_FAST |
+                                                            AUDIO_OUTPUT_FLAG_DIRECT)
+                        : static_cast<audio_output_flags_t>(AUDIO_OUTPUT_FLAG_FAST |
+                                                            AUDIO_OUTPUT_FLAG_DIRECT |
+                                                            AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD);
 
         const audio_output_flags_t outputFlags =
                 (audio_output_flags_t)(track->getOutputFlags() & ~kIncompatiblePatchTrackFlags);
         const AudioPlaybackRate playbackRate = track->audioTrackServerProxy()->getPlaybackRate();
-        sp<IAfPatchTrack> patchTrack = IAfPatchTrack::create(secondaryThread,
+        sp<IAfPatchTrack> patchTrack;
+        {
+            audio_utils::lock_guard l(secondaryThread->mutex());
+            patchTrack = IAfPatchTrack::create(secondaryThread,
                                                        track->streamType(),
                                                        track->sampleRate(),
                                                        track->channelMask(),
@@ -3918,9 +4061,11 @@ void AudioFlinger::updateSecondaryOutputsForTrack_l(
                                                        patchRecord->buffer(),
                                                        patchRecord->bufferSize(),
                                                        outputFlags,
+                                                       AUDIO_PORT_HANDLE_NONE,
                                                        0ns /* timeout */,
                                                        frameCountToBeReady,
                                                        playbackRate.mSpeed);
+        }
         status = patchTrack->initCheck();
         if (status != NO_ERROR) {
             ALOGE("Secondary output patchTrack init failed: %d", status);
@@ -5016,6 +5161,22 @@ status_t AudioFlinger::resetReferencesForTest() {
     return NO_ERROR;
 }
 
+status_t AudioFlinger::getFlushFromFrameSupport(
+        int module, const media::audio::common::AudioPortConfig& config,
+        FlushFromFrameSupport* support) {
+    if (support == nullptr) {
+        return BAD_VALUE;
+    }
+    audio_module_handle_t legacyModule =
+            VALUE_OR_RETURN_STATUS(aidl2legacy_int32_t_audio_module_handle_t(module));
+    audio_utils::lock_guard _l(mutex());
+    AudioHwDevice *device = findSuitableHwDev_l(legacyModule, AUDIO_DEVICE_NONE);
+    if (device == nullptr) {
+        return BAD_VALUE;
+    }
+    return device->getFlushFromFrameSupport(config, support);
+}
+
 // ----------------------------------------------------------------------------
 
 status_t AudioFlinger::onTransactWrapper(TransactionCode code,
@@ -5051,6 +5212,7 @@ status_t AudioFlinger::onTransactWrapper(TransactionCode code,
         case TransactionCode::SET_TRACKS_INTERNAL_MUTE:
         case TransactionCode::RESET_REFERENCES_FOR_TEST:
         case TransactionCode::SET_PORTS_VOLUME:
+        case TransactionCode::GET_FLUSH_FROM_FRAME_SUPPORT:
             ALOGW("%s: transaction %d received from PID %d",
                   __func__, static_cast<int>(code), IPCThreadState::self()->getCallingPid());
             // return status only for non void methods

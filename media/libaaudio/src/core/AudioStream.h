@@ -17,25 +17,29 @@
 #ifndef AAUDIO_AUDIOSTREAM_H
 #define AAUDIO_AUDIOSTREAM_H
 
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
+#include <android-base/thread_annotations.h>
+#include <binder/IServiceManager.h>
+#include <binder/Status.h>
+#include <media/AudioContainers.h>
+#include <media/AudioResamplerPublic.h>
+#include <media/PlayerBase.h>
+#include <media/VolumeShaper.h>
+#include <mediautils/SingleThreadExecutor.h>
+#include <utility/AAudioUtilities.h>
+#include <utility/MonotonicCounter.h>
+#include <utils/StrongPointer.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
 #include <atomic>
 #include <mutex>
 #include <set>
 #include <stdint.h>
+// go/keep-sorted end
 
-#include <android-base/thread_annotations.h>
-#include <binder/IServiceManager.h>
-#include <binder/Status.h>
-#include <utils/StrongPointer.h>
-
-#include <aaudio/AAudio.h>
-#include <media/AudioContainers.h>
-#include <media/AudioResamplerPublic.h>
-#include <media/AudioSystem.h>
-#include <media/PlayerBase.h>
-#include <media/VolumeShaper.h>
-
-#include "utility/AAudioUtilities.h"
-#include "utility/MonotonicCounter.h"
+#include "AAudioStreamOpenRequest.h"
 
 // Cannot get android::media::VolumeShaper to compile!
 #define AAUDIO_USE_VOLUME_SHAPER  0
@@ -45,20 +49,20 @@ namespace aaudio {
 typedef void *(*aaudio_audio_thread_proc_t)(void *);
 typedef uint32_t aaudio_stream_id_t;
 
-class AudioStreamBuilder;
-
 constexpr pid_t        CALLBACK_THREAD_NONE = 0;
 
 /**
  * AAudio audio stream.
  */
-// By extending AudioDeviceCallback, we also inherit from RefBase.
-class AudioStream : public android::AudioSystem::AudioDeviceCallback {
+class AudioStream : public virtual android::RefBase {
 public:
 
     AudioStream();
 
     virtual ~AudioStream();
+
+    static AAudio_FlushFromFrameSupport getFlushFromFrameSupport(
+            const AAudioStreamOpenRequest& request);
 
 protected:
 
@@ -139,10 +143,10 @@ public:
                                                int64_t timeoutNanoseconds);
 
     /**
-     * Open the stream using the parameters in the builder.
+     * Open the stream using the parameters in the openRequest.
      * Allocate the necessary resources.
      */
-    virtual aaudio_result_t open(const AudioStreamBuilder& builder);
+    virtual aaudio_result_t open(const AAudioStreamOpenRequest& openRequest);
 
     // log to MediaMetrics
     virtual void logOpenActual();
@@ -414,7 +418,12 @@ public:
         mDeviceSamplesPerFrame = deviceSamplesPerFrame;
     }
 
-    virtual aaudio_result_t setOffloadDelayPadding(int32_t delayInFrames, int32_t paddingInFrames) {
+    audio_format_t getDeviceFormat() const {
+        return mDeviceFormat;
+    }
+
+    virtual aaudio_result_t setOffloadDelayPadding(int32_t delayInFrames [[maybe_unused]],
+                                                   int32_t paddingInFrames [[maybe_unused]]) {
         return AAUDIO_ERROR_UNIMPLEMENTED;
     }
 
@@ -430,8 +439,9 @@ public:
         return AAUDIO_ERROR_UNIMPLEMENTED;
     }
 
-    virtual void setPresentationEndCallbackProc(AAudioStream_presentationEndCallback proc) { }
-    virtual void setPresentationEndCallbackUserData(void* userData) { }
+    virtual void setPresentationEndCallbackProc(
+            AAudioStream_presentationEndCallback proc [[maybe_unused]]) { }
+    virtual void setPresentationEndCallbackUserData(void* userData [[maybe_unused]]) { }
 
     /**
      * @return true if data callback has been specified
@@ -452,9 +462,14 @@ public:
      */
     virtual bool collidesWithCallback() const;
 
-    // Implement AudioDeviceCallback
-    void onAudioDeviceUpdate(audio_io_handle_t audioIo,
-            const android::DeviceIdVector& deviceIds) override {};
+    AAudioStream_routingChangedCallback getRoutingChangedCallback() const {
+        return mRoutingChangedCallbackProc;
+    }
+    void* getRoutingChangedCallbackUserData() const {
+        return mRoutingChangedCallbackUserData;
+    }
+
+    void maybeSignalRoutingChangedCallback();
 
     // ============== I/O ===========================
     // A Stream will only implement read() or write() depending on its direction.
@@ -586,7 +601,7 @@ protected:
             return android::NO_ERROR;
         }
 
-        android::status_t playerSetVolume() override;
+        android::status_t playerSetVolume() EXCLUDES(mSettingsMutex) override;
 
 #if AAUDIO_USE_VOLUME_SHAPER
         ::android::binder::Status applyVolumeShaper();
@@ -670,10 +685,6 @@ protected:
     // This should not be called after the open() call.
     void setDeviceFormat(audio_format_t format) {
         mDeviceFormat = format;
-    }
-
-    audio_format_t getDeviceFormat() const {
-        return mDeviceFormat;
     }
 
     void setState(aaudio_stream_state_t state);
@@ -804,6 +815,8 @@ protected:
 
     const android::sp<MyPlayerBase>   mPlayerBase;
 
+    std::optional<android::mediautils::SingleThreadExecutor> mEventExecutor;
+
 private:
 
     /**
@@ -872,6 +885,9 @@ private:
     AAudioStream_errorCallback  mErrorCallbackProc = nullptr;
     void                       *mErrorCallbackUserData = nullptr;
     std::atomic<pid_t>          mErrorCallbackThread{CALLBACK_THREAD_NONE};
+
+    AAudioStream_routingChangedCallback mRoutingChangedCallbackProc = nullptr;
+    void                               *mRoutingChangedCallbackUserData = nullptr;
 
     // background thread ----------------------------------
     // Use mHasThread to prevent joining twice, which has undefined behavior.

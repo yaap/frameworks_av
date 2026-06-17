@@ -67,6 +67,11 @@ class Camera3OutputStreamInterface : public virtual Camera3StreamInterface {
     virtual ssize_t getSurfaceId(const sp<Surface> &surface) = 0;
 
     /**
+     * Query the current surface id.
+     */
+    virtual ssize_t getCurrentSurfaceId() const = 0;
+
+    /**
      * Query the unique surface IDs of current surfaceIds.
      * When passing unique surface IDs in returnBuffer(), if the
      * surfaceId has been removed from the stream, the output corresponding to
@@ -85,6 +90,11 @@ class Camera3OutputStreamInterface : public virtual Camera3StreamInterface {
             const std::vector<OutputStreamInfo> &outputInfo,
             const std::vector<size_t> &removedSurfaceIds,
             KeyedVector<sp<Surface>, size_t> *outputMap/*out*/) = 0;
+
+    /**
+     * Update the internal stream output surface ids.
+     */
+    virtual status_t updateInternalStream(KeyedVector<sp<Surface>, size_t> *outputMap/*out*/) = 0;
 
     /**
      * Query the surface mirror mode.
@@ -127,6 +137,12 @@ class Camera3OutputStreamInterface : public virtual Camera3StreamInterface {
      * Modify the stream use case for this output.
      */
     virtual void setStreamUseCase(int64_t streamUseCase) = 0;
+
+    /**
+     * Query the mirror mode of specific output surface id.
+     */
+    virtual int getSurfaceMirrorMode(size_t /*surfaceId*/) { return getMirrorMode(); }
+
 };
 
 // Helper class to organize a synchronized mapping of stream IDs to stream instances

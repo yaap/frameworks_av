@@ -87,6 +87,11 @@ class Camera3FakeStream :
      */
     virtual ssize_t getSurfaceId(const sp<Surface> &/*surface*/) { return 0; }
 
+    /**
+     * Query the current surface id.
+     */
+    virtual ssize_t getCurrentSurfaceId() const override { return 0; }
+
     virtual int getMirrorMode() const override { return  OutputConfiguration::MIRROR_MODE_AUTO; };
 
     virtual status_t getUniqueSurfaceIds(const std::vector<size_t>&,
@@ -99,6 +104,11 @@ class Camera3FakeStream :
             const std::vector<OutputStreamInfo> &outputInfo,
             const std::vector<size_t> &removedSurfaceIds,
             KeyedVector<sp<Surface>, size_t> *outputMap/*out*/);
+
+    virtual status_t updateInternalStream(
+            KeyedVector<sp<Surface>, size_t> * /*outputMap out*/) override {
+        return INVALID_OPERATION;
+    }
 
     virtual status_t setBatchSize(size_t batchSize) override;
 
@@ -115,12 +125,12 @@ class Camera3FakeStream :
             nsecs_t timestamp,
             nsecs_t readoutTimestamp,
             bool output,
-            int32_t transform,
+            const std::vector<int32_t>& transform,
             const std::vector<size_t>& surface_ids,
             /*out*/
             sp<Fence> *releaseFenceOut);
 
-    virtual status_t disconnectLocked();
+    virtual status_t disconnectLocked(bool force = false);
 
   private:
 
@@ -141,7 +151,8 @@ class Camera3FakeStream :
             const std::vector<size_t>& surface_ids = std::vector<size_t>());
     virtual status_t returnBufferLocked(
             const camera_stream_buffer &buffer,
-            nsecs_t timestamp, nsecs_t readoutTimestamp, int32_t transform,
+            nsecs_t timestamp, nsecs_t readoutTimestamp,
+            const std::vector<int32_t>& transforms,
             const std::vector<size_t>& surface_ids);
 
     virtual status_t configureQueueLocked();

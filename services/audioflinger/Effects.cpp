@@ -2247,7 +2247,7 @@ EffectChain::EffectChain(const sp<IAfThreadBase>& thread, audio_session_t sessio
       mEffectCallback(new EffectCallback(wp<EffectChain>(this), thread, afThreadCallback))
 {
     if (thread != nullptr) {
-        mStrategy = thread->getStrategyForStream(AUDIO_STREAM_MUSIC);
+        mStrategy = thread->getStrategyForStream(AUDIO_STREAM_MUSIC, /* uid= */ 0);
         mMaxTailBuffers =
             ((kProcessTailDurationMs * thread->sampleRate()) / 1000) /
                 thread->frameCount();
@@ -2338,10 +2338,10 @@ void EffectChain::clearInputBuffer_l()
     if (mInBuffer == NULL) {
         return;
     }
-    const size_t frameSize = audio_bytes_per_sample(AUDIO_FORMAT_PCM_FLOAT)
-            * mEffectCallback->inChannelCount(mEffects[0]->id());
 
-    memset(mInBuffer->audioBuffer()->raw, 0, mEffectCallback->frameCount() * frameSize);
+    // Clear the entire buffer as the logic to determine the
+    // input size (e.g. due to spatialization) may have changed.
+    memset(mInBuffer->audioBuffer()->raw, 0, mInBuffer->getSize());
     mInBuffer->commit();
 }
 
@@ -2989,12 +2989,14 @@ bool EffectChain::isEffectEligibleForBtNrecSuspend_l(const effect_uuid_t* type) 
 bool EffectChain::isEffectEligibleForSuspend(const effect_descriptor_t& desc)
 {
     // auxiliary effects and visualizer are never suspended on output mix
-    if ((mSessionId == AUDIO_SESSION_OUTPUT_MIX) &&
-        (((desc.flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_AUXILIARY) ||
-         (memcmp(&desc.type, SL_IID_VISUALIZATION, sizeof(effect_uuid_t)) == 0) ||
-         (memcmp(&desc.type, SL_IID_VOLUME, sizeof(effect_uuid_t)) == 0) ||
-         (memcmp(&desc.type, SL_IID_DYNAMICSPROCESSING, sizeof(effect_uuid_t)) == 0) ||
-         (memcmp(&desc.type, SL_IID_DAP, sizeof(effect_uuid_t)) == 0))) {
+    if ((desc.flags & EFFECT_FLAG_NOT_ELIGIBLE_SUSPEND) ||
+        ((mSessionId == AUDIO_SESSION_OUTPUT_MIX) &&
+         (((desc.flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_AUXILIARY) ||
+          (desc.flags & EFFECT_FLAG_NOT_ELIGIBLE_SUSPEND) ||
+          (memcmp(&desc.type, SL_IID_VISUALIZATION, sizeof(effect_uuid_t)) == 0) ||
+          (memcmp(&desc.type, SL_IID_VOLUME, sizeof(effect_uuid_t)) == 0) ||
+          (memcmp(&desc.type, SL_IID_DYNAMICSPROCESSING, sizeof(effect_uuid_t)) == 0) ||
+          (memcmp(&desc.type, SL_IID_DAP, sizeof(effect_uuid_t)) == 0)))) {
         return false;
     }
     return true;
@@ -3075,7 +3077,7 @@ bool EffectChain::isNonOffloadableEnabled_l() const
 void EffectChain::setThread(const sp<IAfThreadBase>& thread)
 {
     if (thread != nullptr) {
-        mStrategy = thread->getStrategyForStream(AUDIO_STREAM_MUSIC);
+        mStrategy = thread->getStrategyForStream(AUDIO_STREAM_MUSIC, /* uid= */ 0);
         mMaxTailBuffers =
             ((kProcessTailDurationMs * thread->sampleRate()) / 1000) /
                 thread->frameCount();

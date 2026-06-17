@@ -43,6 +43,11 @@ public:
         virtual void onDecryptError(const std::list<sp<AMessage>>& errorMsg) = 0;
     };
 
+    // For HDCP error retry, the below configuration specifies the retry
+    // interval (currently 1s), max time for retry(in secs) is specified
+    // using sys.prop 'ro.media.codec.retry_decrypt_for_hdcp_failure_secs'.
+    static constexpr uint32_t kRetryHdcpDecryptDelayUs = 1000000u;
+
     // Ideally we should be returning the output of the decryption in
     // onDecryptComple() calback and let the next module take over the
     // rest of the processing. In the current state, the next step will
@@ -51,9 +56,14 @@ public:
     // In order to prevent thread hop to just do that, we have created
     // a dependency on BufferChannel here to queue the buffer to the codec
     // immediately after decryption.
-    CryptoAsync(std::weak_ptr<BufferChannelBase> bufferChannel)
-        :mState(kCryptoAsyncActive) {
+    CryptoAsync(std::weak_ptr<BufferChannelBase> bufferChannel,
+            uint32_t maxHdcpDecryptRetryInSecs = 0)
+        :mState(kCryptoAsyncActive),
+        mMaxHdcpDecryptRetryInSecs(maxHdcpDecryptRetryInSecs) {
         mBufferChannel = std::move(bufferChannel);
+        if (mMaxHdcpDecryptRetryInSecs > 0) {
+            mRetryHdcpFailure.emplace(0, 0, 0);
+        }
     }
 
     // Destructor
@@ -73,6 +83,8 @@ public:
     // in this looper stops and in-fact., there is a need to clear (call stop())
     // for the queue to become operational again. Also acts like a rest.
     void stop(std::list<sp<AMessage>> * const buffers = nullptr);
+
+    const sp<AMessage> getMetrics() const;
 
     // Describes two actions for decrypt();
     // kActionDecrypt - decrypts the buffer and queues to codec
@@ -108,6 +120,8 @@ protected:
         kWhatDecrypt         = 1,
         // used with stop()
         kWhatStop            = 2,
+        // get metrics
+        kWhatGetMetrics      = 3,
         // place holder
         kWhatDoNothing       = 10
     };
@@ -144,6 +158,13 @@ private:
     Mutexed<std::list<sp<AMessage>>> mPendingBuffers;
 
     std::weak_ptr<BufferChannelBase> mBufferChannel;
+
+    // max time in sec for retry during hdcp failure
+    // specified by sys.prop 'ro.media.codec.retry_decrypt_for_hdcp_failure_secs'
+    uint32_t mMaxHdcpDecryptRetryInSecs;
+    // HDCP tuple<currentRetryCounter, retrySuccessCounter, retryFailureCounter>
+    std::optional<std::tuple<uint32_t, uint32_t, uint32_t>> mRetryHdcpFailure;
+
 };
 
 }  // namespace android

@@ -22,13 +22,16 @@
 #include <camera/camera2/OutputConfiguration.h>
 #include <camera/camera2/SessionConfiguration.h>
 #include <camera/camera2/SubmitInfo.h>
-#include <unordered_map>
 #include <gui/Flags.h>  // remove with WB_LIBCAMERASERVICE_WITH_DEPENDENCIES
+#include <stop_token>
+#include <string>
+#include <unordered_map>
 
 #include <fmq/AidlMessageQueueCpp.h>
 
 #include "CameraOfflineSessionClient.h"
 #include "CameraService.h"
+#include "binder/Status.h"
 #include "common/FrameProcessorBase.h"
 #include "common/Camera2ClientBase.h"
 #include "CompositeStream.h"
@@ -121,6 +124,13 @@ public:
     // Returns -EBUSY if device is not idle or in error state
     virtual binder::Status deleteStream(int streamId) override;
 
+    virtual binder::Status configureStreams(
+            const hardware::camera2::utils::SessionConfigurationAndStreamIds&
+                    sessionConfigurationAndStreamIds,
+            /*out*/
+            hardware::camera2::utils::OutputAndInputStreamIds*
+                    outputAndInputStreamIds) override;
+
     virtual binder::Status createStream(
             const hardware::camera2::params::OutputConfiguration &outputConfiguration,
             /*out*/
@@ -173,14 +183,14 @@ public:
     virtual binder::Status finalizeOutputConfigurations(int32_t streamId,
             const hardware::camera2::params::OutputConfiguration &outputConfiguration) override;
 
-    virtual binder::Status setCameraAudioRestriction(int32_t mode) override;
+    virtual binder::Status setCameraAudioRestriction(AudioRestriction mode) override;
 
     virtual binder::Status getCaptureResultMetadataQueue(
           android::hardware::common::fmq::MQDescriptor<
           int8_t, android::hardware::common::fmq::SynchronizedReadWrite>*
           aidl_return) override;
 
-    virtual binder::Status getGlobalAudioRestriction(/*out*/int32_t* outMode) override;
+    virtual binder::Status getGlobalAudioRestriction(/*out*/AudioRestriction* outMode) override;
 
     virtual binder::Status switchToOffline(
             const sp<hardware::camera2::ICameraDeviceCallbacks>& cameraCb,
@@ -189,6 +199,35 @@ public:
             sp<hardware::camera2::ICameraOfflineSession>* session) override;
 
     virtual binder::Status isPrimaryClient(/*out*/bool* isPrimary) override;
+
+    virtual binder::Status updateOutputConfigurations(
+            const std::vector<int32_t>& streamIds,
+            const std::vector<OutputConfiguration>& configurations) override;
+
+    // Locked versions of beginConfigure(), createStreams(), deleteStreams() and endConfigure().
+    // These methods expect mBinderSerializationLock lock to be held by the caller.
+    binder::Status beginConfigureLocked() ;
+
+    binder::Status createStreamLocked(
+            const hardware::camera2::params::OutputConfiguration &outputConfiguration,
+            /*out*/
+            int32_t* newStreamId);
+
+    binder::Status createInputStreamLocked(int width, int height, int format,
+            bool isMultiResolution,
+            /*out*/
+            int32_t* newStreamId);
+
+    binder::Status deleteStreamLocked(int streamId);
+
+    binder::Status endConfigureLocked(int operatingMode,
+            const hardware::camera2::impl::CameraMetadataNative& sessionParams,
+            int64_t startTimeMs,
+            /*out*/
+            std::vector<int>* offlineStreamIds);
+
+    void cleanUpStreamsLocked(const std::vector<int32_t>& newOutputStreamIds,
+                              int32_t newInputStreamId);
 
     /**
      * Interface used by CameraService
@@ -238,7 +277,8 @@ public:
 
     virtual void notifyIdle(int64_t requestCount, int64_t resultErrorCount, bool deviceError,
                             std::pair<int32_t, int32_t> mostRequestedFpsRange,
-                            const std::vector<hardware::CameraStreamStats>& streamStats);
+                            const std::vector<hardware::CameraStreamStats>& streamStats,
+                            int32_t errorState);
     virtual void notifyError(int32_t errorCode,
                              const CaptureResultExtras& resultExtras);
     virtual void notifyShutter(const CaptureResultExtras& resultExtras, nsecs_t timestamp);
@@ -315,6 +355,11 @@ private:
     binder::Status checkPidStatus(const char* checkLocation);
     bool enforceRequestPermissions(CameraMetadata& metadata);
 
+    // Update an output configuration
+    binder::Status updateOutputConfigurationLocked(int streamId,
+            const hardware::camera2::params::OutputConfiguration &outputConfiguration,
+            bool replaceSurface = false, int64_t* lastFrameNumber = nullptr);
+
     // Create an output stream with surface deferred for future.
     binder::Status createDeferredSurfaceStreamLocked(
             const hardware::camera2::params::OutputConfiguration &outputConfiguration,
@@ -333,6 +378,12 @@ private:
     status_t getSurfaceKey(ParcelableSurfaceType surface, SurfaceKey* out) const;
     // Surface only
     status_t getSurfaceKey(sp<Surface> surface, SurfaceKey* out) const;
+
+    void updateCompositeOutputsLocked(int streamId, SurfaceKey surfaceKey,
+            const sp<CompositeStream>& compositeStream, bool deferredCompositeStream,
+            bool noNewOutputs);
+    void findCompositeStream(int streamId, sp<CompositeStream> *compositeStream /*out*/,
+            bool *deferredStream /*out*/);
 
     bool matchSharedStreamingRequest(int reqId);
     bool matchSharedCaptureRequest(int reqId);
@@ -387,9 +438,12 @@ private:
     // set of high resolution camera id (logical / physical)
     std::unordered_set<std::string> mHighResolutionSensors;
 
-    // Synchronize access to 'mCompositeStreamMap'
+    // Synchronize access to 'mCompositeStreamMap' and 'mDeferredCompositeMap'
     Mutex mCompositeLock;
     KeyedVector<SurfaceKey, sp<CompositeStream>> mCompositeStreamMap;
+
+    // Map stream ids to deferred composite streams
+    std::unordered_map<int, sp<CompositeStream>> mDeferredCompositeMap;
 
     sp<CameraProviderManager> mProviderManager;
 

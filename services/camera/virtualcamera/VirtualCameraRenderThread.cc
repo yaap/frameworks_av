@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 // #define LOG_NDEBUG 0
 #define LOG_TAG "VirtualCameraRenderThread"
 
@@ -21,6 +20,7 @@
 
 #include <android_companion_virtualdevice_flags.h>
 
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -31,15 +31,12 @@
 #include <utility>
 #include <vector>
 
-#include "Exif.h"
-#include "GLES/gl.h"
 #include "VirtualCameraCaptureResult.h"
-#include "VirtualCameraDevice.h"
+#include "VirtualCameraImageHandler.h"
+#include "VirtualCameraImagePassthroughHandler.h"
+#include "VirtualCameraImageTransformingHandler.h"
 #include "VirtualCameraSessionContext.h"
-#include "aidl/android/hardware/camera/common/Status.h"
 #include "aidl/android/hardware/camera/device/BufferStatus.h"
-#include "aidl/android/hardware/camera/device/CameraBlob.h"
-#include "aidl/android/hardware/camera/device/CameraBlobId.h"
 #include "aidl/android/hardware/camera/device/CameraMetadata.h"
 #include "aidl/android/hardware/camera/device/CaptureResult.h"
 #include "aidl/android/hardware/camera/device/ErrorCode.h"
@@ -49,23 +46,16 @@
 #include "aidl/android/hardware/camera/device/StreamBuffer.h"
 #include "android-base/thread_annotations.h"
 #include "android/binder_auto_utils.h"
-#include "android/hardware_buffer.h"
 #include "system/camera_metadata.h"
 #include "ui/GraphicBuffer.h"
-#include "ui/Rect.h"
-#include "util/EglFramebuffer.h"
-#include "util/JpegUtil.h"
 #include "util/Util.h"
-#include "utils/Errors.h"
 
 namespace android {
 namespace companion {
 namespace virtualcamera {
 
-using ::aidl::android::hardware::camera::common::Status;
+using ::aidl::android::companion::virtualcamera::Format;
 using ::aidl::android::hardware::camera::device::BufferStatus;
-using ::aidl::android::hardware::camera::device::CameraBlob;
-using ::aidl::android::hardware::camera::device::CameraBlobId;
 using ::aidl::android::hardware::camera::device::CameraMetadata;
 using ::aidl::android::hardware::camera::device::CaptureResult;
 using ::aidl::android::hardware::camera::device::ErrorCode;
@@ -75,10 +65,7 @@ using ::aidl::android::hardware::camera::device::NotifyMsg;
 using ::aidl::android::hardware::camera::device::ShutterMsg;
 using ::aidl::android::hardware::camera::device::Stream;
 using ::aidl::android::hardware::camera::device::StreamBuffer;
-using ::aidl::android::hardware::graphics::common::PixelFormat;
 using ::android::base::ScopedLockAssertion;
-
-using ::android::hardware::camera::common::helper::ExifUtils;
 
 namespace {
 
@@ -95,19 +82,15 @@ using namespace std::chrono_literals;
 
 namespace flags = ::android::companion::virtualdevice::flags;
 
-static constexpr std::chrono::milliseconds kAcquireFenceTimeout = 500ms;
-
-static constexpr size_t kJpegThumbnailBufferSize = 32 * 1024;  // 32 KiB
-
 static constexpr UpdateTextureTask kUpdateTextureTask;
 
-// The number of nanosecond to wait for the first frame to be drawn on the input surface
-static constexpr std::chrono::nanoseconds kMaxWaitFirstFrame = 3s;
-// The number of nanosecond to wait for a frame for use cases where frame
-// duplication is not an option.
-static constexpr std::chrono::nanoseconds kMaxWaitNoDuplication = 60s;
+// The number of nanoseconds to wait for each individual capture request.
+static constexpr std::chrono::nanoseconds kWaitInputFrameTimeout = 4s;
 
-static constexpr double kOneSecondInNanos = 1e9;
+// Max number of consecutive timeouts before reporting a device error.
+// TODO(b/450609791): Simplify the timeout logic when we support owner error reports.
+static constexpr int kMaxTimeoutCountFirstFrame = 3;
+static constexpr int kMaxTimeoutCount = 2;
 
 NotifyMsg createShutterNotifyMsg(int frameNumber,
                                  std::chrono::nanoseconds timestamp) {
@@ -140,124 +123,6 @@ NotifyMsg createRequestErrorNotifyMsg(int frameNumber) {
   return msg;
 }
 
-std::shared_ptr<EglFrameBuffer> allocateTemporaryFramebuffer(
-    EGLDisplay eglDisplay, const uint width, const int height) {
-  const AHardwareBuffer_Desc desc{.width = static_cast<uint32_t>(width),
-                                  .height = static_cast<uint32_t>(height),
-                                  .layers = 1,
-                                  .format = kHardwareBufferFormat,
-                                  .usage = kHardwareBufferUsage,
-                                  .rfu0 = 0,
-                                  .rfu1 = 0};
-
-  AHardwareBuffer* hwBufferPtr;
-  int status = AHardwareBuffer_allocate(&desc, &hwBufferPtr);
-  if (status != NO_ERROR) {
-    ALOGE(
-        "%s: Failed to allocate hardware buffer for temporary framebuffer: %d",
-        __func__, status);
-    return nullptr;
-  }
-
-  return std::make_shared<EglFrameBuffer>(
-      eglDisplay,
-      std::shared_ptr<AHardwareBuffer>(hwBufferPtr, AHardwareBuffer_release));
-}
-
-bool isYuvFormat(const PixelFormat pixelFormat) {
-  switch (static_cast<android_pixel_format_t>(pixelFormat)) {
-    case HAL_PIXEL_FORMAT_YCBCR_422_I:
-    case HAL_PIXEL_FORMAT_YCBCR_422_SP:
-    case HAL_PIXEL_FORMAT_Y16:
-    case HAL_PIXEL_FORMAT_YV12:
-    case HAL_PIXEL_FORMAT_YCBCR_420_888:
-      return true;
-    default:
-      return false;
-  }
-}
-
-// By default, virtual camera will duplicate the last frame if the producer does
-// not post a new frame. When a frame is duplicated, the timestamp must still
-// increase to please the camera framework expectations. In some usecases, this
-// frame duplication is not wanted, like for motion tracking, where the
-// timestamp must match the graphic data.
-bool allowFrameDuplication(const RequestSettings& requestSettings) {
-  if (!flags::virtual_camera_no_frame_duplication()) {
-    return true;
-  }
-  if (requestSettings.captureIntent == ANDROID_CONTROL_CAPTURE_INTENT_PREVIEW) {
-    return true;
-  }
-
-  return false;
-}
-
-std::vector<uint8_t> createExif(
-    Resolution imageSize, const CameraMetadata resultMetadata,
-    const std::vector<uint8_t>& compressedThumbnail = {}) {
-  std::unique_ptr<ExifUtils> exifUtils(ExifUtils::create());
-  exifUtils->initialize();
-
-  // Make a copy of the metadata in order to converting it the HAL metadata
-  // format (as opposed to the AIDL class) and use the setFromMetadata method
-  // from ExifUtil
-  camera_metadata_t* rawSettings =
-      clone_camera_metadata((camera_metadata_t*)resultMetadata.metadata.data());
-  if (rawSettings != nullptr) {
-    android::hardware::camera::common::helper::CameraMetadata halMetadata(
-        rawSettings);
-    exifUtils->setFromMetadata(halMetadata, imageSize.width, imageSize.height);
-  }
-  exifUtils->setMake(VirtualCameraDevice::kDefaultMakeAndModel);
-  exifUtils->setModel(VirtualCameraDevice::kDefaultMakeAndModel);
-  exifUtils->setFlash(0);
-
-  std::vector<uint8_t> app1Data;
-
-  size_t thumbnailDataSize = compressedThumbnail.size();
-  const void* thumbnailData =
-      thumbnailDataSize > 0
-          ? reinterpret_cast<const void*>(compressedThumbnail.data())
-          : nullptr;
-
-  if (!exifUtils->generateApp1(thumbnailData, thumbnailDataSize)) {
-    ALOGE("%s: Failed to generate APP1 segment for EXIF metadata", __func__);
-    return app1Data;
-  }
-
-  const uint8_t* data = exifUtils->getApp1Buffer();
-  const size_t size = exifUtils->getApp1Length();
-
-  app1Data.insert(app1Data.end(), data, data + size);
-  return app1Data;
-}
-
-std::chrono::nanoseconds getMaxFrameDuration(
-    const RequestSettings& requestSettings, bool isFirstFrameDrawn) {
-  // If it's not the first frame and the request specify a FPS, return the minFps
-  if (isFirstFrameDrawn && requestSettings.fpsRange.has_value()) {
-    return std::chrono::nanoseconds(static_cast<uint64_t>(
-        kOneSecondInNanos / std::max(1, requestSettings.fpsRange->minFps)));
-  }
-
-  // If the request does not specify a FPS and we should not duplicate frames,
-  // wait as much as we can
-  if (!allowFrameDuplication(requestSettings)) {
-    return kMaxWaitNoDuplication;
-  }
-
-  // If we can duplicate frame but nothing has been drawn on the suface yet, we
-  // allow ourselves to wait a bit longer
-  if (!isFirstFrameDrawn) {
-    return kMaxWaitFirstFrame;
-  }
-
-  // In all other cases we wait for the duration of kMinFps
-  return std::chrono::nanoseconds(
-      static_cast<uint64_t>(kOneSecondInNanos / VirtualCameraDevice::kMinFps));
-}
-
 // Translate a frame duration into a fps value with triple decimal precision
 double nanosToFps(std::chrono::nanoseconds frameDuration) {
   const double oneSecondInNanos = 1e9;
@@ -267,35 +132,25 @@ double nanosToFps(std::chrono::nanoseconds frameDuration) {
 
 }  // namespace
 
-CaptureRequestBuffer::CaptureRequestBuffer(int streamId, int bufferId,
-                                           sp<Fence> fence)
-    : mStreamId(streamId), mBufferId(bufferId), mFence(fence) {
-}
-
-int CaptureRequestBuffer::getStreamId() const {
-  return mStreamId;
-}
-
-int CaptureRequestBuffer::getBufferId() const {
-  return mBufferId;
-}
-
-sp<Fence> CaptureRequestBuffer::getFence() const {
-  return mFence;
-}
-
 VirtualCameraRenderThread::VirtualCameraRenderThread(
-    VirtualCameraSessionContext& sessionContext,
-    const Resolution inputSurfaceSize, const Resolution reportedSensorSize,
+    VirtualCameraSessionContext& sessionContext, int inputSurfaceIndex,
+    Format imageFormat, const Resolution inputSurfaceSize,
+    const Resolution reportedSensorSize,
     std::shared_ptr<ICameraDeviceCallback> cameraDeviceCallback)
     : mCameraDeviceCallback(cameraDeviceCallback),
+      mImageFormat{imageFormat},
       mInputSurfaceSize(inputSurfaceSize),
       mReportedSensorSize(reportedSensorSize),
+      mInputSurfaceIndex(inputSurfaceIndex),
       mSessionContext(sessionContext),
       mInputSurfaceFuture(mInputSurfacePromise.get_future()) {
+  ALOGV("Creation of VirtualCameraRenderThread with inputSurfaceSize: %dx%d",
+        inputSurfaceSize.width, inputSurfaceSize.height);
 }
 
 VirtualCameraRenderThread::~VirtualCameraRenderThread() {
+  ALOGV("Destruction of VirtualCameraRenderThread %dx%d",
+        mInputSurfaceSize.width, mInputSurfaceSize.height);
   stop();
   if (mThread.joinable()) {
     mThread.join();
@@ -329,47 +184,86 @@ void VirtualCameraRenderThread::requestTextureUpdate() {
   // If queue is not empty, we don't need to set the mTextureUpdateRequested
   // flag, since the texture will be updated during ProcessCaptureRequestTask
   // processing anyway.
-  if (mQueue.empty()) {
+  if (mCaptureRequestQueue.empty()) {
     mTextureUpdateRequested = true;
-    mCondVar.notify_one();
+    mTaskReadyCondVar.notify_one();
   }
 }
 
 void VirtualCameraRenderThread::enqueueTask(
     std::unique_ptr<ProcessCaptureRequestTask> task) {
   std::lock_guard<std::mutex> lock(mLock);
-  // When enqueving process capture request task, clear the
-  // mTextureUpdateRequested flag. If this flag is set, the texture was not yet
-  // updated and it will be updated when processing ProcessCaptureRequestTask
-  // anyway.
-  mTextureUpdateRequested = false;
-  mQueue.emplace_back(std::move(task));
-  mCondVar.notify_one();
-}
 
-void VirtualCameraRenderThread::flush() {
-  std::lock_guard<std::mutex> lock(mLock);
-  while (!mQueue.empty()) {
-    std::unique_ptr<ProcessCaptureRequestTask> task = std::move(mQueue.front());
-    mQueue.pop_front();
-    flushCaptureRequest(*task);
+  int lastFlushedFrame = mMaxFrameToFlush.load(std::memory_order_relaxed);
+  if (task->getFrameNumber() <= lastFlushedFrame) {
+    ALOGV("%s: Flushing up to frame:%d, dropping task for frame:%d", __func__,
+          lastFlushedFrame, task->getFrameNumber());
+    completeCaptureRequestWithError(*task);
+    return;
   }
+
+  // When enqueuing process capture request task, clear the
+  // mTextureUpdateRequested flag. If this flag is set, the texture was not
+  // yet updated and it will be updated when processing
+  // ProcessCaptureRequestTask anyway.
+  mTextureUpdateRequested = false;
+  mCaptureRequestQueue.emplace_back(std::move(task));
+  mTaskReadyCondVar.notify_one();
 }
 
-void VirtualCameraRenderThread::start() {
+void VirtualCameraRenderThread::flush(int frameNumber) {
+  ALOGV("[%s] Flushing up to frame:%d", __func__, frameNumber);
+  std::unique_lock<std::mutex> lock(mLock);
+  ScopedLockAssertion lockAssertion(mLock);
+
+  int flushFrame = std::max(
+      frameNumber, mProcessingFrameNumber.load(std::memory_order_relaxed));
+  mMaxFrameToFlush.store(flushFrame, std::memory_order_relaxed);
+
+  // First empty the queue to be sure that none of the queued
+  // request will be processed after the flush.
+  while (!mCaptureRequestQueue.empty()) {
+    std::unique_ptr<ProcessCaptureRequestTask> task =
+        std::move(mCaptureRequestQueue.front());
+    mCaptureRequestQueue.pop_front();
+    completeCaptureRequestWithError(*task);
+  }
+  if (mImageHandler != nullptr) {
+    mImageHandler->interruptWait();
+  }
+  mThrottlingCondVar.notify_all();
+  mTaskReadyCondVar.notify_all();
+}
+
+bool VirtualCameraRenderThread::start() {
+  mImageHandlerInitialized = std::promise<bool>{};
   mThread = std::thread(&VirtualCameraRenderThread::threadLoop, this);
+  return mImageHandlerInitialized.get_future().get();
 }
 
 void VirtualCameraRenderThread::stop() {
+  ALOGV("Stopping render thread with inputSurfaceIndex:%d", mInputSurfaceIndex);
   {
     std::lock_guard<std::mutex> lock(mLock);
     mPendingExit = true;
-    mCondVar.notify_one();
+    if (mImageHandler != nullptr) {
+      mImageHandler->interruptWait();
+    }
+    mThrottlingCondVar.notify_all();
+    mTaskReadyCondVar.notify_one();
   }
 }
 
 sp<Surface> VirtualCameraRenderThread::getInputSurface() {
   return mInputSurfaceFuture.get();
+}
+
+Format VirtualCameraRenderThread::getImageFormat() const {
+  return mImageFormat;
+}
+
+const Resolution& VirtualCameraRenderThread::getInputResolution() const {
+  return mInputSurfaceSize;
 }
 
 RenderThreadTask VirtualCameraRenderThread::dequeueTask() {
@@ -381,66 +275,64 @@ RenderThreadTask VirtualCameraRenderThread::dequeueTask() {
   // the lock is held in this scope, which is true, since it's only
   // released during waiting inside mCondVar.wait calls.
   ScopedLockAssertion lockAssertion(mLock);
-
-  mCondVar.wait(lock, [this]() REQUIRES(mLock) {
-    return mPendingExit || mTextureUpdateRequested || !mQueue.empty();
+  ALOGV("%s inputSurfaceIndex:%d, waiting on mTaskReadyCondVar", __func__,
+        mInputSurfaceIndex);
+  mTaskReadyCondVar.wait(lock, [this]() REQUIRES(mLock) {
+    ALOGV("dequeueTask inputSurfaceIndex:%d, notified mTaskReadyCondVar",
+          mInputSurfaceIndex);
+    return mPendingExit || mTextureUpdateRequested ||
+           !mCaptureRequestQueue.empty();
   });
   if (mPendingExit) {
+    ALOGV("Exiting due to pending exit. Return null RenderThreadTask");
     // Render thread task with null task signals render thread to terminate.
     return RenderThreadTask(nullptr);
   }
   if (mTextureUpdateRequested) {
     // If mTextureUpdateRequested, it's guaranteed the queue is empty, return
-    // kUpdateTextureTask to signal we want render thread to update the texture
-    // (consume buffer from the queue).
+    // kUpdateTextureTask to signal we want render thread to update the
+    // texture (consume buffer from the queue).
     mTextureUpdateRequested = false;
     return RenderThreadTask(kUpdateTextureTask);
   }
-  RenderThreadTask task(std::move(mQueue.front()));
-  mQueue.pop_front();
+  RenderThreadTask task(std::move(mCaptureRequestQueue.front()));
+  mCaptureRequestQueue.pop_front();
   return task;
 }
 
 void VirtualCameraRenderThread::threadLoop() {
-  ALOGV("Render thread starting");
+  ALOGV("Render thread starting with inputSurfaceIndex:%d", mInputSurfaceIndex);
 
-  mEglDisplayContext = std::make_unique<EglDisplayContext>();
-  mEglTextureYuvProgram =
-      std::make_unique<EglTextureProgram>(EglTextureProgram::TextureFormat::YUV);
-  mEglTextureRgbProgram = std::make_unique<EglTextureProgram>(
-      EglTextureProgram::TextureFormat::RGBA);
-  mEglSurfaceTexture = std::make_unique<EglSurfaceTexture>(
-      mInputSurfaceSize.width, mInputSurfaceSize.height);
-  mEglSurfaceTexture->setFrameAvailableListener(
-      [this]() { requestTextureUpdate(); });
+  if (!initializeImageHandler()) {
+    ALOGE("%s: Failed to initialize frame consumer", __func__);
+    mImageHandlerInitialized.set_value(false);
+    return;
+  }
 
-  mInputSurfacePromise.set_value(mEglSurfaceTexture->getSurface());
+  mImageHandlerInitialized.set_value(true);
 
   while (RenderThreadTask task = dequeueTask()) {
     std::visit(
         overloaded{[this](const std::unique_ptr<ProcessCaptureRequestTask>& t) {
-                     processTask(*t);
+                     processCaptureRequest(*t);
                    },
                    [this](const UpdateTextureTask&) {
                      ALOGV("Idle update of the texture");
-                     mEglSurfaceTexture->updateTexture();
+                     mImageHandler->updateTexture();
                    }},
         task);
   }
 
-  // Destroy EGL utilities still on the render thread.
-  mEglSurfaceTexture.reset();
-  mEglTextureRgbProgram.reset();
-  mEglTextureYuvProgram.reset();
-  mEglDisplayContext.reset();
-
-  ALOGV("Render thread exiting");
+  mImageHandler.reset();
+  mInputSurfaceFuture.get()->destroy();
+  ALOGV("Render thread exiting. inputSurfaceIndex:%d", mInputSurfaceIndex);
 }
 
-void VirtualCameraRenderThread::processTask(
+void VirtualCameraRenderThread::processCaptureRequest(
     const ProcessCaptureRequestTask& request) {
-  ALOGV("%s Request frame number: %d, capture intent %d", __func__,
-        request.getFrameNumber(), request.getRequestSettings().captureIntent);
+  ALOGV("%s inputSurfaceIndex:%d, Request frame number: %d, capture intent %d",
+        __func__, mInputSurfaceIndex, request.getFrameNumber(),
+        request.getRequestSettings().captureIntent);
   std::chrono::nanoseconds deviceTime =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch());
@@ -450,46 +342,43 @@ void VirtualCameraRenderThread::processTask(
   ALOGV("lastAcquisitionTimestamp %lld", lastAcquisitionTimestamp.count());
 
   // Calculate the maximal amount of time we can afford to wait for next frame.
-  const bool isFirstFrameDrawn = mEglSurfaceTexture->isFirstFrameDrawn();
+  const bool isFirstFrameDrawn = mImageHandler->isFirstFrameDrawn();
   ALOGV("First Frame Drawn: %s", isFirstFrameDrawn ? "Yes" : "No");
 
-  std::chrono::nanoseconds maxFrameDuration =
-      getMaxFrameDuration(request.getRequestSettings(), isFirstFrameDrawn);
-  std::chrono::nanoseconds elapsedDuration =
-      isFirstFrameDrawn && lastAcquisitionTimestamp > 0ns
-          ? deviceTime - lastAcquisitionTimestamp
-          : 0ns;
-
-  bool gotNewFrame = false;
-  const std::chrono::nanoseconds waitTime =
-      std::max(0ns, maxFrameDuration - elapsedDuration);
-  ALOGV("maxFrameDuration %lld, elapsedDuration %lld, waitTime %lld",
-        maxFrameDuration.count(), elapsedDuration.count(), waitTime.count());
-  if (waitTime > 0ns) {
-    // We can afford to wait for next frame.
-    // Note that if there's already new frame in the input Surface, the call
-    // below returns immediately.
-    gotNewFrame = mEglSurfaceTexture->waitForNextFrame(waitTime);
+  bool pendingExit = false;
+  {
+    std::lock_guard<std::mutex> lock(mLock);
+    pendingExit = mPendingExit;
+  }
+  if (pendingExit) {
+    ALOGW("Render thread pending exit.");
+    completeCaptureRequestWithError(request);
+    return;
   }
 
-  if (!gotNewFrame) {
-    ALOGV(
-        "%s: No new frame received on input surface after waiting for "
-        "%.3f s",
-        __func__, static_cast<uint64_t>(waitTime.count()) / kOneSecondInNanos);
+  if (!mImageHandler->waitForInputFrame(kWaitInputFrameTimeout)) {
+    mWaitInputFrameTimeoutsCount++;
+    const int maxTimeoutCount =
+        isFirstFrameDrawn ? kMaxTimeoutCount : kMaxTimeoutCountFirstFrame;
+    ALOGW(
+        "Timed out waiting for frame to be posted, timeout counter %d out of "
+        "%d.",
+        mWaitInputFrameTimeoutsCount.load(), maxTimeoutCount);
 
-    if (!allowFrameDuplication(request.getRequestSettings()) ||
-        !mEglSurfaceTexture->isFirstFrameDrawn()) {
-      // We don't have any input ever drawn. This is considered as an error
-      // case. Notify the framework of the failure and return early.
-      ALOGW("Timed out waiting for frame to be posted.");
-      std::unique_ptr<CaptureResult> captureResult = createCaptureResult(
-          request.getFrameNumber(), /* metadata = */ nullptr);
-      notifyTimeout(request, *captureResult);
-      submitCaptureResult(std::move(captureResult));
-      return;
+    completeCaptureRequestWithError(request);
+
+    if (mWaitInputFrameTimeoutsCount >= maxTimeoutCount) {
+      ALOGE("Fatal timeout reached (%d consecutive timeouts). Flushing.",
+            mWaitInputFrameTimeoutsCount.load());
+      // Signal fatal error to the session (triggers global flush and
+      // notification). We must not hold mLock here to avoid deadlocks.
+      mSessionContext.setFatalError();
     }
+    return;
   }
+
+  // A frame was successfully received, reset the timeout counter.
+  mWaitInputFrameTimeoutsCount = 0;
 
   // If the request has a maxFps, we throttle the rendering to make sure that
   // the requester receives the latest frame that was posted by the virtual
@@ -507,23 +396,18 @@ void VirtualCameraRenderThread::processTask(
   }
 
   // Acquire new (most recent) image from the Surface.
-  mEglSurfaceTexture->updateTexture();
+  mImageHandler->updateTexture();
 
   // Now that throttling and waiting have been done, update the acquisition timestamp.
   deviceTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now().time_since_epoch());
-
-  elapsedDuration = isFirstFrameDrawn && lastAcquisitionTimestamp > 0ns
-                        ? deviceTime - lastAcquisitionTimestamp
-                        : 0ns;
 
   mLastAcquisitionTimestampNanoseconds.store(deviceTime.count(),
                                              std::memory_order_relaxed);
 
   std::chrono::nanoseconds captureTimestamp = deviceTime;
   if (flags::camera_timestamp_from_surface()) {
-    std::chrono::nanoseconds surfaceTimestamp =
-        getSurfaceTimestamp(elapsedDuration);
+    std::chrono::nanoseconds surfaceTimestamp = mImageHandler->getTimestamp();
     if (surfaceTimestamp.count() > 0) {
       captureTimestamp = surfaceTimestamp;
     }
@@ -534,23 +418,48 @@ void VirtualCameraRenderThread::processTask(
         captureTimestamp.count());
   }
 
+  std::unique_ptr<::aidl::android::hardware::camera::device::CameraMetadata>
+      cameraMetadata;
+
   const camera_metadata_t* customMetadata =
       mSessionContext.getCaptureResultMetadataForTimestamp(
           captureTimestamp.count());
+  // Partial metadata submitted must not include any metadata key returned
+  // in a previous partial result for a given frame. Each new partial result
+  // for that frame must also set a distinct partialResult value.
+  bool isFirstTimeFrameProcessed = true;
+  if (mSessionContext.isMultiInputStreamEnabled()) {
+    // We only send the metadata if it is the first result we send for that
+    // request
+    isFirstTimeFrameProcessed =
+        mSessionContext.dequeueFrame(request.getFrameNumber());
+  }
 
-  std::unique_ptr<CaptureResult> captureResult = createCaptureResult(
-      request.getFrameNumber(),
-      createCaptureResultMetadata(
-          captureTimestamp, request.getRequestSettings(), mReportedSensorSize,
-          customMetadata));
+  if (isFirstTimeFrameProcessed) {
+    cameraMetadata = createCaptureResultMetadata(
+        captureTimestamp, request.getRequestSettings(), mReportedSensorSize,
+        customMetadata);
+  } else {
+    cameraMetadata = std::make_unique<CameraMetadata>();
+  }
 
+  ALOGV(
+      "%s: (inputSurfaceIndex:%d) About to send capture result with metadata, "
+      "frameId:%d "
+      "metadataSize:%zu, isFirstTimeFrameProcessed:%s",
+      __func__, mInputSurfaceIndex, request.getFrameNumber(),
+      cameraMetadata->metadata.size(),
+      isFirstTimeFrameProcessed ? "true" : "false");
+
+  std::unique_ptr<CaptureResult> captureResult =
+      createCaptureResult(request.getFrameNumber(), std::move(cameraMetadata));
   if (customMetadata != nullptr) {
     free_camera_metadata(const_cast<camera_metadata_t*>(customMetadata));
   }
-
   renderOutputBuffers(request, *captureResult);
 
-  auto status = notifyShutter(request, *captureResult, captureTimestamp);
+  auto status = notifyShutter(request, *captureResult, captureTimestamp,
+                              isFirstTimeFrameProcessed);
   if (!status.isOk()) {
     ALOGE("%s: notify call failed: %s", __func__,
           status.getDescription().c_str());
@@ -587,7 +496,10 @@ void VirtualCameraRenderThread::throttleRendering(
     std::chrono::nanoseconds beforeSleep =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch());
-    std::this_thread::sleep_for(sleepTime);
+    {
+      std::unique_lock<std::mutex> lock(mLock);
+      mThrottlingCondVar.wait_for(lock, sleepTime);
+    }
     std::chrono::nanoseconds after_sleep =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch());
@@ -600,28 +512,6 @@ void VirtualCameraRenderThread::throttleRendering(
           static_cast<uint64_t>(frameDuration.count()),
           nanosToFps(frameDuration), maxFps);
   }
-}
-
-std::chrono::nanoseconds VirtualCameraRenderThread::getSurfaceTimestamp(
-    std::chrono::nanoseconds timeSinceLastFrame) {
-  std::chrono::nanoseconds surfaceTimestamp = mEglSurfaceTexture->getTimestamp();
-  uint64_t lastSurfaceTimestamp = mLastSurfaceTimestampNanoseconds.load();
-  if (lastSurfaceTimestamp > 0 &&
-      surfaceTimestamp.count() <= lastSurfaceTimestamp) {
-    // The timestamps were provided by the producer but we are
-    // repeating the last frame, so we increase the previous timestamp by
-    // the elapsed time since its capture, otherwise the camera framework
-    // will discard the frame.
-    surfaceTimestamp = std::chrono::nanoseconds(lastSurfaceTimestamp +
-                                                timeSinceLastFrame.count());
-    ALOGI(
-        "Surface's timestamp is stall. Artificially increasing the surface "
-        "timestamp by %lld",
-        timeSinceLastFrame.count());
-  }
-  mLastSurfaceTimestampNanoseconds.store(surfaceTimestamp.count(),
-                                         std::memory_order_relaxed);
-  return surfaceTimestamp;
 }
 
 std::unique_ptr<CaptureResult> VirtualCameraRenderThread::createCaptureResult(
@@ -641,17 +531,30 @@ std::unique_ptr<CaptureResult> VirtualCameraRenderThread::createCaptureResult(
 void VirtualCameraRenderThread::renderOutputBuffers(
     const ProcessCaptureRequestTask& request, CaptureResult& captureResult) {
   const std::vector<CaptureRequestBuffer>& buffers = request.getBuffers();
-  captureResult.outputBuffers.resize(buffers.size());
 
   for (int i = 0; i < buffers.size(); ++i) {
     const CaptureRequestBuffer& reqBuffer = buffers[i];
-    StreamBuffer& resBuffer = captureResult.outputBuffers[i];
+
+    if (mSessionContext.isMultiInputStreamEnabled() &&
+        mSessionContext.getInputStreamIdForOutputStreamId(
+            reqBuffer.getStreamId()) != mInputSurfaceIndex) {
+      // Only render the buffer corresponding to the input stream of this
+      // thread. Other buffers will be filled by the other threads.
+      ALOGV("%s : (inputSurfaceIndex:%d) skipping buffer %" PRId32
+            " for stream id %" PRId32,
+            __func__, mInputSurfaceIndex, reqBuffer.getBufferId(),
+            reqBuffer.getStreamId());
+
+      continue;
+    }
+    StreamBuffer& resBuffer = captureResult.outputBuffers.emplace_back();
     resBuffer.streamId = reqBuffer.getStreamId();
     resBuffer.bufferId = reqBuffer.getBufferId();
     resBuffer.status = BufferStatus::OK;
 
-    ALOGV("%s : rendering buffer %" PRId64 " for stream id %" PRId32, __func__,
-          resBuffer.bufferId, resBuffer.streamId);
+    ALOGV("%s : (inputSurfaceIndex:%d) rendering buffer %" PRId64
+          " for stream id %" PRId32,
+          __func__, mInputSurfaceIndex, resBuffer.bufferId, resBuffer.streamId);
 
     const std::optional<Stream> streamConfig =
         mSessionContext.getStreamConfig(reqBuffer.getStreamId());
@@ -661,14 +564,8 @@ void VirtualCameraRenderThread::renderOutputBuffers(
       continue;
     }
 
-    auto status = streamConfig->format == PixelFormat::BLOB
-                      ? renderIntoBlobStreamBuffer(
-                            reqBuffer.getStreamId(), reqBuffer.getBufferId(),
-                            captureResult.result, request.getRequestSettings(),
-                            reqBuffer.getFence())
-                      : renderIntoImageStreamBuffer(reqBuffer.getStreamId(),
-                                                    reqBuffer.getBufferId(),
-                                                    reqBuffer.getFence());
+    auto status = mImageHandler->fillOutputBuffer(
+        request.getRequestSettings(), reqBuffer, *streamConfig, captureResult);
     if (!status.isOk()) {
       resBuffer.status = BufferStatus::ERROR;
     }
@@ -696,13 +593,32 @@ void VirtualCameraRenderThread::renderOutputBuffers(
 
 ::ndk::ScopedAStatus VirtualCameraRenderThread::notifyShutter(
     const ProcessCaptureRequestTask& request, const CaptureResult& captureResult,
-    std::chrono::nanoseconds captureTimestamp) {
-  std::vector<NotifyMsg> notifyMsgs{
-      createShutterNotifyMsg(request.getFrameNumber(), captureTimestamp)};
+    std::chrono::nanoseconds captureTimestamp, bool isFirstTimeFrameProcessed) {
+  std::vector<NotifyMsg> notifyMsgs;
+
+  if (isFirstTimeFrameProcessed) {
+    // We must only notify the shutter once.
+    mSessionContext.mLastNotifiedFrameNumber.store(request.getFrameNumber());
+    notifyMsgs.push_back(
+        createShutterNotifyMsg(request.getFrameNumber(), captureTimestamp));
+  }
   for (const StreamBuffer& resBuffer : captureResult.outputBuffers) {
     if (resBuffer.status != BufferStatus::OK) {
       notifyMsgs.push_back(
           createErrorNotifyMsg(request.getFrameNumber(), resBuffer.streamId));
+    }
+  }
+
+  // log notifyMsgs
+  for (const NotifyMsg& msg : notifyMsgs) {
+    if (msg.getTag() == NotifyMsg::Tag::shutter) {
+      ALOGV("%s: Notifying shutter for frame %d", __func__,
+            msg.get<NotifyMsg::Tag::shutter>().frameNumber);
+    } else if (msg.getTag() == NotifyMsg::Tag::error) {
+      ALOGE("%s: Notifying error for frame %d, stream %d, code %d", __func__,
+            msg.get<NotifyMsg::Tag::error>().frameNumber,
+            msg.get<NotifyMsg::Tag::error>().errorStreamId,
+            static_cast<int>(msg.get<NotifyMsg::Tag::error>().errorCode));
     }
   }
 
@@ -715,6 +631,10 @@ void VirtualCameraRenderThread::renderOutputBuffers(
       captureResults;
   captureResults.push_back(std::move(*captureResult));
 
+  // processCaptureResult() may be invoked multiple times by the HAL in
+  // response to a single capture request. This allows, for example, the
+  // metadata and low-resolution buffers to be returned in one call, and
+  // post-processed JPEG buffers in a later call,
   ::ndk::ScopedAStatus status =
       mCameraDeviceCallback->processCaptureResult(captureResults);
   if (!status.isOk()) {
@@ -723,11 +643,14 @@ void VirtualCameraRenderThread::renderOutputBuffers(
     return status;
   }
 
-  ALOGV("%s: Successfully called processCaptureResult", __func__);
+  ALOGV(
+      "%s: (inputSurfaceIndex:%d) Successfully called processCaptureResult "
+      "frameNumber:%d",
+      __func__, mInputSurfaceIndex, captureResult->frameNumber);
   return status;
 }
 
-void VirtualCameraRenderThread::flushCaptureRequest(
+void VirtualCameraRenderThread::completeCaptureRequestWithError(
     const ProcessCaptureRequestTask& request) {
   CaptureResult captureResult;
   captureResult.fmqResultSize = 0;
@@ -768,219 +691,28 @@ void VirtualCameraRenderThread::flushCaptureRequest(
   }
 }
 
-std::vector<uint8_t> VirtualCameraRenderThread::createThumbnail(
-    const Resolution resolution, const int quality) {
-  if (resolution.width == 0 || resolution.height == 0) {
-    ALOGV("%s: Skipping thumbnail creation, zero size requested", __func__);
-    return {};
-  }
+bool VirtualCameraRenderThread::initializeImageHandler() {
+  // TODO(b/458613942): Currently a BLOB input can only be used for direct
+  // passthrough. Add the ability to decode the BLOB format, which will enable
+  // the ability to satisfy bitmap stream requests as well from the same input.
+  if (isBlobFormat(mImageFormat)) {
+    auto imagePassthroughHandler = VirtualCameraImagePassthroughHandler::create(
+        mSessionContext, mImageFormat, [this] { requestTextureUpdate(); });
 
-  ALOGV("%s: Creating thumbnail with size %d x %d, quality %d", __func__,
-        resolution.width, resolution.height, quality);
-  Resolution bufferSize = roundTo2DctSize(resolution);
-  std::shared_ptr<EglFrameBuffer> framebuffer = allocateTemporaryFramebuffer(
-      mEglDisplayContext->getEglDisplay(), bufferSize.width, bufferSize.height);
-  if (framebuffer == nullptr) {
-    ALOGE(
-        "Failed to allocate temporary framebuffer for JPEG thumbnail "
-        "compression");
-    return {};
-  }
-
-  // TODO(b/324383963) Add support for letterboxing if the thumbnail sizese
-  // doesn't correspond
-  //  to input texture aspect ratio.
-  if (!renderIntoEglFramebuffer(*framebuffer, /*fence=*/nullptr,
-                                Rect(resolution.width, resolution.height))
-           .isOk()) {
-    ALOGE(
-        "Failed to render input texture into temporary framebuffer for JPEG "
-        "thumbnail");
-    return {};
-  }
-
-  std::vector<uint8_t> compressedThumbnail;
-  compressedThumbnail.resize(kJpegThumbnailBufferSize);
-  ALOGE("%s: Compressing thumbnail %d x %d", __func__, resolution.width,
-        resolution.height);
-  std::optional<size_t> compressedSize =
-      compressJpeg(resolution.width, resolution.height, quality,
-                   framebuffer->getHardwareBuffer(), {},
-                   compressedThumbnail.size(), compressedThumbnail.data());
-  if (!compressedSize.has_value()) {
-    ALOGE("%s: Failed to compress jpeg thumbnail", __func__);
-    return {};
-  }
-  compressedThumbnail.resize(compressedSize.value());
-  return compressedThumbnail;
-}
-
-ndk::ScopedAStatus VirtualCameraRenderThread::renderIntoBlobStreamBuffer(
-    const int streamId, const int bufferId, const CameraMetadata& resultMetadata,
-    const RequestSettings& requestSettings, sp<Fence> fence) {
-  std::shared_ptr<AHardwareBuffer> hwBuffer =
-      mSessionContext.fetchHardwareBuffer(streamId, bufferId);
-  if (hwBuffer == nullptr) {
-    ALOGE("%s: Failed to fetch hardware buffer %d for streamId %d", __func__,
-          bufferId, streamId);
-    return cameraStatus(Status::INTERNAL_ERROR);
-  }
-
-  std::optional<Stream> stream = mSessionContext.getStreamConfig(streamId);
-  if (!stream.has_value()) {
-    ALOGE("%s, failed to fetch information about stream %d", __func__, streamId);
-    return cameraStatus(Status::INTERNAL_ERROR);
-  }
-
-  ALOGV("%s: Rendering JPEG with size %d x %d, quality %d", __func__,
-        stream->width, stream->height, requestSettings.jpegQuality);
-
-  // Let's create YUV framebuffer and render the surface into this.
-  // This will take care about rescaling as well as potential format conversion.
-  // The buffer dimensions need to be rounded to nearest multiple of JPEG DCT
-  // size, however we pass the viewport corresponding to size of the stream so
-  // the image will be only rendered to the area corresponding to the stream
-  // size.
-  Resolution bufferSize =
-      roundTo2DctSize(Resolution(stream->width, stream->height));
-  std::shared_ptr<EglFrameBuffer> framebuffer = allocateTemporaryFramebuffer(
-      mEglDisplayContext->getEglDisplay(), bufferSize.width, bufferSize.height);
-  if (framebuffer == nullptr) {
-    ALOGE("Failed to allocate temporary framebuffer for JPEG compression");
-    return cameraStatus(Status::INTERNAL_ERROR);
-  }
-
-  // Render into temporary framebuffer.
-  ndk::ScopedAStatus status = renderIntoEglFramebuffer(
-      *framebuffer, /*fence=*/nullptr, Rect(stream->width, stream->height));
-  if (!status.isOk()) {
-    ALOGE("Failed to render input texture into temporary framebuffer");
-    return status;
-  }
-
-  PlanesLockGuard planesLock(hwBuffer, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
-                             fence);
-  if (planesLock.getStatus() != OK) {
-    ALOGE("Failed to lock hwBuffer planes");
-    return cameraStatus(Status::INTERNAL_ERROR);
-  }
-
-  std::vector<uint8_t> app1ExifData =
-      createExif(Resolution(stream->width, stream->height), resultMetadata,
-                 createThumbnail(requestSettings.thumbnailResolution,
-                                 requestSettings.thumbnailJpegQuality));
-
-  unsigned long outBufferSize = stream->bufferSize - sizeof(CameraBlob);
-  void* outBuffer = (*planesLock).planes[0].data;
-  std::optional<size_t> compressedSize = compressJpeg(
-      stream->width, stream->height, requestSettings.jpegQuality,
-      framebuffer->getHardwareBuffer(), app1ExifData, outBufferSize, outBuffer);
-
-  if (!compressedSize.has_value()) {
-    ALOGE("%s: Failed to compress JPEG image", __func__);
-    return cameraStatus(Status::INTERNAL_ERROR);
-  }
-
-  // Add the transport header at the end of the JPEG output buffer.
-  //
-  // jpegBlobId must start at byte[buffer_size - sizeof(CameraBlob)],
-  // where the buffer_size is the size of gralloc buffer.
-  //
-  // See
-  // hardware/interfaces/camera/device/aidl/android/hardware/camera/device/CameraBlobId.aidl
-  // for the full explanation of the following code.
-  CameraBlob cameraBlob{
-      .blobId = CameraBlobId::JPEG,
-      .blobSizeBytes = static_cast<int32_t>(compressedSize.value())};
-
-  // Copy the cameraBlob to the end of the JPEG buffer.
-  uint8_t* jpegStreamEndAddress =
-      reinterpret_cast<uint8_t*>((*planesLock).planes[0].data) +
-      (stream->bufferSize - sizeof(cameraBlob));
-  memcpy(jpegStreamEndAddress, &cameraBlob, sizeof(cameraBlob));
-
-  ALOGV("%s: Successfully compressed JPEG image, resulting size %zu B",
-        __func__, compressedSize.value());
-
-  return ndk::ScopedAStatus::ok();
-}
-
-ndk::ScopedAStatus VirtualCameraRenderThread::renderIntoImageStreamBuffer(
-    int streamId, int bufferId, sp<Fence> fence) {
-  ALOGV("%s", __func__);
-
-  const std::chrono::nanoseconds before =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch());
-
-  // Render test pattern using EGL.
-  std::shared_ptr<EglFrameBuffer> framebuffer =
-      mSessionContext.fetchOrCreateEglFramebuffer(
-          mEglDisplayContext->getEglDisplay(), streamId, bufferId);
-  if (framebuffer == nullptr) {
-    ALOGE(
-        "%s: Failed to get EGL framebuffer corresponding to buffer id "
-        "%d for streamId %d",
-        __func__, bufferId, streamId);
-    return cameraStatus(Status::ILLEGAL_ARGUMENT);
-  }
-
-  ndk::ScopedAStatus status = renderIntoEglFramebuffer(*framebuffer, fence);
-
-  const std::chrono::nanoseconds after =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch());
-
-  ALOGV("Rendering to buffer %d, stream %d took %lld ns", bufferId, streamId,
-        after.count() - before.count());
-
-  return ndk::ScopedAStatus::ok();
-}
-
-ndk::ScopedAStatus VirtualCameraRenderThread::renderIntoEglFramebuffer(
-    EglFrameBuffer& framebuffer, sp<Fence> fence, std::optional<Rect> viewport) {
-  ALOGV("%s", __func__);
-  // Wait for fence to clear.
-  if (fence != nullptr && fence->isValid()) {
-    status_t ret = fence->wait(kAcquireFenceTimeout.count());
-    if (ret != 0) {
-      ALOGE("Timeout while waiting for the acquire fence for buffer");
-      return cameraStatus(Status::INTERNAL_ERROR);
+    if (!imagePassthroughHandler) {
+      ALOGE("%s: failed to initialize VirtualCameraImagePassthroughHandler",
+            __func__);
+      return false;
     }
-  }
+    mImageHandler = std::move(imagePassthroughHandler);
 
-  mEglDisplayContext->makeCurrent();
-  framebuffer.beforeDraw();
-
-  Rect viewportRect =
-      viewport.value_or(Rect(framebuffer.getWidth(), framebuffer.getHeight()));
-  glViewport(viewportRect.left, viewportRect.top, viewportRect.getWidth(),
-             viewportRect.getHeight());
-
-  sp<GraphicBuffer> textureBuffer = mEglSurfaceTexture->getCurrentBuffer();
-  if (textureBuffer == nullptr) {
-    // If there's no current buffer, nothing was written to the surface and
-    // texture is not initialized yet. Let's render the framebuffer black
-    // instead of rendering the texture.
-    glClearColor(0.0f, 0.5f, 0.5f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
   } else {
-    const bool renderSuccess =
-        isYuvFormat(static_cast<PixelFormat>(textureBuffer->getPixelFormat()))
-            ? mEglTextureYuvProgram->draw(
-                  mEglSurfaceTexture->getTextureId(),
-                  mEglSurfaceTexture->getTransformMatrix())
-            : mEglTextureRgbProgram->draw(
-                  mEglSurfaceTexture->getTextureId(),
-                  mEglSurfaceTexture->getTransformMatrix());
-    if (!renderSuccess) {
-      ALOGE("%s: Failed to render texture", __func__);
-      return cameraStatus(Status::INTERNAL_ERROR);
-    }
+    mImageHandler = std::make_unique<VirtualCameraImageTransformingHandler>(
+        mSessionContext, mInputSurfaceSize, [this] { requestTextureUpdate(); });
   }
-  framebuffer.afterDraw();
 
-  return ndk::ScopedAStatus::ok();
+  mInputSurfacePromise.set_value(mImageHandler->getInputSurface());
+  return true;
 }
 
 }  // namespace virtualcamera

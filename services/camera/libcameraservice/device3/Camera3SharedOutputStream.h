@@ -77,6 +77,11 @@ public:
             const std::vector<size_t> &removedSurfaceIds,
             KeyedVector<sp<Surface>, size_t> *outputMap/*out*/);
 
+    virtual status_t updateInternalStream(
+            KeyedVector<sp<Surface>, size_t> * /*outputMap out*/) override {
+        return INVALID_OPERATION;
+    }
+
     virtual bool getOfflineProcessingSupport() const {
         // As per Camera spec. shared streams currently do not support
         // offline mode.
@@ -84,6 +89,11 @@ public:
     }
 
     virtual status_t  setTransform(int transform, int surfaceId);
+
+    /**
+     * Query the mirror mode of specific output surface id.
+     */
+    virtual int getSurfaceMirrorMode(size_t surfaceId) override;
 
 private:
 
@@ -151,7 +161,7 @@ private:
 
     virtual status_t configureQueueLocked();
 
-    virtual status_t disconnectLocked();
+    virtual status_t disconnectLocked(bool force = false);
 
     virtual status_t getEndpointUsage(uint64_t *usage);
 

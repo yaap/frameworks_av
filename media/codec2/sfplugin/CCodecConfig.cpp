@@ -18,6 +18,8 @@
 #define LOG_TAG "CCodecConfig"
 
 #include <initializer_list>
+#include <iomanip>
+#include <sstream>
 
 #include <android_media_codec.h>
 #include <android_media_tv_flags.h>
@@ -27,6 +29,7 @@
 #include <utils/NativeHandle.h>
 
 #include <android-base/properties.h>
+#include <android-base/strings.h>
 
 #include <C2Component.h>
 #include <C2Param.h>
@@ -418,6 +421,13 @@ void CCodecConfig::initializeStandardParams() {
             C2_PARAMKEY_OUTPUT_LARGE_FRAME, "threshold-size")
         .limitTo(D::AUDIO & D::OUTPUT));
 
+    // Flip
+    if (android::media::codec::provider_->flip_support()) {
+        add(ConfigMapper(KEY_HORIZONTAL_FLIP, C2_PARAMKEY_VUI_ROTATION, "flip")
+            .limitTo((D::VIDEO | D::IMAGE) & D::CODED));
+        add(ConfigMapper(KEY_HORIZONTAL_FLIP, C2_PARAMKEY_ROTATION, "flip")
+            .limitTo((D::VIDEO | D::IMAGE) & D::RAW));
+    }
     // Rotation
     // Note: SDK rotation is clock-wise, while C2 rotation is counter-clock-wise
     add(ConfigMapper(KEY_ROTATION, C2_PARAMKEY_VUI_ROTATION, "value")
@@ -569,7 +579,7 @@ void CCodecConfig::initializeStandardParams() {
                .limitTo(D::ENCODER & D::VIDEO));
     // convert to timestamp base
     add(ConfigMapper(KEY_I_FRAME_INTERVAL, C2_PARAMKEY_SYNC_FRAME_INTERVAL, "value")
-        .limitTo(D::VIDEO & D::ENCODER & D::CONFIG)
+        .limitTo((D::VIDEO | D::AUDIO) & D::ENCODER & D::CONFIG)
         .withMapper([](C2Value v) -> C2Value {
             // convert from i32 to float
             int32_t i32Value;
@@ -671,6 +681,13 @@ void CCodecConfig::initializeStandardParams() {
 
     add(ConfigMapper(C2_PARAMKEY_TEMPORAL_LAYERING, C2_PARAMKEY_TEMPORAL_LAYERING, "")
         .limitTo(D::ENCODER & D::VIDEO & D::OUTPUT));
+
+    if (android::media::codec::provider_->temporal_layer_encoding()) {
+        add(ConfigMapper(KEY_TEMPORAL_LAYER_ID, C2_PARAMKEY_LAYER_INDEX, "value")
+                    .limitTo(D::ENCODER & D::VIDEO & D::OUTPUT & D::READ));
+        add(ConfigMapper(C2_PARAMKEY_LAYERING_SCHEME, C2_PARAMKEY_LAYERING_SCHEME, "")
+                    .limitTo(D::ENCODER & D::VIDEO & D::OUTPUT));
+    }
 
     // Pixel Format (use local key for actual pixel format as we don't distinguish between
     // SDK layouts for flexible format and we need the actual SDK color format in the media format)
@@ -980,7 +997,7 @@ void CCodecConfig::initializeStandardParams() {
     add(ConfigMapper("android._encoding-quality-level", C2_PARAMKEY_ENCODING_QUALITY_LEVEL, "value")
         .limitTo(D::ENCODER & (D::CONFIG | D::PARAM)));
     add(ConfigMapper(KEY_QUALITY, C2_PARAMKEY_QUALITY, "value")
-        .limitTo(D::ENCODER & (D::CONFIG | D::PARAM)));
+        .limitTo(D::ENCODER & (D::CODED | D::CONFIG | D::PARAM)));
     add(ConfigMapper(KEY_FLAC_COMPRESSION_LEVEL, C2_PARAMKEY_COMPLEXITY, "value")
         .limitTo(D::AUDIO & D::ENCODER));
     add(ConfigMapper(KEY_COMPLEXITY, C2_PARAMKEY_COMPLEXITY, "value")
@@ -1030,7 +1047,7 @@ void CCodecConfig::initializeStandardParams() {
         .limitTo(D::ENCODER & D::VIDEO & D::READ));
 
     add(ConfigMapper(KEY_PICTURE_TYPE, C2_PARAMKEY_PICTURE_TYPE, "value")
-        .limitTo(D::ENCODER & D::VIDEO & D::READ)
+        .limitTo(D::ENCODER & (D::VIDEO | D::AUDIO) & D::READ)
         .withMappers([](C2Value v) -> C2Value {
             int32_t sdk;
             C2Config::picture_type_t c2;
@@ -1054,7 +1071,7 @@ void CCodecConfig::initializeStandardParams() {
     }
 
     add(ConfigMapper(KEY_AUDIO_PRESENTATION_ID, C2_PARAMKEY_AUDIO_PRESENTATION_ID, "value")
-                .limitTo(D::AUDIO & D::DECODER & (D::CONFIG | D::PARAM | D::READ)));
+                .limitTo(D::AUDIO & (D::CONFIG | D::PARAM | D::READ)));
 
     /* still to do
        not yet used by MediaCodec, but defined as MediaFormat
@@ -1139,6 +1156,8 @@ status_t CCodecConfig::initialize(
     mParamUpdater->clear();
     mParamUpdater->supportWholeParam(
             C2_PARAMKEY_TEMPORAL_LAYERING, C2StreamTemporalLayeringTuning::CORE_INDEX);
+    mParamUpdater->supportWholeParam(C2_PARAMKEY_LAYERING_SCHEME,
+                                     C2StreamLayeringSchemeTuning::CORE_INDEX);
     if (android::media::codec::provider_->region_of_interest()
         && android::media::codec::provider_->region_of_interest_support()) {
         mParamUpdater->supportWholeParam(
@@ -1174,6 +1193,10 @@ status_t CCodecConfig::initialize(
                               C2_PARAMKEY_AVERAGE_QP);
                 addLocalParam(new C2StreamPictureTypeInfo::output(0u, 0),
                               C2_PARAMKEY_PICTURE_TYPE);
+                if (android::media::codec::provider_->temporal_layer_encoding()) {
+                    addLocalParam(new C2StreamLayerIndexInfo::output(0u, 0),
+                                  C2_PARAMKEY_LAYER_INDEX);
+                }
             }
         }
     }
@@ -1378,9 +1401,8 @@ bool CCodecConfig::updateFormats(Domain domain) {
     return changed;
 }
 
-sp<AMessage> CCodecConfig::getFormatForDomain(
-        const ReflectedParamUpdater::Dict &reflected,
-        Domain portDomain) const {
+sp<AMessage> CCodecConfig::getFormatForDomain(const ReflectedParamUpdater::Dict& reflected,
+                                              Domain portDomain) {
     sp<AMessage> msg = new AMessage;
     for (const auto &[key, mappers] : mStandardParams->getKeys()) {
         for (const ConfigMapper &cm : mappers) {
@@ -1496,8 +1518,30 @@ sp<AMessage> CCodecConfig::getFormatForDomain(
                     msg->setString(KEY_TEMPORAL_LAYERING, AStringPrintf(
                             "android.generic.%u", layering->m.layerCount));
                 }
+                mLastLayering = C2StreamTemporalLayeringTuning::output::AllocUnique(
+                        layering->flexCount(), 0, layering->m.layerCount, layering->m.bLayerCount);
+                std::stringstream bitrateLayering;
+                for (size_t i = 0; i < c2_min(layering->flexCount(), layering->m.layerCount); i++) {
+                    if (i) {
+                        bitrateLayering << ";";
+                    }
+                    bitrateLayering << std::fixed << std::setprecision(2)
+                                    << layering->m.bitrateRatios[i];
+                    mLastLayering->m.bitrateRatios[i] = layering->m.bitrateRatios[i];
+                }
+                if (std::string bl = bitrateLayering.str(); !bl.empty()) {
+                    msg->setString(KEY_VIDEO_BITRATE_LAYERING, AString(bl.c_str()));
+                }
             }
             msg->removeEntryAt(msg->findEntryByName(C2_PARAMKEY_TEMPORAL_LAYERING));
+        }
+        if (msg->findBuffer(C2_PARAMKEY_LAYERING_SCHEME, &tmp) && tmp != nullptr) {
+            C2StreamLayeringSchemeTuning* structure =
+                    C2StreamLayeringSchemeTuning::From(C2Param::From(tmp->data(), tmp->size()));
+            if (structure) {
+                mLastLayeringScheme.value = structure->value;
+            }
+            msg->removeEntryAt(msg->findEntryByName(C2_PARAMKEY_LAYERING_SCHEME));
         }
     }
 
@@ -1675,8 +1719,15 @@ sp<AMessage> CCodecConfig::getFormatForDomain(
         sp<ABuffer> data;
         if (msg->findInt32(typeKey.c_str(), &type)
                 && msg->findBuffer(dataKey.c_str(), &data)) {
-            if (type == HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40) {
-                msg->setBuffer(KEY_HDR10_PLUS_INFO, data);
+            std::string hdrKey;
+            if (android::media::codec::provider_->agtm_metadata()
+                    && type == HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_50) {
+                hdrKey = KEY_HDR_ST2094_50_INFO;
+            } else if (type == HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40) {
+                hdrKey = KEY_HDR10_PLUS_INFO;
+            }
+            if (!hdrKey.empty()) {
+                msg->setBuffer(hdrKey.c_str(), data);
                 msg->removeEntryAt(msg->findEntryByName(typeKey.c_str()));
                 msg->removeEntryAt(msg->findEntryByName(dataKey.c_str()));
             }
@@ -1730,8 +1781,131 @@ static void relaxValues(ReflectedParamUpdater::Value &item) {
     }
 }
 
-ReflectedParamUpdater::Dict CCodecConfig::getReflectedFormat(
-        const sp<AMessage> &params_, Domain configDomain) const {
+void CCodecConfig::reflectTemporalLayeringConfig(const sp<AMessage>& params) const {
+    AString temporalLayering;
+    AString bitrateLayering;
+    const bool hasTemporalLayering = params->findString(KEY_TEMPORAL_LAYERING, &temporalLayering);
+    const bool hasBitrateLayering =
+            android::media::codec::provider_->temporal_layer_encoding() &&
+            params->findString(KEY_VIDEO_BITRATE_LAYERING, &bitrateLayering);
+    // hasTemporalLayering, hasBitrateLayering:
+    // true, true => Update with the two configured values.
+    // true, false => Update only with KEY_TEMPORAL_LAYERING. If this happens in the middle of
+    //                encoding, the previous bitrate ratios setting is discarded. This is fine
+    //                because updating temporal layers in the middle is not expected.
+    // false, true => Update with the existing KEY_TEMPORAL_LAYERING and the new bitrate layering.
+    // false, false => No update is needed.
+    if (!hasTemporalLayering && !hasBitrateLayering) {
+        return;
+    }
+
+    ALOGV("KEY_TEMPORAL_LAYERING: %s, KEY_VIDEO_BITRATE_LAYERING: %s",
+          (hasTemporalLayering ? temporalLayering.c_str() : "NULL"),
+          (hasBitrateLayering ? bitrateLayering.c_str() : "NULL"));
+
+    std::unique_ptr<C2StreamTemporalLayeringTuning::output> layering;
+    C2StreamLayeringSchemeTuning::output layeringStructure(0, C2Config::LS_UNSPECIFIED);
+    if (hasTemporalLayering) {
+        unsigned int numLayers = 0;
+        unsigned int numBLayers = 0;
+        int tags;
+        char dummy;
+        if ((sscanf(temporalLayering.c_str(), "webrtc.vp8.%u-layer%c", &numLayers, &dummy) == 1 ||
+             sscanf(temporalLayering.c_str(), "webrtc.svc.l1t%u%c", &numLayers, &dummy) == 1) &&
+            numLayers > 0) {
+            switch (numLayers) {
+                case 1:
+                    layering = C2StreamTemporalLayeringTuning::output::AllocUnique({}, 0u, 1u, 0u);
+                    break;
+                case 2:
+                    layering =
+                            C2StreamTemporalLayeringTuning::output::AllocUnique({.6f}, 0u, 2u, 0u);
+                    break;
+                case 3:
+                    layering = C2StreamTemporalLayeringTuning::output::AllocUnique({.4f, .6f}, 0u,
+                                                                                   3u, 0u);
+                    break;
+                default:
+                    layering = C2StreamTemporalLayeringTuning::output::AllocUnique({.25f, .4f, .6f},
+                                                                                   0u, 4u, 0u);
+                    break;
+            }
+            if (temporalLayering.find("svc") != std::string::npos) {
+                layeringStructure.value = C2Config::LS_WEBRTC;
+            }
+        } else if ((tags = sscanf(temporalLayering.c_str(), "android.generic.%u%c%u%c", &numLayers,
+                                  &dummy, &numBLayers, &dummy)) &&
+                   (tags == 1 || (tags == 3 && dummy == '+')) && numLayers > 0 &&
+                   numLayers < UINT32_MAX - numBLayers) {
+            layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
+                    {}, 0u, numLayers + numBLayers, numBLayers);
+        } else {
+            ALOGD("Ignoring unsupported ts-schema [%s]", temporalLayering.c_str());
+            return;
+        }
+    } else {
+        if (!mLastLayering) {
+            ALOGW("KEY_VIDEO_BITRATE_LAYERING is configured but KEY_TEMPORAL_LAYERING"
+                  "has not been configured");
+            return;
+        }
+
+        ALOGV("Trying to generate TemporalLayering by mixing the existing TemporalLayeringTuning "
+              "and KEY_VIDEO_BITRATE_LAYERING");
+        layering = std::unique_ptr<C2StreamTemporalLayeringTuning::output>(
+                C2StreamTemporalLayeringTuning::output::From(
+                        C2Param::Copy(*mLastLayering).release()));
+        layeringStructure = mLastLayeringScheme;
+    }
+
+    C2_CHECK(layering);
+
+    std::vector<float> bitrateRatios;
+    if (hasBitrateLayering) {
+        std::string blStr = std::string(bitrateLayering.c_str());
+        std::vector<std::string> ratioStrs = base::Tokenize(blStr, ";");
+        bitrateRatios.resize(ratioStrs.size());
+        for (size_t i = 0; i < ratioStrs.size(); i++) {
+            if (sscanf(ratioStrs[i].c_str(), "%f", &bitrateRatios[i]) != 1) {
+                ALOGE("Invalid bitrate layering value: %s", bitrateLayering.c_str());
+                return;
+            }
+        }
+    }
+
+    // Update layering with bitrateRatios only if they matches.
+    if (layering->m.layerCount == bitrateRatios.size() + 1) {
+        // Only bitrate ratios configured with KEY_VIDEO_BITRATE_LAYERING are set only if
+        // the number of ratios matches the number of layers in KEY_TEMPORAL_LAYERING.
+        layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
+                bitrateRatios.size(), 0u, layering->m.layerCount, layering->m.bLayerCount);
+        for (size_t i = 0; i < bitrateRatios.size(); i++) {
+            layering->m.bitrateRatios[i] = bitrateRatios[i];
+        }
+    } else if (!bitrateRatios.empty()) {
+        ALOGW("The number of bitrate ratios + 1 (%zu) doesn't match the number of temporal "
+              "layers (%d)",
+              bitrateRatios.size() + 1, layering->m.layerCount);
+    }
+
+    std::stringstream ss;
+    for (size_t i = 0; i < layering->flexCount(); i++) {
+        ss << layering->m.bitrateRatios[i];
+        if (i < layering->flexCount() - 1) {
+            ss << ", ";
+        }
+    }
+
+    ALOGV("temporal layering update: layerCount=%d, bLayerCount=%d, bitrateRatios={%s}",
+          layering->m.layerCount, layering->m.bLayerCount, ss.str().c_str());
+    params->setBuffer(C2_PARAMKEY_TEMPORAL_LAYERING,
+                      ABuffer::CreateAsCopy(layering.get(), layering->size()));
+    params->setBuffer(C2_PARAMKEY_LAYERING_SCHEME,
+                      ABuffer::CreateAsCopy(&layeringStructure, sizeof(layeringStructure)));
+}
+
+ReflectedParamUpdater::Dict CCodecConfig::getReflectedFormat(const sp<AMessage>& params_,
+                                                             Domain configDomain) const {
     // create a modifiable copy of params
     sp<AMessage> params = params_->dup();
     ALOGV("filtering with config domain %x", configDomain);
@@ -1787,49 +1961,7 @@ ReflectedParamUpdater::Dict CCodecConfig::getReflectedFormat(
         }
     }
 
-    {   // reflect temporal layering into a binary blob
-        AString schema;
-        if (params->findString(KEY_TEMPORAL_LAYERING, &schema)) {
-            unsigned int numLayers = 0;
-            unsigned int numBLayers = 0;
-            int tags;
-            char dummy;
-            std::unique_ptr<C2StreamTemporalLayeringTuning::output> layering;
-            if (sscanf(schema.c_str(), "webrtc.vp8.%u-layer%c", &numLayers, &dummy) == 1
-                && numLayers > 0) {
-                switch (numLayers) {
-                    case 1:
-                        layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
-                                {}, 0u, 1u, 0u);
-                        break;
-                    case 2:
-                        layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
-                                { .6f }, 0u, 2u, 0u);
-                        break;
-                    case 3:
-                        layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
-                                { .4f, .6f }, 0u, 3u, 0u);
-                        break;
-                    default:
-                        layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
-                                { .25f, .4f, .6f }, 0u, 4u, 0u);
-                        break;
-                }
-            } else if ((tags = sscanf(schema.c_str(), "android.generic.%u%c%u%c",
-                        &numLayers, &dummy, &numBLayers, &dummy))
-                && (tags == 1 || (tags == 3 && dummy == '+'))
-                && numLayers > 0 && numLayers < UINT32_MAX - numBLayers) {
-                layering = C2StreamTemporalLayeringTuning::output::AllocUnique(
-                        {}, 0u, numLayers + numBLayers, numBLayers);
-            } else {
-                ALOGD("Ignoring unsupported ts-schema [%s]", schema.c_str());
-            }
-            if (layering) {
-                params->setBuffer(C2_PARAMKEY_TEMPORAL_LAYERING,
-                                  ABuffer::CreateAsCopy(layering.get(), layering->size()));
-            }
-        }
-    }
+    reflectTemporalLayeringConfig(params);
 
     { // convert from MediaFormat rect to Codec 2.0 rect
         int32_t offset;
@@ -1883,12 +2015,18 @@ ReflectedParamUpdater::Dict CCodecConfig::getReflectedFormat(
             }
         }
 
+        uint32_t hdrKey = 0;
         sp<ABuffer> hdrDynamicInfo;
-        if (params->findBuffer(KEY_HDR10_PLUS_INFO, &hdrDynamicInfo)) {
+        if (android::media::codec::provider_->agtm_metadata()
+                && params->findBuffer(KEY_HDR_ST2094_50_INFO, &hdrDynamicInfo)) {
+            hdrKey = HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_50;
+        } else if (params->findBuffer(KEY_HDR10_PLUS_INFO, &hdrDynamicInfo)) {
+            hdrKey = HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40;
+        }
+        if (hdrKey != 0) {
             for (const std::string &prefix : { C2_PARAMKEY_INPUT_HDR_DYNAMIC_INFO,
-                                               C2_PARAMKEY_OUTPUT_HDR_DYNAMIC_INFO }) {
-                params->setInt32((prefix + ".type").c_str(),
-                                 HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40);
+                                            C2_PARAMKEY_OUTPUT_HDR_DYNAMIC_INFO }) {
+                params->setInt32((prefix + ".type").c_str(), hdrKey);
                 params->setBuffer((prefix + ".data").c_str(), hdrDynamicInfo);
             }
         }
@@ -1994,10 +2132,9 @@ ReflectedParamUpdater::Dict CCodecConfig::getReflectedFormat(
 }
 
 status_t CCodecConfig::getConfigUpdateFromSdkParams(
-        std::shared_ptr<Codec2Client::Configurable> configurable,
-        const sp<AMessage> &sdkParams, Domain configDomain,
-        c2_blocking_t blocking,
-        std::vector<std::unique_ptr<C2Param>> *configUpdate) const {
+        std::shared_ptr<Codec2Client::Configurable> configurable, const sp<AMessage>& sdkParams,
+        Domain configDomain, c2_blocking_t blocking,
+        std::vector<std::unique_ptr<C2Param>>* configUpdate) {
     // update the mappers if we know something more of this format.
     // AV1 10b or 8b encoding request.
     AString mime;
@@ -2057,6 +2194,16 @@ status_t CCodecConfig::getConfigUpdateFromSdkParams(
                         return C2Value();
                 })});
         }
+    }
+
+    if (android::media::codec::provider_->temporal_layer_encoding() &&
+        mDomain == (IS_VIDEO | IS_ENCODER) && configDomain == IS_CONFIG &&
+        !sdkParams->contains(KEY_TEMPORAL_LAYER_ID)) {
+        // Don't update temporal layer index every frame if TEMPORAL_LAYER_ID is not specified in
+        // configure() so an application doesn't get INFO_OUTPUT_FORMAT_CHANGED event due to
+        // temporal layer index.
+        mCurrentConfig.erase(C2StreamLayerIndexInfo::output::PARAM_TYPE);
+        mSubscribedIndices.erase(C2StreamLayerIndexInfo::output::PARAM_TYPE);
     }
 
     ReflectedParamUpdater::Dict params = getReflectedFormat(sdkParams, configDomain);

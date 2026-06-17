@@ -78,7 +78,8 @@ public:
     void onWorkDone(std::list<std::unique_ptr<C2Work>> &workItems);
     void onInputBufferDone(uint64_t frameIndex, size_t arrayIndex);
 
-    static PersistentSurface *CreateInputSurface();
+    static PersistentSurface *CreateInputSurface(
+            const std::shared_ptr<Codec2Client> &client = nullptr);
 
     static status_t CanFetchLinearBlock(
             const std::vector<std::string> &names, const C2MemoryUsage &usage, bool *isCompatible);
@@ -116,13 +117,13 @@ private:
     void start();
     void stop(bool pushBlankBuffer);
     void flush();
-    void release(bool sendCallback, bool pushBlankBuffer);
+    void release(bool sendCallback, bool pushBlankBuffer, sp<ALooper> codecLooper);
 
     /**
      * Creates an input surface for the current device configuration compatible with CCodec.
      * This could be backed by the C2 HAL or the OMX HAL.
      */
-    static sp<PersistentSurface> CreateCompatibleInputSurface();
+    sp<PersistentSurface> createCompatibleInputSurface();
 
     /// Creates an input surface to the OMX HAL
     static sp<PersistentSurface> CreateOmxInputSurface();
@@ -209,6 +210,8 @@ private:
 
     Mutexed<std::unique_ptr<CCodecConfig>> mConfig;
     Mutexed<std::list<std::unique_ptr<C2Work>>> mWorkDoneQueue;
+
+    bool mReleaseCompleted;
 
     sp<AMessage> mMetrics;
     std::unique_ptr<CCodecResources> mCodecResources;

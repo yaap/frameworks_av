@@ -28,6 +28,7 @@
 #include <android-base/stringprintf.h>
 #include <audio_utils/clock.h>
 #include <audio_utils/primitives.h>
+#include <audiomanager/IAudioManager.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <media/AudioTrack.h>
@@ -55,6 +56,7 @@ namespace android {
 
 using media::VolumeShaper;
 using android::content::AttributionSourceState;
+using android::media::audio::common::FlushFromFrameAccuracy;
 
 // TODO: Move to a separate .h
 
@@ -262,13 +264,14 @@ AudioTrack::AudioTrack(
         const audio_attributes_t* pAttributes,
         bool doNotReconnect,
         float maxRequiredSpeed,
-        audio_port_handle_t selectedDeviceId)
+        audio_port_handle_t selectedDeviceId,
+        const std::string& codecProvenance)
 {
     mSetParams = std::make_unique<SetParams>(
         streamType, sampleRate, format, channelMask, frameCount, flags, callback,
         notificationFrames, nullptr /*sharedBuffer*/, false /*threadCanCallJava*/,
         sessionId, transferType, offloadInfo, attributionSource, pAttributes,
-        doNotReconnect, maxRequiredSpeed, selectedDeviceId);
+        doNotReconnect, maxRequiredSpeed, selectedDeviceId, codecProvenance);
 }
 
 AudioTrack::AudioTrack(
@@ -294,7 +297,12 @@ AudioTrack::AudioTrack(
             new SetParams{streamType, sampleRate, format, channelMask, 0 /*frameCount*/, flags,
                           callback, notificationFrames, sharedBuffer, false /*threadCanCallJava*/,
                           sessionId, transferType, offloadInfo, attributionSource, pAttributes,
-                          doNotReconnect, maxRequiredSpeed, AUDIO_PORT_HANDLE_NONE}};
+                          doNotReconnect, maxRequiredSpeed, AUDIO_PORT_HANDLE_NONE,
+                          "" /*codecProvenance*/}};
+}
+
+AudioTrack::AudioTrack(SetParams&& params) {
+    set(std::move(params));
 }
 
 void AudioTrack::onFirstRef() {
@@ -321,7 +329,7 @@ AudioTrack::~AudioTrack()
 
     stopAndJoinCallbacks(); // checks mStatus
 
-    if (mStatus == NO_ERROR) {
+    if (mStatus == NO_ERROR && mAudioTrack != nullptr) {
         IInterface::asBinder(mAudioTrack)->unlinkToDeath(mDeathNotifier, this);
         mAudioTrack.clear();
         mCblkMemory.clear();
@@ -346,7 +354,9 @@ void AudioTrack::stopAndJoinCallbacks() {
     stop();
     if (mAudioTrackThread != 0) { // not thread safe
         mAudioTrackThread->requestExit();   // see comment in AudioTrack.h
-        mProxy->interrupt();
+        if (mProxy != nullptr) {
+            mProxy->interrupt();
+        }
         mAudioTrackThread->requestExitAndWait();
         mAudioTrackThread.clear();
     }
@@ -377,7 +387,8 @@ status_t AudioTrack::set(
         const audio_attributes_t* pAttributes,
         bool doNotReconnect,
         float maxRequiredSpeed,
-        audio_port_handle_t selectedDeviceId)
+        audio_port_handle_t selectedDeviceId,
+        const std::string& codecProvenance)
 {
     LOG_ALWAYS_FATAL_IF(mInitialized, "%s: should not be called twice", __func__);
     mInitialized = true;
@@ -413,6 +424,7 @@ status_t AudioTrack::set(
     mOriginalSampleRate = sampleRate;
     mAttributes = pAttributes != nullptr ? *pAttributes : AUDIO_ATTRIBUTES_INITIALIZER;
     mPlaybackRate = AUDIO_PLAYBACK_RATE_DEFAULT;
+    mCodecProvenance = codecProvenance;
 
     // update format and flags before storing them in mFormat, mOrigFlags and mFlags
     if (pAttributes != NULL) {
@@ -1025,6 +1037,37 @@ void AudioTrack::pause()
     }
 }
 
+status_t AudioTrack::flushFromFrame(
+        FlushFromFrameAccuracy accuracy,
+        int64_t requestedPosition,
+        int64_t* actualFlushedPosition) {
+    if (mAudioTrack == nullptr) {
+        return NO_INIT;
+    }
+    if (accuracy != FlushFromFrameAccuracy::EXACT &&
+        accuracy != FlushFromFrameAccuracy::BEST_EFFORT) {
+        return BAD_VALUE;
+    }
+    const auto writtenFrameCount = getWrittenFramesCount();
+    if (requestedPosition < 0 || requestedPosition > writtenFrameCount) {
+        return BAD_VALUE;
+    }
+    if (requestedPosition == writtenFrameCount) {
+        *actualFlushedPosition = writtenFrameCount;
+        return NO_ERROR;
+    }
+    if (accuracy == FlushFromFrameAccuracy::EXACT) {
+        AudioTimestamp timestamp{};
+        if (getTimestamp(timestamp) != OK || requestedPosition < timestamp.mPosition) {
+            return BAD_VALUE;
+        }
+    }
+    // Dummy implementation. Need to call to the HAL.
+    // Currently always return the written frame count as the flushed or suggested position.
+    *actualFlushedPosition = writtenFrameCount;
+    return accuracy == FlushFromFrameAccuracy::EXACT ? BAD_VALUE : NO_ERROR;
+}
+
 status_t AudioTrack::setVolume(float left, float right)
 {
     // This duplicates a test by AudioTrack JNI, but that is not the only caller
@@ -1155,6 +1198,14 @@ uint32_t AudioTrack::getHalChannelCount() const
 audio_format_t AudioTrack::getHalFormat() const
 {
     return mAfFormat;
+}
+
+int64_t AudioTrack::getWrittenFramesCount() const
+{
+    // TODO: b/461686562 - Adjust to the return value of a successful flushFromFrame() call.
+    AutoMutex lock(mLock);
+    if (mSharedBuffer) return 0; // Static tracks (i.e. with shared buffer) return 0.
+    return mStreamingFramesWritten;
 }
 
 status_t AudioTrack::setDualMonoMode(audio_dual_mono_mode_t mode)
@@ -1799,6 +1850,14 @@ status_t AudioTrack::createTrack_l()
         }
     }
 
+    if (auto binder = defaultServiceManager()->checkService(String16("audio"));
+            binder != nullptr && mAttributes.usage == AUDIO_USAGE_ALARM) {
+        // Barrier to ensure package/permission updates propagate to audioserver
+        // Must be client-side
+        interface_cast<IAudioManager>(binder)->getNativeInterface()->permissionUpdateBarrier(
+                /*forRecord=*/false);
+    }
+
     IAudioFlinger::CreateTrackInput input;
     if (mOriginalStreamType != AUDIO_STREAM_DEFAULT) {
         // Legacy: This is based on original parameters even if the track is recreated.
@@ -1835,6 +1894,7 @@ status_t AudioTrack::createTrack_l()
     input.selectedDeviceId = mSelectedDeviceId;
     input.sessionId = mSessionId;
     input.audioTrackCallback = mAudioTrackCallback;
+    input.codecProvenance = mCodecProvenance;
 
     media::CreateTrackResponse response;
     auto aidlInput = input.toAidl();
@@ -2042,6 +2102,7 @@ status_t AudioTrack::createTrack_l()
         .set(AMEDIAMETRICS_PROP_ENCODING, toString(mFormat).c_str())
         .set(AMEDIAMETRICS_PROP_CHANNELMASK, (int32_t)mChannelMask)
         .set(AMEDIAMETRICS_PROP_FRAMECOUNT, (int32_t)mFrameCount)
+        .set(AMEDIAMETRICS_PROP_CODECPROVENANCE, mCodecProvenance.c_str())
         // the following are NOT immutable
         .set(AMEDIAMETRICS_PROP_VOLUME_LEFT, (double)mVolume[AUDIO_INTERLEAVE_LEFT])
         .set(AMEDIAMETRICS_PROP_VOLUME_RIGHT, (double)mVolume[AUDIO_INTERLEAVE_RIGHT])
@@ -2311,7 +2372,9 @@ ssize_t AudioTrack::write(const void* buffer, size_t userSize, bool blocking)
     }
 
     if (written > 0) {
-        mFramesWritten += written / mFrameSize;
+        const size_t frames = written / mFrameSize;
+        mFramesWritten += frames;
+        mStreamingFramesWritten += frames;
 
         if (mTransfer == TRANSFER_SYNC_NOTIF_CALLBACK) {
             const sp<AudioTrackThread> t = mAudioTrackThread;
@@ -2636,12 +2699,14 @@ nsecs_t AudioTrack::processAudioBuffer()
                 if (writtenFrames > 0) {
                     AutoMutex lock(mLock);
                     mFramesWritten += writtenFrames;
+                    mStreamingFramesWritten += writtenFrames;
                 }
                 // FIXME bug 25195759
                 return 1000000;
             }
-            ALOGE("%s(%d): Error %d obtaining an audio buffer, giving up.",
-                    __func__, mPortId, err);
+            LOG_ALWAYS_FATAL_IF(err == PERMISSION_DENIED,
+                                "AudioTrack poisoned in callback transfer mode, aborting!");
+            ALOGE("%s(%d): Error %d obtaining an audio buffer, giving up.", __func__, mPortId, err);
             return NS_NEVER;
         }
 
@@ -2786,6 +2851,7 @@ nsecs_t AudioTrack::processAudioBuffer()
     if (writtenFrames > 0) {
         AutoMutex lock(mLock);
         mFramesWritten += writtenFrames;
+        mStreamingFramesWritten += writtenFrames;
     }
     mRemainingFrames = notificationFrames;
     mRetryOnPartialBuffer = true;
@@ -2806,6 +2872,11 @@ status_t AudioTrack::restoreTrack_l(const char *from, bool forceRestore)
             .set(AMEDIAMETRICS_PROP_STATUS, (int32_t)result)
             .set(AMEDIAMETRICS_PROP_WHERE, from)
             .record(); });
+
+    if (mCblk != nullptr && (mCblk->mFlags & CBLK_POISONED)) {
+        ALOGW("Track %d poisoned, aborting restore", mPortId);
+        return PERMISSION_DENIED;
+    }
 
     ALOGW("%s(%d): dead IAudioTrack, %s, creating a new one from %s()",
             __func__, mPortId, isOffloadedOrDirect_l() ? "Offloaded or Direct" : "PCM", from);
@@ -2985,14 +3056,9 @@ status_t AudioTrack::setParameters(const String8& keyValuePairs)
 status_t AudioTrack::selectPresentation(int presentationId, int programId)
 {
     AutoMutex lock(mLock);
-    AudioParameter param = AudioParameter();
-    param.addInt(String8(AudioParameter::keyPresentationId), presentationId);
-    param.addInt(String8(AudioParameter::keyProgramId), programId);
-    ALOGV("%s(%d): PresentationId/ProgramId[%s]",
-            __func__, mPortId, param.toString().c_str());
-
+    ALOGV("%s(%d): PresentationId:%d ProgramId:%d", __func__, mPortId, presentationId, programId);
     status_t status;
-    mAudioTrack->setParameters(param.toString().c_str(), &status);
+    mAudioTrack->selectPresentation(presentationId, programId, &status);
     return status;
 }
 
@@ -3483,8 +3549,8 @@ status_t AudioTrack::dump(int fd, const Vector<String16>& args __unused) const
     result.appendFormat("  stream type(%d), left - right volume(%f, %f)\n",
                             mStreamType,
                         mVolume[AUDIO_INTERLEAVE_LEFT], mVolume[AUDIO_INTERLEAVE_RIGHT]);
-    result.appendFormat("  format(%#x), channel mask(%#x), channel count(%u)\n",
-                  mFormat, mChannelMask, mChannelCount);
+    result.appendFormat("  format(%#x), channel mask(%#x), channel count(%u), codec(%s)\n",
+                  mFormat, mChannelMask, mChannelCount, mCodecProvenance.c_str());
     result.appendFormat("  sample rate(%u), original sample rate(%u), speed(%f)\n",
                   mSampleRate, mOriginalSampleRate, mPlaybackRate.mSpeed);
     result.appendFormat("  frame count(%zu), req. frame count(%zu)\n",
@@ -3514,7 +3580,7 @@ uint32_t AudioTrack::getUnderrunCount_l() const
 uint32_t AudioTrack::getUnderrunFrames() const
 {
     AutoMutex lock(mLock);
-    return mProxy->getUnderrunFrames();
+    return mProxy == nullptr ? 0 : mProxy->getUnderrunFrames();
 }
 
 void AudioTrack::setLogSessionId(const char *logSessionId)

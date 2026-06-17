@@ -17,12 +17,14 @@
 
 #define LOG_TAG "AAudioStreamParameters"
 
-#include <android-base/strings.h>
-#include <utils/Log.h>
-#include <system/audio.h>
-#include <system/aaudio/AAudio.h>
-
 #include "AAudioStreamParameters.h"
+
+// go/keep-sorted start
+#include <android-base/strings.h>
+#include <system/aaudio/AAudio.h>
+#include <system/audio.h>
+#include <utils/Log.h>
+// go/keep-sorted end
 
 using namespace aaudio;
 
@@ -50,6 +52,8 @@ void AAudioStreamParameters::copyFrom(const AAudioStreamParameters &other) {
     mHardwareSampleRate   = other.mHardwareSampleRate;
     mHardwareAudioFormat  = other.mHardwareAudioFormat;
     mPerformanceMode      = other.mPerformanceMode;
+    mPortHandle           = other.mPortHandle;
+    mIoHandle             = other.mIoHandle;
 }
 
 static aaudio_result_t isFormatValid(audio_format_t format) {
@@ -361,4 +365,6 @@ void AAudioStreamParameters::dump() const {
     ALOGD("mHardwareSampleRate   = %6d", mHardwareSampleRate);
     ALOGD("mHardwareAudioFormat  = %6d", (int)mHardwareAudioFormat);
     ALOGD("mPerformanceMode      = %6d", (int)mPerformanceMode);
+    ALOGD("mPortHandle           = %6d", (int)mPortHandle);
+    ALOGD("mIoHandle             = %6d", (int)mIoHandle);
 }

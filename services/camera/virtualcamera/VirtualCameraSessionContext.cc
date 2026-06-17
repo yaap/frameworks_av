@@ -27,11 +27,17 @@ namespace android {
 namespace companion {
 namespace virtualcamera {
 
-using ::aidl::android::companion::virtualcamera::ICaptureResultConsumer;
 using ::aidl::android::hardware::camera::device::BufferCache;
 using ::aidl::android::hardware::camera::device::Stream;
 using ::aidl::android::hardware::camera::device::StreamBuffer;
 using ::aidl::android::hardware::camera::device::StreamConfiguration;
+
+VirtualCameraSessionContext::VirtualCameraSessionContext(
+    const bool isMultiInputStreamEnabled,
+    std::function<void()> onFatalErrorCallback)
+    : mIsMultiInputStreamEnabled(isMultiInputStreamEnabled),
+      mOnFatalErrorCallback(onFatalErrorCallback) {
+}
 
 bool VirtualCameraSessionContext::initializeStream(
     const ::aidl::android::hardware::camera::device::Stream& stream) {
@@ -45,7 +51,8 @@ bool VirtualCameraSessionContext::initializeStream(
   return newlyInserted;
 }
 
-void VirtualCameraSessionContext::closeAllStreams() {
+void VirtualCameraSessionContext::clearStreams() {
+  ALOGV("%s", __func__);
   std::lock_guard<std::mutex> lock(mLock);
   mStreams.clear();
 }
@@ -185,11 +192,84 @@ void VirtualCameraSessionContext::setCaptureResultConsumer(
 const camera_metadata_t*
 VirtualCameraSessionContext::getCaptureResultMetadataForTimestamp(
     int64_t timestamp) {
-  std::lock_guard<std::mutex> lock(mLock);
-  if (mCaptureResultConsumer == nullptr) {
+  std::shared_ptr<VirtualCameraCaptureResultConsumer> consumer =
+      getCaptureResultConsumer();
+  if (consumer == nullptr) {
     return nullptr;
   }
-  return mCaptureResultConsumer->getCaptureResultMetadataForTimestamp(timestamp);
+  // don't lock when getting the capture result metadata for timestamp
+  return consumer->getCaptureResultMetadataForTimestamp(timestamp);
+}
+
+int VirtualCameraSessionContext::getInputStreamIdForOutputStreamId(
+    int streamId) const {
+  std::lock_guard<std::mutex> lock(mLock);
+  auto it = mOutputToInputStreamMap.find(streamId);
+  if (it == mOutputToInputStreamMap.end()) {
+    ALOGE("%s: output StreamId %d not found in map", __func__, streamId);
+    return kInvalidStreamId;
+  }
+  return it->second;
+}
+
+void VirtualCameraSessionContext::enqueueFrame(int frameId) {
+  std::lock_guard<std::mutex> lock(mLock);
+  mFrameQueue.insert(frameId);
+}
+
+bool VirtualCameraSessionContext::dequeueFrame(int frameId) {
+  std::lock_guard<std::mutex> lock(mLock);
+  auto it = mFrameQueue.find(frameId);
+  bool isQueued = it != mFrameQueue.end();
+  if (isQueued) {
+    mFrameQueue.erase(it);
+  }
+  return isQueued;
+}
+
+std::set<int> VirtualCameraSessionContext::updateOpenStreams(
+    const std::map<int, int> openStreams) {
+  std::lock_guard<std::mutex> lock(mLock);
+  std::set<int> staleStreams;
+
+  for (const auto& [outputStreamId, inputStreamId] : mOutputToInputStreamMap) {
+    if (openStreams.find(outputStreamId) == openStreams.end()) {
+      staleStreams.insert(inputStreamId);
+    }
+  }
+  mOutputToInputStreamMap = openStreams;
+  return staleStreams;
+}
+
+bool VirtualCameraSessionContext::isInputStreamUsed(int inputStreamId) const {
+  std::lock_guard<std::mutex> lock(mLock);
+  for (const auto& [outputId, inputId] : mOutputToInputStreamMap) {
+    if (inputStreamId == inputId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::set<int> VirtualCameraSessionContext::getUsedInputStreamIds() const {
+  std::lock_guard<std::mutex> lock(mLock);
+  std::set<int> usedIds;
+  for (const auto& [_, inputStreamId] : mOutputToInputStreamMap) {
+    usedIds.insert(inputStreamId);
+  }
+  return usedIds;
+}
+
+bool VirtualCameraSessionContext::setFatalError() {
+  bool wasAlreadyFatal = mInFatalError.exchange(true);
+  if (wasAlreadyFatal) {
+    return false;
+  }
+
+  if (mOnFatalErrorCallback) {
+    mOnFatalErrorCallback();
+  }
+  return true;
 }
 
 }  // namespace virtualcamera

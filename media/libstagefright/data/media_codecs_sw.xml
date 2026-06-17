@@ -43,6 +43,12 @@
             <Limit name="bitrate" range="6600-23850" />
             <Attribute name="software-codec" />
         </MediaCodec>
+        <MediaCodec name="c2.android.inproc.aac.decoder" type="audio/mp4a-latm" rank="255">
+            <Limit name="channel-count" max="8" />
+            <Limit name="sample-rate" ranges="7350,8000,11025,12000,16000,22050,24000,32000,44100,48000" />
+            <Limit name="bitrate" range="8000-960000" />
+            <Attribute name="software-codec" />
+        </MediaCodec>
         <MediaCodec name="c2.android.aac.decoder" type="audio/mp4a-latm">
             <Alias name="OMX.google.aac.decoder" />
             <Limit name="channel-count" max="8" />
@@ -78,6 +84,17 @@
             <Limit name="bitrate" range="6000-510000" />
             <Attribute name="software-codec" />
         </MediaCodec>
+        <MediaCodec name="c2.android.inproc.opus.decoder" type="audio/opus">
+            <!-- This codec has the following restrictions:
+              * The OS version must be C or later.
+              * The device ABI must be arm64-v8a.
+              * The process must be 64-bit.
+              Otherwise the decoder will not appear in the list of codecs. -->
+            <Limit name="channel-count" max="8" />
+            <Limit name="sample-rate" ranges="8000,12000,16000,24000,48000" />
+            <Limit name="bitrate" range="6000-510000" />
+            <Attribute name="software-codec" />
+        </MediaCodec>
         <MediaCodec name="c2.android.raw.decoder" type="audio/raw">
             <Alias name="OMX.google.raw.decoder" />
             <Limit name="channel-count" max="12" />
@@ -99,7 +116,7 @@
             <Limit name="bitrate" range="13000" />
             <Attribute name="software-codec" />
         </MediaCodec>
-        <MediaCodec name="c2.android.iamf.decoder" type="audio/iamf" minsdk="36" variant="!slow-cpu">
+        <MediaCodec name="c2.android.iamf.decoder" type="audio/iamf" minsdk="36">
             <!-- IAMF v1.0 (Simple and Base profiles) support up to 18 input channels.
                  See https://aomediacodec.github.io/iamf/v1.0.0-errata.html#syntax-layout. -->
             <Limit name="channel-count" max="18" />
@@ -288,6 +305,15 @@
             <Limit name="bitrate" range="8000-960000" />
             <Attribute name="software-codec" />
         </MediaCodec>
+        <MediaCodec name="c2.android.xheaac.encoder" type="audio/mp4a-latm" rank="255">
+            <Limit name="channel-count" max="2" />
+            <Limit name="sample-rate" ranges="16000,22050,24000,32000,44100,48000" />
+            <!-- also may support 64000, 88200  and 96000 Hz -->
+            <Limit name="bitrate" range="12000-320000" />
+            <Limit name="quality" range="0-6"  default="3" />
+            <Feature name="bitrate-modes" value="CBR,VBR" />
+            <Attribute name="software-codec" />
+        </MediaCodec>
         <MediaCodec name="c2.android.amrnb.encoder" type="audio/3gpp">
             <Alias name="OMX.google.amrnb.encoder" />
             <Limit name="channel-count" max="1" />
@@ -438,7 +464,8 @@
             <Limit name="block-size" value="16x16" />
             <Limit name="block-count" range="1-32768" /> <!-- max 4096x2048 equivalent -->
             <Limit name="bitrate" range="1-240000000" />
-            <Feature name="bitrate-modes" value="VBR" />
+            <Limit name="quality" range="0-100"  default="90" />
+            <Feature name="bitrate-modes" value="VBR,CQ" />
             <Attribute name="software-codec" />
         </MediaCodec>
     </Encoders>

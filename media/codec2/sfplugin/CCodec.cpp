@@ -68,8 +68,6 @@
 #include "Codec2Mapper.h"
 #include "InputSurfaceWrapper.h"
 
-extern "C" android::PersistentSurface *CreateInputSurface();
-
 namespace android {
 
 using namespace std::chrono_literals;
@@ -1226,7 +1224,7 @@ private:
 
 CCodec::CCodec()
     : mChannel(new CCodecBufferChannel(std::make_shared<CCodecCallbackImpl>(this))),
-      mConfig(new CCodecConfig) {
+      mConfig(new CCodecConfig), mReleaseCompleted(false) {
 }
 
 CCodec::~CCodec() {
@@ -1297,6 +1295,9 @@ void CCodec::allocate(const sp<MediaCodecInfo> &codecInfo) {
         Mutexed<State>::Locked state(mState);
         state->set(RELEASED);
         state.unlock();
+        // TODO: Mapping c2_status_t to status_t could help with more descriptive error code here.
+        // mCallback->onError(toStatusT(status, C2_OPERATION_ComponentStore_createComponent),
+        //                    ACTION_CODE_FATAL);
         mCallback->onError((status == C2_NO_MEMORY ? NO_MEMORY : UNKNOWN_ERROR), ACTION_CODE_FATAL);
         state.lock();
         return;
@@ -1328,10 +1329,8 @@ void CCodec::allocate(const sp<MediaCodecInfo> &codecInfo) {
     }
     config->queryConfiguration(comp);
 
-    if (android::media::codec::codec_availability_support()) {
-        std::string storeName = mClient->getServiceName();
-        mCodecResources = std::make_unique<CCodecResources>(storeName);
-    }
+    std::string storeName = mClient->getServiceName();
+    mCodecResources = std::make_unique<CCodecResources>(storeName);
 
     mCallback->onComponentAllocated(componentName.c_str());
 }
@@ -2163,8 +2162,8 @@ sp<PersistentSurface> CCodec::CreateOmxInputSurface() {
     return nullptr;
 }
 
-sp<PersistentSurface> CCodec::CreateCompatibleInputSurface() {
-    sp<PersistentSurface> surface(CreateInputSurface());
+sp<PersistentSurface> CCodec::createCompatibleInputSurface() {
+    sp<PersistentSurface> surface(CreateInputSurface(mClient));
 
     if (surface == nullptr) {
         surface = CreateOmxInputSurface();
@@ -2186,7 +2185,7 @@ void CCodec::createInputSurface() {
         usage = config->mISConfig ? config->mISConfig->mUsage : 0;
     }
 
-    sp<PersistentSurface> persistentSurface = CreateCompatibleInputSurface();
+    sp<PersistentSurface> persistentSurface = createCompatibleInputSurface();
     PersistentSurface::SurfaceType surfaceType = persistentSurface->getType();
     if (surfaceType == PersistentSurface::TYPE_AIDLSOURCE) {
         ::ndk::SpAIBinder aidlTarget = persistentSurface->getAidlTarget();
@@ -2658,12 +2657,20 @@ void CCodec::initiateRelease(bool sendCallback /* = true */) {
     mChannel->reset();
     bool pushBlankBuffer = mConfig.lock().get()->mPushBlankBuffersOnStop;
     // thiz holds strong ref to this while the thread is running.
+    // thiz holds codecLooper to extend lifecycle of the ALooper until thiz finishes.
+    // (If not, codecLooper will be destroyed after MediaCodec is gone after
+    // async release.)
     sp<CCodec> thiz(this);
-    std::thread([thiz, sendCallback, pushBlankBuffer]
-                { thiz->release(sendCallback, pushBlankBuffer); }).detach();
+    sp<ALooper> codecLooper = this->looper();
+    std::thread([thiz, sendCallback, pushBlankBuffer, codecLooper]
+                { thiz->release(sendCallback, pushBlankBuffer, codecLooper); }).detach();
 }
 
-void CCodec::release(bool sendCallback, bool pushBlankBuffer) {
+void CCodec::release(bool sendCallback, bool pushBlankBuffer, sp<ALooper> codecLooper) {
+    // keep codecLooper active during the release, and prevent
+    // codecLooper destruction from elsewhere of CCodec.
+    sp<ALooper> releaseLooper = codecLooper;
+    ALOGD("hold CodecLooper(%d) until release", bool(releaseLooper));
     std::shared_ptr<Codec2Client::Component> comp;
     {
         Mutexed<State>::Locked state(mState);
@@ -2709,6 +2716,11 @@ void CCodec::release(bool sendCallback, bool pushBlankBuffer) {
     (new AMessage(kWhatRelease, this))->post();
     if (sendCallback) {
         mCallback->onReleaseCompleted();
+    }
+    {
+        // No more onWorkDone() from here.
+        Mutexed<std::list<std::unique_ptr<C2Work>>>::Locked queue(mWorkDoneQueue);
+        mReleaseCompleted = true;
     }
 }
 
@@ -3067,10 +3079,17 @@ std::vector<InstanceResourceInfo> CCodec::getRequiredSystemResources() {
 void CCodec::onWorkDone(std::list<std::unique_ptr<C2Work>> &workItems) {
     if (!workItems.empty()) {
         Mutexed<std::list<std::unique_ptr<C2Work>>>::Locked queue(mWorkDoneQueue);
+        // Note: We don't want to destroy CodecLooper here.
+        // creation of AMessage may create an active reference of
+        // CodecLooper, which can be destoyed here if it becomes the
+        // only active reference after the work.
+        if (mReleaseCompleted) {
+            return;
+        }
         bool shouldPost = queue->empty();
         queue->splice(queue->end(), workItems);
         if (shouldPost) {
-            (new AMessage(kWhatWorkDone, this))->post();
+            sp<AMessage>::make(kWhatWorkDone, this)->post();
         }
     }
 }
@@ -3187,7 +3206,7 @@ void CCodec::onMessageReceived(const sp<AMessage> &msg) {
                         updates.push_back(C2Param::Copy(*param));
                     }
                     // Check for change in resources required.
-                    if (!updates.empty() && android::media::codec::codec_availability_support()) {
+                    if (!updates.empty()) {
                         for (const std::unique_ptr<C2Param>& param : updates) {
                             if (param->index() == C2ResourcesNeededTuning::PARAM_TYPE) {
                                 // Update the required resources.
@@ -3404,10 +3423,17 @@ void CCodec::initiateReleaseIfStuck() {
 }
 
 // static
-PersistentSurface *CCodec::CreateInputSurface() {
+PersistentSurface *CCodec::CreateInputSurface(const std::shared_ptr<Codec2Client> &client) {
     using namespace android;
-    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
-            Codec2Client::CreateInputSurface();
+    std::shared_ptr<Codec2Client::InputSurface> inputSurface;
+    if (!client) {
+        inputSurface = Codec2Client::CreateInputSurface();
+    } else {
+        c2_status_t res = client->createInputSurface(&inputSurface);
+        if (res != C2_OK && res != C2_OMITTED) {
+            ALOGE("creating InputSurface from client failed %d", res);
+        }
+    }
     if (inputSurface) {
         ::ndk::SpAIBinder interface = inputSurface->getHalInterface();
         ANativeWindow *window = inputSurface->getNativeWindow();
@@ -3817,11 +3843,7 @@ std::shared_ptr<C2GraphicBlock> CCodec::FetchGraphicBlock(
 
 //static
 std::vector<GlobalResourceInfo> CCodec::GetGloballyAvailableResources() {
-    if (android::media::codec::codec_availability_support()) {
-        return CCodecResources::GetGloballyAvailableResources();
-    }
-
-    return std::vector<GlobalResourceInfo>{};
+    return CCodecResources::GetGloballyAvailableResources();
 }
 
 }  // namespace android

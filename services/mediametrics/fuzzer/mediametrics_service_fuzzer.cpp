@@ -23,6 +23,8 @@
 #include <mediametricsservice/AudioTypes.h>
 #include <mediametricsservice/MediaMetricsService.h>
 #include <mediametricsservice/StringUtils.h>
+#include <private/android_filesystem_config.h> // AID_SYSTEM
+
 #include <stdio.h>
 #include <string.h>
 #include <utils/Log.h>
@@ -163,7 +165,7 @@ void MediaMetricsServiceFuzzer::invokeStartsWith() {
 
 void MediaMetricsServiceFuzzer::invokeInstantiate() {
     auto item = CreateItem();
-    mMediaMetricsService->submit(item.get());
+    mMediaMetricsService->submitInternal(item);
 }
 
 void MediaMetricsServiceFuzzer::invokePackageInstallerCheck() {

@@ -29,6 +29,9 @@
 #include <media/PatchBuilder.h>
 #include <utils/Log.h>
 
+#include <sstream>
+#include <string>
+
 // ----------------------------------------------------------------------------
 
 // Note: the following macro is used for extremely verbose logging message.  In
@@ -106,6 +109,38 @@ status_t PatchPanel::getAudioPort_l(struct audio_port_v7* port)
         return INVALID_OPERATION;
     }
     return hwDevice->getAudioPort(port);
+}
+
+static std::string patchToStr(const struct audio_patch& patch, audio_patch_handle_t id) {
+    std::stringstream result;
+    result << "patch " << id << " srcs";
+    for (unsigned int i = 0; i < patch.num_sources; ++i) {
+        const struct audio_port_config &port = patch.sources[i];
+        result << " {";
+        if (port.type == AUDIO_PORT_TYPE_DEVICE) {
+            result << "dev 0x" << std::hex << port.ext.device.type << std::dec;
+        } else if (port.type == AUDIO_PORT_TYPE_MIX) {
+            result << "mix " << port.ext.mix.handle;
+        } else {
+            result << "type " << port.type;
+        }
+        result << " id " << port.id << "}";
+    }
+
+    result << " sinks";
+    for (unsigned int i = 0; i < patch.num_sinks; ++i) {
+        const struct audio_port_config &port = patch.sinks[i];
+        result << " {";
+        if (port.type == AUDIO_PORT_TYPE_DEVICE) {
+            result << "dev 0x" << std::hex << port.ext.device.type << std::dec;
+        } else if (port.type == AUDIO_PORT_TYPE_MIX) {
+            result << "mix " << port.ext.mix.handle;
+        } else {
+            result << "type " << port.type;
+        }
+        result << " id " << port.id << "}";
+    }
+    return result.str();
 }
 
 /* Connect a patch between several source and sink ports */
@@ -270,7 +305,8 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
                                                             &flags,
                                                             attributes,
                                                             0 /*mixPortHalId*/);
-                    ALOGV("mAfPatchPanelCallback->openOutput_l() returned %p", thread.get());
+                    ALOGV("%s, mAfPatchPanelCallback->openOutput_l() returned %p",
+                          __func__, thread.get());
                     if (thread == 0) {
                         status = NO_MEMORY;
                         goto exit;
@@ -279,53 +315,60 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
                 }
                 audio_devices_t device = patch->sources[0].ext.device.type;
                 String8 address = String8(patch->sources[0].ext.device.address);
-                audio_config_t config = AUDIO_CONFIG_INITIALIZER;
-                // open input stream with source device audio properties if provided or
-                // default to peer output stream properties otherwise.
-                if (patch->sources[0].config_mask & AUDIO_PORT_CONFIG_SAMPLE_RATE) {
-                    config.sample_rate = patch->sources[0].sample_rate;
-                } else {
-                    config.sample_rate = newPatch.mPlayback.thread()->sampleRate();
+
+                sp<IAfThreadBase> thread =
+                        mAfPatchPanelCallback->getRecordThreadForDevice_l(device, address);
+                bool closeThread = false;
+                if (thread == nullptr) {
+                    audio_config_t config = AUDIO_CONFIG_INITIALIZER;
+                    // open input stream with source device audio properties if provided or
+                    // default to peer output stream properties otherwise.
+                    if (patch->sources[0].config_mask & AUDIO_PORT_CONFIG_SAMPLE_RATE) {
+                        config.sample_rate = patch->sources[0].sample_rate;
+                    } else {
+                        config.sample_rate = newPatch.mPlayback.thread()->sampleRate();
+                    }
+                    if (patch->sources[0].config_mask & AUDIO_PORT_CONFIG_CHANNEL_MASK) {
+                        config.channel_mask = patch->sources[0].channel_mask;
+                    } else {
+                        config.channel_mask = audio_channel_in_mask_from_count(
+                                newPatch.mPlayback.thread()->channelCount());
+                    }
+                    if (patch->sources[0].config_mask & AUDIO_PORT_CONFIG_FORMAT) {
+                        config.format = patch->sources[0].format;
+                    } else {
+                        config.format = newPatch.mPlayback.thread()->format();
+                    }
+                    audio_input_flags_t flags =
+                            patch->sources[0].config_mask & AUDIO_PORT_CONFIG_FLAGS ?
+                            patch->sources[0].flags.input : AUDIO_INPUT_FLAG_NONE;
+                    audio_io_handle_t input = AUDIO_IO_HANDLE_NONE;
+                    audio_source_t source = AUDIO_SOURCE_MIC;
+                    // For telephony patches, propagate voice communication use case to record side
+                    if (patch->num_sources == 2
+                            && patch->sources[1].ext.mix.usecase.stream
+                                    == AUDIO_STREAM_VOICE_CALL) {
+                        source = AUDIO_SOURCE_VOICE_COMMUNICATION;
+                    }
+                    thread = mAfPatchPanelCallback->openInput_l(srcModule,
+                                                                        &input,
+                                                                        &config,
+                                                                        device,
+                                                                        address,
+                                                                        source,
+                                                                        flags,
+                                                                        outputDevice,
+                                                                        outputDeviceAddress,
+                                                                        0 /*mixPortHalId*/);
+                    ALOGV("%s mAfPatchPanelCallback->openInput_l() returned %p inChannelMask %08x",
+                          __func__, thread.get(), config.channel_mask);
+                    if (thread == 0) {
+                        status = NO_MEMORY;
+                        goto exit;
+                    }
+                    closeThread = true;
                 }
-                if (patch->sources[0].config_mask & AUDIO_PORT_CONFIG_CHANNEL_MASK) {
-                    config.channel_mask = patch->sources[0].channel_mask;
-                } else {
-                    config.channel_mask = audio_channel_in_mask_from_count(
-                            newPatch.mPlayback.thread()->channelCount());
-                }
-                if (patch->sources[0].config_mask & AUDIO_PORT_CONFIG_FORMAT) {
-                    config.format = patch->sources[0].format;
-                } else {
-                    config.format = newPatch.mPlayback.thread()->format();
-                }
-                audio_input_flags_t flags =
-                        patch->sources[0].config_mask & AUDIO_PORT_CONFIG_FLAGS ?
-                        patch->sources[0].flags.input : AUDIO_INPUT_FLAG_NONE;
-                audio_io_handle_t input = AUDIO_IO_HANDLE_NONE;
-                audio_source_t source = AUDIO_SOURCE_MIC;
-                // For telephony patches, propagate voice communication use case to record side
-                if (patch->num_sources == 2
-                        && patch->sources[1].ext.mix.usecase.stream
-                                == AUDIO_STREAM_VOICE_CALL) {
-                    source = AUDIO_SOURCE_VOICE_COMMUNICATION;
-                }
-                const sp<IAfThreadBase> thread = mAfPatchPanelCallback->openInput_l(srcModule,
-                                                                    &input,
-                                                                    &config,
-                                                                    device,
-                                                                    address,
-                                                                    source,
-                                                                    flags,
-                                                                    outputDevice,
-                                                                    outputDeviceAddress,
-                                                                    0 /*mixPortHalId*/);
-                ALOGV("mAfPatchPanelCallback->openInput_l() returned %p inChannelMask %08x",
-                      thread.get(), config.channel_mask);
-                if (thread == 0) {
-                    status = NO_MEMORY;
-                    goto exit;
-                }
-                newPatch.mRecord.setThread(thread->asIAfRecordThread().get());
+                newPatch.mRecord.setThread(thread->asIAfRecordThread().get(), closeThread);
                 status = newPatch.createConnections_l(this);
                 if (status != NO_ERROR) {
                     goto exit;
@@ -418,6 +461,7 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
 
             // For endpoint patches, we do not need to re-evaluate the device effect state
             // if the same HAL patch is reused (see calls to mAfPatchPanelCallback below)
+            audio_patch_handle_t reusedHandle{AUDIO_PATCH_HANDLE_NONE};
             if (endpointPatch) {
                 for (auto& p : mPatches) {
                     // end point patches are skipped so we do not compare against this patch
@@ -425,6 +469,7 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
                             newPatch.mAudioPatch, p.second.mAudioPatch)) {
                         ALOGV("%s() Sw Bridge endpoint reusing halHandle=%d", __func__,
                               p.second.mHalHandle);
+                        reusedHandle = p.first;
                         halHandle = p.second.mHalHandle;
                         reuseExistingHalPatch = true;
                         break;
@@ -437,6 +482,10 @@ status_t PatchPanel::createAudioPatch_l(const struct audio_patch* patch,
             mAfPatchPanelCallback->mutex().lock();
             if (status == NO_ERROR) {
                 newPatch.setThread(thread);
+
+                if (reusedHandle != AUDIO_PATCH_HANDLE_NONE) {
+                    erasePatch(reusedHandle, reuseExistingHalPatch);
+                }
             }
 
             // remove stale audio patch with same output as source if any
@@ -462,6 +511,17 @@ exit:
         *handle = static_cast<audio_patch_handle_t>(
                 mAfPatchPanelCallback->nextUniqueId(AUDIO_UNIQUE_ID_USE_PATCH));
         newPatch.mHalHandle = halHandle;
+
+        const char* halAction = "none";
+        if (!(newPatch.isSoftware() || (endpointPatch && reuseExistingHalPatch))) {
+            if (reuseExistingHalPatch) {
+                halAction = "update";
+            } else {
+                halAction = "create";
+            }
+        }
+        mEvents.log("add %s hal %s", patchToStr(newPatch.mAudioPatch, *handle).c_str(), halAction);
+
         // Skip device effect:
         //  -for sw bridge as effect are likely held by endpoint patches
         //  -for endpoint reusing a HalPatch handle
@@ -640,7 +700,10 @@ status_t PatchPanel::Patch::createConnections_l(const sp<IAfPatchPanel>& panel)
     // Disable this behavior for FM Tuner source if no fast capture/mixer available.
     const bool isFmBridge = mAudioPatch.sources[0].ext.device.type == AUDIO_DEVICE_IN_FM_TUNER;
     const size_t frameCountToBeReady = isFmBridge && !usePassthruPatchRecord ? frameCount / 4 : 1;
-    sp<IAfPatchTrack> tempPatchTrack = IAfPatchTrack::create(
+    sp<IAfPatchTrack> tempPatchTrack;
+    {
+        audio_utils::lock_guard l{mPlayback.thread()->mutex()};
+        tempPatchTrack = IAfPatchTrack::create(
                                            mPlayback.thread().get(),
                                            streamType,
                                            sampleRate,
@@ -650,9 +713,11 @@ status_t PatchPanel::Patch::createConnections_l(const sp<IAfPatchPanel>& panel)
                                            tempRecordTrack->buffer(),
                                            tempRecordTrack->bufferSize(),
                                            outputFlags,
+                                           mAudioPatch.sources[0].id,
                                            {} /*timeout*/,
                                            frameCountToBeReady,
                                            1.0f /*speed*/);
+    }
     status = mPlayback.checkTrack(tempPatchTrack.get());
     if (status != NO_ERROR) {
         return status;
@@ -681,9 +746,13 @@ void PatchPanel::Patch::clearConnections_l(const sp<IAfPatchPanel>& panel)
             __func__, mRecord.handle(), mPlayback.handle());
     mRecord.stopTrack();
     mPlayback.stopTrack();
-    mRecord.clearTrackPeer(); // mRecord stop is synchronous. Break PeerProxy sp<> cycle.
     mRecord.closeConnections_l(panel);
     mPlayback.closeConnections_l(panel);
+    // Break PeerProxy sp<> cycle.
+    // Must be called after mRecord.closeConnections_l() to make sure the fast capture
+    // track if any is not active any more.
+    mRecord.clearTrackPeer();
+
 }
 
 status_t PatchPanel::Patch::getLatencyMs(double* latencyMs) const
@@ -864,7 +933,10 @@ status_t PatchPanel::releaseAudioPatch_l(audio_patch_handle_t handle)
             status = BAD_VALUE;
     }
 
-    erasePatch(handle, /* reuseExistingHalPatch= */ !doReleasePatch || isSwBridge);
+    std::string patchStr = patchToStr(removedPatch.mAudioPatch, handle);
+    const bool reuse = !doReleasePatch || isSwBridge;
+    erasePatch(handle, reuse);
+    mEvents.log("del %s reused %s", patchStr.c_str(), reuse ? "true" : "false");
     return status;
 }
 
@@ -1007,6 +1079,7 @@ void PatchPanel::dump(int fd) const
     if (!patchPanelDump.empty()) {
         write(fd, patchPanelDump.c_str(), patchPanelDump.size());
     }
+    mEvents.dump(fd, "  " /* prefix */);
 }
 
 } // namespace android

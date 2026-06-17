@@ -122,7 +122,7 @@ status_t Camera2ClientBase<TClientBase>::initializeImpl(TProviderPtr providerPtr
                             mLegacyClient);
             break;
         case IPCTransport::AIDL:
-            if (flags::camera_multi_client() && TClientBase::mSharedMode) {
+            if (TClientBase::mSharedMode) {
                 mDevice = AidlCamera3SharedDevice::getInstance(mCameraServiceProxyWrapper,
                             TClientBase::mAttributionAndPermissionUtils,
                             TClientBase::mCameraIdStr, mOverrideForPerfClass,
@@ -178,7 +178,7 @@ template <typename TClientBase>
 Camera2ClientBase<TClientBase>::~Camera2ClientBase() {
     ATRACE_CALL();
 
-    if (!flags::camera_multi_client() || !TClientBase::mDisconnected) {
+    if (!TClientBase::mDisconnected) {
         TClientBase::mDestructionStarted = true;
         disconnect();
     }
@@ -269,7 +269,7 @@ status_t Camera2ClientBase<TClientBase>::dumpDevice(
 template <typename TClientBase>
 binder::Status Camera2ClientBase<TClientBase>::disconnect() {
 
-   if (!flags::camera_multi_client() || !TClientBase::mDisconnected) {
+   if ( !TClientBase::mDisconnected) {
        return disconnectImpl();
    }
    return binder::Status::ok();
@@ -310,8 +310,8 @@ binder::Status Camera2ClientBase<TClientBase>::disconnectImpl() {
 template <typename TClientBase>
 void Camera2ClientBase<TClientBase>::detachDevice() {
     if (mDevice == 0) return;
-    if (flags::camera_multi_client() && TClientBase::mSharedMode) {
-        mDevice->disconnectClient(TClientBase::getClientCallingPid());
+    if (TClientBase::mSharedMode) {
+        mDevice->disconnectClient(mInitialClientPid);
     } else {
         mDevice->disconnect();
     }
@@ -373,20 +373,28 @@ void Camera2ClientBase<TClientBase>::notifyPhysicalCameraChange(const std::strin
 
     auto physicalCameraMetadata = mDevice->infoPhysical(physicalId);
     auto orientationEntry = physicalCameraMetadata.find(ANDROID_SENSOR_ORIENTATION);
-
     if (orientationEntry.count == 1) {
+        int orientation = orientationEntry.data.i32[0];
         int rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_NONE;
         std::optional<ui::Rotation> rotateAndCropRotation = TClientBase::mCompatInfo
                 .getRotateAndCropRotation();
-        if (rotateAndCropRotation.has_value() && rotateAndCropRotation.value() == ui::ROTATION_90) {
-            rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_90;
-        } else if (rotateAndCropRotation.has_value() && rotateAndCropRotation.value() ==
-                ui::ROTATION_270) {
-            rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_270;
+        bool sensorOrientationLandscape = orientation == 0 || orientation == 180;
+        // Check for static orientation override.
+        // TODO(b/483776201): check sensor orientation before populating CameraCompatibilityInfo.
+        //  This discrepancy only happens with static rotate-and-crop
+        //  (camera.enable_landscape_to_portrait).
+        if (TClientBase::mCompatInfo.shouldOverrideSensorOrientation()
+                == sensorOrientationLandscape) {
+            if (rotateAndCropRotation.has_value() &&
+                rotateAndCropRotation.value() == ui::ROTATION_90) {
+                rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_90;
+            } else if (rotateAndCropRotation.has_value() && rotateAndCropRotation.value() ==
+                                                            ui::ROTATION_270) {
+                rotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_270;
+            }
         }
-
         static_cast<TClientBase *>(this)->setRotateAndCropOverride(rotateAndCropMode,
-                                                                   /*fromHal*/ true);
+                /*fromHal*/ true);
     }
 }
 
@@ -413,7 +421,7 @@ void Camera2ClientBase<TClientBase>::notifyIdleWithUserTag(
         std::pair<int32_t, int32_t> mostRequestedFpsRange,
         const std::vector<hardware::CameraStreamStats>& streamStats,
         const std::string& userTag, int videoStabilizationMode, bool usedUltraWide,
-        bool usedZoomOverride) {
+        bool usedZoomOverride, int32_t errorState) {
     if (mDeviceActive) {
         status_t res = TClientBase::finishCameraStreamingOps();
         if (res != OK) {
@@ -422,7 +430,7 @@ void Camera2ClientBase<TClientBase>::notifyIdleWithUserTag(
         }
         mCameraServiceProxyWrapper->logIdle(TClientBase::mCameraIdStr,
                 requestCount, resultErrorCount, deviceError, userTag, videoStabilizationMode,
-                usedUltraWide, usedZoomOverride, mostRequestedFpsRange, streamStats);
+                usedUltraWide, usedZoomOverride, mostRequestedFpsRange, streamStats, errorState);
     }
     mDeviceActive = false;
 

@@ -140,6 +140,12 @@ struct ResourceList {
     // Converts resource list into string format
     std::string toString() const;
 
+    // Assign/Set a new values for ResourceList.
+    // This will overwrite the earlier values, if there were any.
+    void set(const std::vector<::aidl::android::media::MediaResourceParcel>& resourceList) {
+        mResourceList = resourceList;
+    }
+
     // BEGIN: Test only function
     // Check if two resource lists are the same.
     bool operator==(const ResourceList& rhs) const;
@@ -264,10 +270,43 @@ ResourceInfo& getResourceInfoForEdit(
 void mergeResources(::aidl::android::media::MediaResourceParcel& r1,
                     const ::aidl::android::media::MediaResourceParcel& r2);
 
+/**
+ * @brief Calculates the difference (delta) between two vectors of resources.
+ *
+ * This function subtracts the amount of each resource in resourcesWhat from the amount
+ * of the matching resource in resourcesFrom.
+ * Resources unique to resourcesFrom retain their amount.
+ * Resources unique to resourcesWhat are included with a negated amount.
+ *
+ * @param resourcesFrom The base vector (Minuend).
+ * @param resourcesWhat The vector to subtract (Subtrahend).
+ * @return std::vector<MediaResourceParcel> The resultant vector containing the difference (Delta).
+ */
+std::vector<::aidl::android::media::MediaResourceParcel> calculateResourceDifference(
+        const std::vector<::aidl::android::media::MediaResourceParcel>& resourcesFrom,
+        const std::vector<::aidl::android::media::MediaResourceParcel>& resourcesWhat);
+
 // To notify the media_resource_monitor about the resource being granted.
 void notifyResourceGranted(
         int pid,
         const std::vector<::aidl::android::media::MediaResourceParcel>& resources);
+
+/**
+ * Converts vector of MediaResourceParcel into string with list of (ID, Value) pair.
+ * The converted string format is as below:
+ * { [ID_1 : Value_1] [ID_2 : Value_2] ... [ID_n : Value_n]}
+ * eg. { [4096 : 92] [4097 : 127] [4098 : 118] [4099 : 114] [4100 : 87] }
+ *
+ * And also to limit the size of the converted string, it only includes first
+ * "maxElements" from the input vector.
+ * This limit is enforces to ensure that the size of the string format has a limit.
+ * For example: Since this can be passed to Metric Atom, which should be less than 4KB.
+ * Also, this is logged through ALOGX too.
+ */
+constexpr size_t kMaxElements = 50;
+
+std::string toString(const std::vector<::aidl::android::media::MediaResourceParcel>& resources,
+                     size_t maxElements = kMaxElements);
 
 } // namespace android
 

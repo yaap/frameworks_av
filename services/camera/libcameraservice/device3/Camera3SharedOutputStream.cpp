@@ -18,11 +18,14 @@
 #define ATRACE_TAG ATRACE_TAG_CAMERA
 //#define LOG_NDEBUG 0
 
+#include <com_android_internal_camera_flags.h>
 #include <utils/Trace.h>
 
 #include "Flags.h"
 
 #include "Camera3SharedOutputStream.h"
+
+namespace flags = com::android::internal::camera::flags;
 
 namespace android {
 
@@ -43,7 +46,7 @@ Camera3SharedOutputStream::Camera3SharedOutputStream(int id,
         Camera3OutputStream(id, CAMERA_STREAM_OUTPUT, width, height,
                             format, dataSpace, rotation, physicalCameraId, sensorPixelModesUsed,
                             transport, consumerUsage, timestampOffset, setId,
-                            /*isMultiResolution*/false, dynamicProfile, streamUseCase,
+                            OutputConfiguration::MULTI_RES_OFF, dynamicProfile, streamUseCase,
                             deviceTimeBaseIsRealtime, timestampBase, colorSpace,
                             useReadoutTimestamp),
         mUseHalBufManager(useHalBufManager) {
@@ -54,6 +57,7 @@ Camera3SharedOutputStream::Camera3SharedOutputStream(int id,
     for (size_t i = 0; i < consumerCount; i++) {
         mSurfaceUniqueIds[i] = SurfaceHolderUniqueId{surfaces[i], mNextUniqueSurfaceId++};
     }
+    mIsShared = true;
 }
 
 Camera3SharedOutputStream::~Camera3SharedOutputStream() {
@@ -278,9 +282,12 @@ status_t Camera3SharedOutputStream::configureQueueLocked() {
     }
 
     // Set buffer transform for all configured surfaces
+    size_t index = 0;
     for (const auto& surfaceUniqueId : mSurfaceUniqueIds) {
         const sp<Surface>& surface = surfaceUniqueId.mSurfaceHolder.mSurface;
-        int surfaceId = surfaceUniqueId.mId;
+        // Note: The surfaceId we pass out to StreamSplitter is the index of
+        // mSurfaceUniqueIds, not the uniqueId.
+        int surfaceId = index++;
         int32_t transform = surfaceUniqueId.mTransform;
         if (transform == -1 || surface == nullptr) {
             continue;
@@ -297,9 +304,9 @@ status_t Camera3SharedOutputStream::configureQueueLocked() {
     return OK;
 }
 
-status_t Camera3SharedOutputStream::disconnectLocked() {
+status_t Camera3SharedOutputStream::disconnectLocked(bool force) {
     status_t res;
-    res = Camera3OutputStream::disconnectLocked();
+    res = Camera3OutputStream::disconnectLocked(force);
 
     if (mStreamSplitter != nullptr) {
         mStreamSplitter->disconnect();
@@ -356,6 +363,15 @@ ssize_t Camera3SharedOutputStream::getSurfaceId(const sp<Surface> &surface) {
     }
 
     return id;
+}
+
+int Camera3SharedOutputStream::getSurfaceMirrorMode(size_t surfaceId) {
+    Mutex::Autolock l(mLock);
+    if (surfaceId >= kMaxOutputs) {
+        return getMirrorMode();
+    }
+
+    return mSurfaceUniqueIds[surfaceId].mSurfaceHolder.mMirrorMode;
 }
 
 status_t Camera3SharedOutputStream::getUniqueSurfaceIds(
@@ -421,6 +437,17 @@ status_t Camera3SharedOutputStream::updateStream(const std::vector<SurfaceHolder
         return BAD_VALUE;
     }
 
+    if (flags::seamless_transitions()) {
+        if (mState == STATE_IN_CONFIG) {
+            ret = configureQueueLocked();
+            ALOGE("%s: Stream configuration ret: %d", __FUNCTION__, ret);
+            if (ret != OK) {
+                return ret;
+            }
+            mState = STATE_CONFIGURED;
+        }
+    }
+
     uint64_t usage;
     getEndpointUsage(&usage);
     KeyedVector<size_t, SurfaceHolder> removedSurfaces;
@@ -448,13 +475,20 @@ status_t Camera3SharedOutputStream::updateStream(const std::vector<SurfaceHolder
         if (mStreamSplitter != nullptr) {
             ret = mStreamSplitter->removeOutput(it);
             if (ret != OK) {
-                ALOGE("%s: failed with error code %d", __FUNCTION__, ret);
-                status_t res = revertPartialUpdateLocked(removedSurfaces, *outputMap);
-                if (res != OK) {
-                    return res;
+                // EPIPE (Broken pipe) can happen if the surface is already disconnected.
+                // We should treat this as success for the purpose of removal.
+                if (ret == -EPIPE) {
+                    ALOGW("%s: Ignoring error %d while removing output surface %zu",
+                            __FUNCTION__, ret, it);
+                    ret = OK;
+                } else {
+                    ALOGE("%s: failed with error code %d", __FUNCTION__, ret);
+                    status_t res = revertPartialUpdateLocked(removedSurfaces, *outputMap);
+                    if (res != OK) {
+                        return res;
+                    }
+                    return ret;
                 }
-                return ret;
-
             }
         }
         removedSurfaces.add(it, mSurfaceUniqueIds[it].mSurfaceHolder);

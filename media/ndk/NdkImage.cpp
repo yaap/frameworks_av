@@ -26,17 +26,18 @@
 #include <private/android/AHardwareBufferHelpers.h>
 #include <ui/PublicFormat.h>
 #include <utils/Log.h>
+#include <aidl/android/hardware/graphics/common/PixelFormat.h>
 
 using namespace android;
-
+using AidlPixelFormat = aidl::android::hardware::graphics::common::PixelFormat;
 #define ALIGN(x, mask) ( ((x) + (mask) - 1) & ~((mask) - 1) )
 
 AImage::AImage(AImageReader* reader, int32_t format, uint64_t usage, BufferItem* buffer,
         int64_t timestamp, int32_t width, int32_t height, int32_t numPlanes,
-        android_dataspace dataspace) :
+        android_dataspace dataspace, AImageCropRect cropRect) :
         mReader(reader), mFormat(format), mUsage(usage), mBuffer(buffer), mLockedBuffer(nullptr),
         mTimestamp(timestamp), mWidth(width), mHeight(height), mNumPlanes(numPlanes),
-        mHalDataSpace(dataspace) {
+        mHalDataSpace(dataspace), mCropRect(cropRect) {
     LOG_FATAL_IF(reader == nullptr, "AImageReader shouldn't be null while creating AImage");
 }
 
@@ -173,6 +174,19 @@ AImage::getDataSpace(android_dataspace* dataSpace) const {
     return AMEDIA_OK;
 }
 
+media_status_t
+AImage::getCropRect(AImageCropRect* cropRect) const {
+    if (cropRect == nullptr) {
+        return AMEDIA_ERROR_INVALID_PARAMETER;
+    }
+    if (isClosed()) {
+        ALOGE("%s: image %p has been closed!", __FUNCTION__, this);
+        return AMEDIA_ERROR_INVALID_OBJECT;
+    }
+    *cropRect = mCropRect;
+    return AMEDIA_OK;
+}
+
 media_status_t AImage::lockImage() {
     if (mBuffer == nullptr || mBuffer->mGraphicBuffer == nullptr) {
         LOG_ALWAYS_FATAL("%s: AImage %p has no buffer.", __FUNCTION__, this);
@@ -294,9 +308,10 @@ AImage::getPlanePixelStride(int planeIdx, /*out*/int32_t* pixelStride) const {
         case HAL_PIXEL_FORMAT_BLOB:
         case HAL_PIXEL_FORMAT_RAW10:
         case HAL_PIXEL_FORMAT_RAW12:
+        case static_cast<int>(AidlPixelFormat::RAW14):
         case HAL_PIXEL_FORMAT_RAW_OPAQUE:
-            // Blob is used for JPEG data, RAW10 and RAW12 is used for 10-bit and 12-bit raw data,
-            // those are single plane data without pixel stride defined
+            // Blob is used for JPEG data, RAW10, RAW12 and RAW14 are used for 10-bit, 12-bit and
+            // 14-bit raw data, those are single plane data without pixel stride defined
             return AMEDIA_ERROR_UNSUPPORTED;
         default:
             ALOGE("Pixel format: 0x%x is unsupported", fmt);
@@ -349,7 +364,9 @@ AImage::getPlaneRowStride(int planeIdx, /*out*/int32_t* rowStride) const {
             return AMEDIA_OK;
         case HAL_PIXEL_FORMAT_RAW10:
         case HAL_PIXEL_FORMAT_RAW12:
-            // RAW10 and RAW12 are used for 10-bit and 12-bit raw data, they are single plane
+        case static_cast<int>(AidlPixelFormat::RAW14):
+            // RAW10, RAW12 and RAW14 are used for 10-bit, 12-bit and 14-bit raw data, they are
+            // single plane
             *rowStride = mLockedBuffer->stride;
             return AMEDIA_OK;
         case HAL_PIXEL_FORMAT_Y8:
@@ -622,6 +639,24 @@ AImage::getPlaneData(int planeIdx,/*out*/uint8_t** data, /*out*/int* dataLength)
             pData = mLockedBuffer->data;
             dataSize = mLockedBuffer->stride * mLockedBuffer->height;
             break;
+        case static_cast<int>(AidlPixelFormat::RAW14):
+            // Single plane 10bpp bayer data.
+            if (mLockedBuffer->width % 4) {
+                ALOGE("Width is not multiple of 4 %d", mLockedBuffer->width);
+                return AMEDIA_ERROR_UNKNOWN;
+            }
+            if (mLockedBuffer->height % 2) {
+                ALOGE("Height is not multiple of 2 %d", mLockedBuffer->height);
+                return AMEDIA_ERROR_UNKNOWN;
+            }
+            if (mLockedBuffer->stride < (mLockedBuffer->width * 14 / 8)) {
+                ALOGE("stride (%d) should be at least %d",
+                        mLockedBuffer->stride, mLockedBuffer->width * 14 / 8);
+                return AMEDIA_ERROR_UNKNOWN;
+            }
+            pData = mLockedBuffer->data;
+            dataSize = mLockedBuffer->stride * mLockedBuffer->height;
+            break;
         case HAL_PIXEL_FORMAT_RGBA_8888:
         case HAL_PIXEL_FORMAT_RGBX_8888:
             // Single plane, 32bpp.
@@ -739,22 +774,7 @@ media_status_t AImage_getCropRect(const AImage* image, /*out*/AImageCropRect* re
                 __FUNCTION__, image, rect);
         return AMEDIA_ERROR_INVALID_PARAMETER;
     }
-    // For now AImage only supports camera outputs where cropRect is always full window
-    int32_t width = -1;
-    media_status_t ret = image->getWidth(&width);
-    if (ret != AMEDIA_OK) {
-        return ret;
-    }
-    int32_t height = -1;
-    ret = image->getHeight(&height);
-    if (ret != AMEDIA_OK) {
-        return ret;
-    }
-    rect->left = 0;
-    rect->top = 0;
-    rect->right = width;
-    rect->bottom = height;
-    return AMEDIA_OK;
+    return image->getCropRect(rect);
 }
 
 EXPORT

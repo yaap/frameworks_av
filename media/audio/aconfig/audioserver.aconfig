@@ -5,6 +5,7 @@
 package: "com.android.media.audioserver"
 container: "system"
 
+# go/keep-sorted start block=yes newline_separated=yes by_regex=name:\s*"([^"]+)"
 flag {
     name: "cap_engine_preferred_device_improvement"
     namespace: "media_audio"
@@ -15,14 +16,11 @@ flag {
     bug: "436398891"
 }
 
-# shipped 24Q3
 flag {
-    name: "conditionally_ignore_preferred_input_device"
+    name: "capture_offloaded_audio"
     namespace: "media_audio"
-    description:
-        "Allows to ignore preferred device requests in getInputDeviceForAttributes() depending "
-        "on the calling context."
-    bug: "303079083"
+    description: "Supports capturing audio which are playing in PCM offload or MMAP."
+    bug: "460856210"
 }
 
 flag {
@@ -49,11 +47,21 @@ flag {
 }
 
 flag {
-    name: "mmap_pcm_offload_support"
+    name: "mmap_freezer_awareness"
+    namespace: "media_audio"
+    description: "MMAP freezer awareness"
+    bug: "477685932"
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "optimize_call_routing"
     namespace: "media_audio"
     description:
-        "Add pcm offload support on mmap path."
-    bug: "409798445"
+        "Optimize call route update sequence"
+    bug: "382818781"
 }
 
 flag {
@@ -62,11 +70,4 @@ flag {
     description: "Remove the output stream suspend state and control mechanism"
     bug: "409706525"
 }
-
-flag {
-    name: "use_bt_sco_for_media"
-    namespace: "media_audio"
-    description:
-        "Play media strategy over Bluetooth SCO when active"
-    bug: "292037886"
-}
+# go/keep-sorted end

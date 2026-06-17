@@ -50,13 +50,15 @@ class StreamContextAidl {
             ::aidl::android::hardware::common::fmq::SynchronizedReadWrite> DataMQ;
 
     StreamContextAidl(::aidl::android::hardware::audio::core::StreamDescriptor& descriptor,
-                      bool isAsynchronous, int ioHandle, bool hasClipTransitionSupport)
+                      bool isAsynchronous, bool isDirect, int ioHandle,
+                      bool hasClipTransitionSupport)
         : mFrameSizeBytes(descriptor.frameSizeBytes),
           mCommandMQ(new CommandMQ(descriptor.command)),
           mReplyMQ(new ReplyMQ(descriptor.reply)),
           mBufferSizeFrames(descriptor.bufferSizeFrames),
           mDataMQ(maybeCreateDataMQ(descriptor)),
           mIsAsynchronous(isAsynchronous),
+          mIsDirect(isDirect),
           mIsMmapped(isMmapped(descriptor)),
           mMmapBufferDescriptor(maybeGetMmapBuffer(descriptor)),
           mIoHandle(ioHandle),
@@ -84,6 +86,7 @@ class StreamContextAidl {
     size_t getFrameSizeBytes() const { return mFrameSizeBytes; }
     ReplyMQ* getReplyMQ() const { return mReplyMQ.get(); }
     bool isAsynchronous() const { return mIsAsynchronous; }
+    bool isDirect() const { return mIsDirect; }
     bool isMmapped() const { return mIsMmapped; }
     const ::aidl::android::hardware::audio::core::MmapBufferDescriptor&
             getMmapBufferDescriptor() const { return mMmapBufferDescriptor; }
@@ -92,6 +95,7 @@ class StreamContextAidl {
     bool hasClipTransitionSupport() const { return mHasClipTransitionSupport; }
     void updateMmapBufferDescriptor(
             ::aidl::android::hardware::audio::core::MmapBufferDescriptor&& desc) {
+        mBufferSizeFrames = desc.sharedMemory.size / mFrameSizeBytes;
         mMmapBufferDescriptor = std::move(desc); }
 
   private:
@@ -123,6 +127,7 @@ class StreamContextAidl {
     size_t mBufferSizeFrames;
     std::unique_ptr<DataMQ> mDataMQ;
     bool mIsAsynchronous;
+    bool mIsDirect;
     bool mIsMmapped;
     ::aidl::android::hardware::audio::core::MmapBufferDescriptor mMmapBufferDescriptor;
     int mIoHandle;
@@ -194,6 +199,7 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
         FrameCounters hardware;
         enum DrainState : int32_t { NONE, ALL, EN /*early notify*/, EN_RECEIVED };
         DrainState drainState;
+        int continueDrainRequests;
     };
 
     template<class T>
@@ -275,7 +281,8 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
             ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr);
 
     status_t drain(bool earlyNotify,
-            ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr);
+            ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr,
+            bool* sendCb = nullptr);
 
     status_t flush(
             ::aidl::android::hardware::audio::core::StreamDescriptor::Reply* reply = nullptr);
@@ -292,11 +299,15 @@ class StreamHalAidl : public virtual StreamHalInterface, public ConversionHelper
     }
 
     void onAsyncTransferReady();
-    void onAsyncDrainReady();
+    bool onAsyncDrainReady();
     void onAsyncError();
 
     status_t parseAndGetVendorParameters(const AudioParameter& parameterKeys, String8* values);
     status_t parseAndSetVendorParameters(const AudioParameter& parameters);
+
+    int32_t getAidlInterfaceVersion() const { return mAidlInterfaceVersion; }
+    ::aidl::android::media::audio::IHalAdapterVendorExtension::ParameterScope getParameterScope()
+            const;
 
     const bool mIsInput;
     const audio_config_base_t mConfig;
@@ -448,6 +459,7 @@ class StreamOutHalAidl : public virtual StreamOutHalInterface,
     void onWriteReady() override;
     void onDrainReady() override;
     void onError(bool isHardError) override;
+    void sendOnDrainReadyToClients();
 
     status_t dump(int fd, const Vector<String16>& args) override;
 

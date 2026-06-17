@@ -18,12 +18,17 @@
 #define ANDROID_SERVERS_CAMERA3_INFLIGHT_REQUEST_H
 
 #include <set>
+#include <variant>
+
+#include <android/hardware/camera2/impl/MultiResConcurrentReadersStartInfo.h>
 
 #include <camera/CaptureResult.h>
 #include <camera/CameraMetadata.h>
 #include <utils/Timers.h>
 
 #include "common/CameraDeviceBase.h"
+
+using android::hardware::camera2::impl::MultiResConcurrentReadersStartInfo;
 
 namespace android {
 
@@ -68,6 +73,7 @@ typedef struct camera_shutter_msg {
     uint64_t timestamp;
     bool readout_timestamp_valid;
     uint64_t readout_timestamp;
+    std::vector<MultiResConcurrentReadersStartInfo> multi_res_concurrent_readers_msg;
 } camera_shutter_msg_t;
 
 typedef struct camera_error_msg {
@@ -84,14 +90,7 @@ typedef enum camera_error_msg_code {
     CAMERA_MSG_NUM_ERRORS
 } camera_error_msg_code_t;
 
-typedef struct camera_notify_msg {
-    int type;
-
-    union {
-        camera_error_msg_t error;
-        camera_shutter_msg_t shutter;
-    } message;
-} camera_notify_msg_t;
+typedef std::variant<camera_error_msg_t, camera_shutter_msg_t> camera_notify_msg_t;
 
 typedef enum {
     // Cache the buffers with STATUS_ERROR within InFlightRequest
@@ -102,6 +101,13 @@ typedef enum {
     // notify(ERROR_BUFFER) as well
     ERROR_BUF_RETURN_NOTIFY
 } ERROR_BUF_STRATEGY;
+
+// Track inflight MultiResolution output's physical camera Ids
+// so that all necessary physical result metadata are produced.
+struct MultiResInflightRequest {
+    std::set<std::string> physicalCameraIds;
+    bool enableConcurrency;
+};
 
 struct InFlightRequest {
     // Set by notify() SHUTTER call.
@@ -165,11 +171,14 @@ struct InFlightRequest {
     // returned to the buffer queue, or returned to the buffer queue and notify with ERROR_BUFFER.
     ERROR_BUF_STRATEGY errorBufStrategy;
 
-    // The physical camera ids being requested.
-    // For request on a physical camera stream, the inside set contains one Id
-    // For request on a stream group containing physical camera streams, the
-    // inside set contains all stream Ids in the group.
-    std::set<std::set<std::string>> physicalCameraIds;
+    // The physical camera ids being requested. This is used to track the
+    // expected physical camera metadata from the camera HAL. This set contains
+    // both the physical camera stream requested by the app, and the physical
+    // camera streams "committed" by the MultiResolutionImageReader.
+    std::set<std::string> physicalCameraIds;
+    // The mapping from MultiResolution stream group id to the candidate
+    // physical Ids for the stream group.
+    std::map<int, MultiResInflightRequest> requestedMultiResPhysicalIds;
 
     // Map of physicalCameraId <-> Metadata
     std::vector<PhysicalCaptureResultInfo> physicalMetadatas;
@@ -229,7 +238,8 @@ struct InFlightRequest {
 
     InFlightRequest(int numBuffers, CaptureResultExtras extras, bool hasInput,
             bool hasAppCallback, nsecs_t minDuration, nsecs_t maxDuration, bool fixedFps,
-            const std::set<std::set<std::string>>& physicalCameraIdSet, bool isStillCapture,
+            const std::set<std::string>& physicalCameraIdSet,
+            std::map<int, MultiResInflightRequest>&& requestedMultiResIds, bool isStillCapture,
             bool isZslCapture, bool rotateAndCropAuto, bool autoframingAuto,
             const std::set<std::string>& idsWithZoom, nsecs_t requestNs, bool useZoomRatio,
             const SurfaceMap& outSurfaces = SurfaceMap{},
@@ -248,6 +258,7 @@ struct InFlightRequest {
             skipResultMetadata(false),
             errorBufStrategy(ERROR_BUF_CACHE),
             physicalCameraIds(physicalCameraIdSet),
+            requestedMultiResPhysicalIds(std::move(requestedMultiResIds)),
             stillCapture(isStillCapture),
             zslCapture(isZslCapture),
             rotateAndCropAuto(rotateAndCropAuto),

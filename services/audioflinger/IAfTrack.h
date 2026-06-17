@@ -208,6 +208,7 @@ public:
     virtual bool isExternalTrack() const = 0;
 
     virtual void invalidate() = 0;
+    virtual void poison() = 0;
     virtual bool isInvalid() const = 0;
 
     virtual void terminate() = 0;
@@ -387,6 +388,11 @@ class AfPlaybackCommon : public virtual RefBase {
      */
     void processMuteEvent(media::IAudioManagerNative& am, mute_state_t muteState);
 
+    /**
+     * Notifies the audio service of the current mute state.
+     */
+    void resetMuteEvent(media::IAudioManagerNative& am);
+
     void maybeLogPlaybackHardening(media::IAudioManagerNative& am) const;
 
     // Restricted due to OP_AUDIO_CONTROL_PARTIAL
@@ -423,11 +429,11 @@ class AfPlaybackCommon : public virtual RefBase {
   private:
     const IAfTrackBase& mSelf;
 
-    std::optional<mediautils::SingleThreadExecutor> mExecutor;
     // TODO: atomic necessary if underneath thread lock?
     std::atomic<mute_state_t> mMuteState;
 
-    const EnforcementLevel mEnforcementLevel;
+    EnforcementLevel mEnforcementLevel;
+    media::IAudioManagerNative::HardeningExemptionReason mExemptionReason;
 
     std::atomic<bool> mHasOpControlPartial {true};
     std::atomic<bool> mHasOpControlFull {true};
@@ -474,7 +480,9 @@ public:
             size_t frameCountToBeReady = SIZE_MAX,
             float speed = 1.0f,
             bool isSpatialized = false,
-            bool isBitPerfect = false);
+            bool isBitPerfect = false,
+            const std::string& codecProvenance = {}) REQUIRES(
+            audio_utils::AudioFlinger_Mutex, audio_utils::ThreadBase_Mutex);
 
     static constexpr std::string_view getLogHeader() {
         using namespace std::literals;
@@ -637,7 +645,8 @@ public:
             IAfPlaybackThread* playbackThread,
             IAfDuplicatingThread* sourceThread, uint32_t sampleRate,
             audio_format_t format, audio_channel_mask_t channelMask, size_t frameCount,
-            const AttributionSourceState& attributionSource);
+            const AttributionSourceState& attributionSource) REQUIRES(
+            audio_utils::AudioFlinger_Mutex, audio_utils::ThreadBase_Mutex);
 
     sp<IAfOutputTrack> asIAfOutputTrack() final { return this; }
 
@@ -707,7 +716,8 @@ public:
             audio_input_flags_t flags,
             track_type type,
             audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE,
-            int32_t startFrames = -1);
+            int32_t startFrames = -1) REQUIRES(
+            audio_utils::AudioFlinger_Mutex, audio_utils::ThreadBase_Mutex);
 
     static constexpr std::string_view getLogHeader() {
         using namespace std::literals;
@@ -789,12 +799,14 @@ public:
             void *buffer,
             size_t bufferSize,
             audio_output_flags_t flags,
+            audio_port_handle_t portId,
             const Timeout& timeout = {},
             size_t frameCountToBeReady = 1, /** Default behaviour is to start
                                              *  as soon as possible to have
                                              *  the lowest possible latency
                                              *  even if it might glitch. */
-            float speed = 1.0f);
+            float speed = 1.0f) REQUIRES(
+            audio_utils::AudioFlinger_Mutex, audio_utils::ThreadBase_Mutex);
 
     sp<IAfPatchTrack> asIAfPatchTrack() final { return this; }
 

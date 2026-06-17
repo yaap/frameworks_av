@@ -5,21 +5,7 @@
 package: "com.android.media.audio"
 container: "system"
 
-flag {
-    name: "alarm_min_volume_zero"
-    namespace: "media_audio"
-    description: "Support configuring alarm min vol to zero"
-    bug: "296884402"
-}
-
-flag {
-    name: "abs_volume_prioritizes_abs_device"
-    namespace: "media_audio"
-    description: "When receiving a volume command from an absolute volume device we "
-                 "prioritize selecting the available absolute device for volume change"
-    bug: "399307939"
-}
-
+# go/keep-sorted start block=yes newline_separated=yes by_regex=name:\s*"([^"]+)"
 flag {
     name: "abs_volume_stream_always_max"
     namespace: "media_audio"
@@ -28,10 +14,17 @@ flag {
 }
 
 flag {
-    name: "as_device_connection_failure"
+    name: "alarm_min_volume_zero"
     namespace: "media_audio"
-    description: "AudioService handles device connection failures."
-    bug: "326597760"
+    description: "Support configuring alarm min vol to zero"
+    bug: "296884402"
+}
+
+flag {
+    name: "audio_service_routing_cache_shared_memory"
+    namespace: "media_audio"
+    description: "Use shared memory routing cache between audioserver and AudioService"
+    bug: "487025671"
 }
 
 flag {
@@ -42,10 +35,17 @@ flag {
 }
 
 flag {
-    name: "audio_eraser_effect"
+    name: "ble_hearing_aid_device_impl"
     namespace: "media_audio"
-    description: "Enable audio eraser effect"
-    bug: "367667349"
+    description: "Use new BLE_HEARING_AID device type"
+    bug: "370812132"
+}
+
+flag {
+    name: "camera_shutter_sound"
+    namespace: "media_audio"
+    description: "Manage camera sound depending on locale and sim"
+    bug: "440483480"
 }
 
 flag {
@@ -75,6 +75,15 @@ flag {
 }
 
 flag {
+    name: "equal_sco_ha_vc_index_range"
+    namespace: "media_audio"
+    description:
+        "Introduce the same index range for voice calls over SCO and "
+        "hearing aids"
+    bug: "416418971"
+}
+
+flag {
     name: "equal_sco_lea_vc_index_range"
     namespace: "media_audio"
     description:
@@ -84,12 +93,23 @@ flag {
 }
 
 flag {
-    name: "equal_sco_ha_vc_index_range"
+    name: "filter_call_on_listener_hint"
     namespace: "media_audio"
-    description:
-        "Introduce the same index range for voice calls over SCO and "
-        "hearing aids"
-    bug: "416418971"
+    description: "Filter call on listener hint"
+    bug: "413631827"
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "hardening_bfgs"
+    namespace: "media_audio"
+    description: "Flag for bfgs capability constraint"
+    bug: "475914478"
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
 }
 
 flag {
@@ -116,6 +136,16 @@ flag {
 }
 
 flag {
+    name: "hardening_usage"
+    namespace: "media_audio"
+    description: "Flag for usage validation"
+    bug: "451793120"
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
     name: "optimize_bt_device_switch"
     namespace: "media_audio"
     description: "Optimize the Bluetooth active device switch sequence"
@@ -123,11 +153,13 @@ flag {
 }
 
 flag {
-    name: "replace_stream_bt_sco"
+    name: "persist_mode_assistant_volume_cache"
     namespace: "media_audio"
-    description:
-        "Replace internally STREAM_BLUETOOTH_SCO with STREAM_VOICE_CALL"
-    bug: "345024266"
+    description: "Persist the cached STREAM_ASSISTANT volume during MODE_ASSISTANT_CONVERSATION"
+    bug: "490036136"
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
 }
 
 flag {
@@ -147,17 +179,17 @@ flag {
 }
 
 flag {
-    name: "spatializer_offload"
-    namespace: "media_audio"
-    description: "Enable spatializer offload"
-    bug: "307842941"
-}
-
-flag {
     name: "spatializer_upmix"
     namespace: "media_audio"
     description: "Enable spatializer upmix"
     bug: "323985367"
+}
+
+flag {
+    name: "standard_volume_range_apm"
+    namespace: "media_audio"
+    description: "APM uses a standard volume range of 0/1 - 100."
+    bug: "439681541"
 }
 
 flag {
@@ -175,10 +207,10 @@ flag {
 }
 
 flag {
-    name: "update_preferred_devices_for_strategy"
+    name: "stream_assistant_not_aliased_to_music"
     namespace: "media_audio"
-    description: "Use AudioDeviceInventory cache for getPreferredDevicesForStrategy"
-    bug: "417481226"
+    description: "By default STREAM_ASSISTANT is not aliased to STREAM_MUSIC"
+    bug: "442485761"
 }
 
 flag {
@@ -187,3 +219,4 @@ flag {
     description: "Refactor the audio volume internal architecture logic"
     bug: "324152869"
 }
+# go/keep-sorted end

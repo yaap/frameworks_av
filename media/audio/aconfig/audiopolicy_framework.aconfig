@@ -6,6 +6,7 @@
 package: "android.media.audiopolicy"
 container: "system"
 
+# go/keep-sorted start block=yes newline_separated=yes by_regex=name:\s*"([^"]+)"
 flag {
     name: "audio_mix_policy_ordering"
     namespace: "media_audio"
@@ -35,6 +36,7 @@ flag {
     namespace: "media_audio"
     description: "Enable multi-zone audio support in audio product strategies."
     bug: "316643994"
+    is_exported: true
 }
 
 flag {
@@ -52,3 +54,4 @@ flag {
                  "stream types and control by identifier."
     bug: "270049944"
 }
+# go/keep-sorted end

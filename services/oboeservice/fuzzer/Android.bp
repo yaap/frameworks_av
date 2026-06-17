@@ -32,17 +32,18 @@ cc_fuzz {
     name: "oboeservice_fuzzer",
     defaults: [
         "latest_android_media_audio_common_types_cpp_shared",
+        "libaaudio_internal_defaults",
     ],
     srcs: [
         "oboeservice_fuzzer.cpp",
     ],
     shared_libs: [
         "aaudio-aidl-cpp",
+        "android.media.audio-aconfig-cc",
         "audioclient-types-aidl-cpp",
         "com.android.media.aaudio-aconfig-cc",
         "framework-permission-aidl-cpp",
-        "libaaudio_internal",
-        "libaudioclient",
+        "libaudiobase",
         "libaudioclient_aidl_conversion",
         "libaudioflinger",
         "libaudiofoundation",

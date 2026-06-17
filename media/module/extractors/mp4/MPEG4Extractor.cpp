@@ -172,6 +172,7 @@ private:
     bool mIsHEVC;
     bool mIsAPV;
     bool mIsDolbyVision;
+    bool mIsVVC;
     bool mIsAC4;
     bool mIsMpegH = false;
     bool mIsPcm;
@@ -400,6 +401,16 @@ static const char *FourCC2MIME(uint32_t fourcc) {
                 return "application/octet-stream";
             }
             return MEDIA_MIMETYPE_VIDEO_APV;
+
+        case FOURCC("vvc1"):
+        case FOURCC("vvi1"):
+            // Enable VVC codec support from Android C
+            if (!(isAtLeastRelease(37, "CinnamonBun") &&
+                  com::android::media::extractor::flags::extractor_mp4_enable_vvc())) {
+                ALOGV("VVC support not enabled");
+                return "application/octet-stream";
+            }
+            return MEDIA_MIMETYPE_VIDEO_VVC;
 
         case FOURCC("dvav"):
         case FOURCC("dva1"):
@@ -2223,6 +2234,8 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
         case FOURCC("av01"):
         case FOURCC("vp09"):
         case FOURCC("apv1"):
+        case FOURCC("vvc1"):
+        case FOURCC("vvi1"):
         {
             uint8_t buffer[78];
             if (chunk_data_size < (ssize_t)sizeof(buffer)) {
@@ -2781,6 +2794,44 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
             *offset += chunk_size;
             break;
         }
+
+        case FOURCC("vvcC"): {
+            // Enable VVC codec support from Android C
+            if (!(isAtLeastRelease(37, "CinnamonBun") &&
+                  com::android::media::extractor::flags::extractor_mp4_enable_vvc())) {
+                ALOGV("VVC support not enabled");
+                *offset += chunk_size;
+                break;
+            }
+
+            auto buffer = heapbuffer<uint8_t>(chunk_data_size);
+
+            if (buffer.get() == NULL) {
+                ALOGE("b/28471206");
+                return NO_MEMORY;
+            }
+
+            if (mDataSource->readAt(data_offset, buffer.get(), chunk_data_size) < chunk_data_size) {
+                return ERROR_IO;
+            }
+
+            if (mLastTrack == NULL)
+                return ERROR_MALFORMED;
+// TODO(b/476115172) remove when the build bug is fixed
+#if defined(__riscv)
+            ALOGE("VVC support not available on RISCV platform");
+#else
+            if (__builtin_available(android 37, *)) {
+                AMediaFormat_setBuffer(mLastTrack->meta, AMEDIAFORMAT_KEY_CSD_VVC,
+                                   buffer.get(), chunk_data_size);
+            } else {
+                ALOGE("VVC support not available");
+            }
+#endif
+            *offset += chunk_size;
+            break;
+        }
+
         case FOURCC("av1C"): {
             auto buffer = heapbuffer<uint8_t>(chunk_data_size);
 
@@ -5024,6 +5075,27 @@ MediaTrackHelper *MPEG4Extractor::getTrack(size_t index) {
         if (size < 5 || ptr[0] != 0x01) {  // configurationVersion == 1
             return NULL;
         }
+    } else if (!strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_VVC)) {
+        void *data;
+        size_t size;
+// TODO(b/476115172) remove when the build bug is fixed
+#if defined(__riscv)
+        ALOGE("VVC support not available on RISCV platform");
+        return NULL;
+#else
+        if (__builtin_available(android 37, *)) {
+            if (!AMediaFormat_getBuffer(track->meta, AMEDIAFORMAT_KEY_CSD_VVC, &data, &size)) {
+                return NULL;
+            }
+        } else {
+            return NULL;
+        }
+#endif
+        const uint8_t *ptr = (const uint8_t *)data;
+
+        if (size < 5 || U32_AT(ptr) != 0) {  // version == 0
+            return NULL;
+        }
     }
 
     ALOGV("track->elst_shift_start_ticks :%" PRIu64, track->elst_shift_start_ticks);
@@ -5082,6 +5154,20 @@ status_t MPEG4Extractor::verifyTrack(Track *track) {
         if (!AMediaFormat_getBuffer(track->meta, AMEDIAFORMAT_KEY_CSD_0, &data, &size)) {
             return ERROR_MALFORMED;
         }
+    } else if (!strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_VVC)) {
+// TODO(b/476115172) remove when the build bug is fixed
+#if defined(__riscv)
+        ALOGE("VVC support not available on RISCV platform");
+        return ERROR_MALFORMED;
+#else
+        if (__builtin_available(android 37, *)) {
+            if (!AMediaFormat_getBuffer(track->meta, AMEDIAFORMAT_KEY_CSD_VVC, &data, &size)) {
+                return ERROR_MALFORMED;
+            }
+        } else {
+            return ERROR_MALFORMED;
+        }
+#endif
     } else if (!strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_MPEG4)
             || !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_MPEG2)
             || !strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_AAC)) {
@@ -5575,6 +5661,7 @@ MPEG4Source::MPEG4Source(
       mIsHEVC(false),
       mIsAPV(false),
       mIsDolbyVision(false),
+      mIsVVC(false),
       mIsAC4(false),
       mIsPcm(false),
       mNALLengthSize(0),
@@ -5624,6 +5711,11 @@ MPEG4Source::MPEG4Source(
     }
     mIsAC4 = !strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_AC4);
     mIsDolbyVision = !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_DOLBY_VISION);
+    mIsVVC = false;
+    if (isAtLeastRelease(37, "CinnamonBun")) {
+        mIsVVC = com::android::media::extractor::flags::extractor_mp4_enable_vvc() &&
+                 !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_VVC);
+    }
     mIsHeif = !strcasecmp(mime, MEDIA_MIMETYPE_IMAGE_ANDROID_HEIC) && mItemTable != NULL;
     mIsAvif = !strcasecmp(mime, MEDIA_MIMETYPE_IMAGE_AVIF) && mItemTable != NULL;
 
@@ -5680,6 +5772,28 @@ MPEG4Source::MPEG4Source(
                 LOG_ALWAYS_FATAL("Invalid Dolby Vision profile = %d", profile);
             }
         }
+    } else if (mIsVVC) {
+        void *data = NULL;
+        size_t size = 0;
+// TODO(b/476115172) remove when the build bug is fixed
+#if defined(__riscv)
+        LOG_ALWAYS_FATAL("VVC support not available on RISCV platform");
+#else
+        if (__builtin_available(android 37, *)) {
+           CHECK(AMediaFormat_getBuffer(format, AMEDIAFORMAT_KEY_CSD_VVC, &data, &size)
+            && (data != NULL));
+        } else {
+            LOG_ALWAYS_FATAL("VVC support not available");
+        }
+#endif
+
+        const uint8_t *ptr = (const uint8_t *)data;
+
+        CHECK(size >= 5);
+        uint32_t version = U32_AT(ptr);
+        CHECK_EQ(version, 0);  // version == 0
+
+        mNALLengthSize = 1 + ((ptr[4] >> 1) & 3);
     }
 
     mIsPcm = !strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_RAW);
@@ -5867,8 +5981,11 @@ status_t MPEG4Source::parseChunk(off64_t *offset) {
                     if (chunk_type == FOURCC("moof")) {
                         mNextMoofOffset = *offset;
                         break;
-                    } else if (chunk_type == FOURCC("mdat")) {
-                        parseChunk(offset);
+                    } else if (chunk_type == FOURCC("mdat") && chunk_size > 0) {
+                        status_t err = parseChunk(offset);
+                        if (err != OK) {
+                            return err;
+                        }
                         continue;
                     } else if (chunk_size == 0) {
                         break;
@@ -6901,7 +7018,7 @@ media_status_t MPEG4Source::read(
         }
     }
 
-    if (!mIsAVC && !mIsHEVC && !(mIsDolbyVision && mNALLengthSize) && !mIsAC4) {
+    if (!mIsAVC && !mIsHEVC && !mIsVVC && !(mIsDolbyVision && mNALLengthSize) && !mIsAC4) {
         if (newBuffer) {
             if (mIsPcm) {
                 // The twos' PCM block reader assumes that all samples has the same size.
@@ -7364,7 +7481,7 @@ media_status_t MPEG4Source::fragmentedRead(
         AMediaFormat_setBuffer(bufmeta, AMEDIAFORMAT_KEY_CRYPTO_IV, iv, ivlength);
     }
 
-    if (!mIsAVC && !mIsHEVC && !(mIsDolbyVision && mNALLengthSize)) {
+    if (!mIsAVC && !mIsHEVC && !mIsVVC && !(mIsDolbyVision && mNALLengthSize)) {
         if (newBuffer) {
             if (!isInRange((size_t)0u, mBuffer->size(), size)) {
                 mBuffer->release();
@@ -7593,6 +7710,8 @@ static bool isCompatibleBrand(uint32_t fourcc) {
         FOURCC("hevc"),  // HEIF image sequence
         FOURCC("avif"),  // AVIF image
         FOURCC("avis"),  // AVIF image sequence
+        FOURCC("vvc1"),
+        FOURCC("vvi1"),
     };
 
     for (size_t i = 0;

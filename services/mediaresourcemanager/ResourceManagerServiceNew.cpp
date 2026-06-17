@@ -48,17 +48,26 @@ void ResourceManagerServiceNew::init() {
     setUpReclaimPolicies();
 }
 
+// Check whether the codec availability metrics is on or off.
+inline bool IsCodecAvailabilityMetricsFeatureOn() {
+    if (android::media::codec::codec_availability_metrics()) {
+        return true;
+    }
+
+    return false;
+}
+
 void ResourceManagerServiceNew::setUpResourceModels() {
     std::scoped_lock lock{mLock};
     // Create/Configure the default resource model.
-    if (mDefaultResourceModel == nullptr) {
-        mDefaultResourceModel = std::make_unique<DefaultResourceModel>(
+    if (mResourceModel == nullptr) {
+        mResourceModel = std::make_unique<DefaultResourceModel>(
                 mResourceTracker,
                 mSupportsMultipleSecureCodecs,
                 mSupportsSecureWithNonSecureCodec);
     } else {
         DefaultResourceModel* resourceModel =
-            static_cast<DefaultResourceModel*>(mDefaultResourceModel.get());
+            static_cast<DefaultResourceModel*>(mResourceModel.get());
         resourceModel->config(mSupportsMultipleSecureCodecs, mSupportsSecureWithNonSecureCodec);
     }
 }
@@ -96,6 +105,9 @@ Status ResourceManagerServiceNew::addResource(
     mServiceLog->add(log);
 
     std::scoped_lock lock{mLock};
+    // log resource availability status
+    logResourceAvailability(clientInfo, true /* codec has been started */, resources);
+
     mResourceTracker->addResource(clientInfo, client, resources);
     notifyResourceGranted(pid, resources);
 
@@ -237,14 +249,36 @@ Status ResourceManagerServiceNew::getMediaResourceUsageReport(
     }
 
     resources->clear();
-    if (!android::media::codec::codec_availability() ||
-        !android::media::codec::codec_availability_support()) {
-        return Status::fromStatus(INVALID_OPERATION);
+    {
+        std::scoped_lock lock{mLock};
+        *resources = mResourceTracker->getMediaResourceUsageReport();
     }
 
-    std::scoped_lock lock{mLock};
-    mResourceTracker->getMediaResourceUsageReport(resources);
+    return Status::ok();
+}
 
+Status ResourceManagerServiceNew::registerSystemResource(
+        const std::vector<MediaResourceParcel>& resources) {
+    if (IsCodecAvailabilityMetricsFeatureOn()) {
+        std::scoped_lock lock{mLock};
+        mResourceModel->registerSystemResource(resources);
+    }
+    return Status::ok();
+}
+
+inline bool ResourceManagerServiceNew::checkResourceAvailability_l(
+    const std::vector<MediaResourceParcel>& resourcesNeeded,
+    std::vector<MediaResourceParcel>* resourcesAvailable) const {
+    return mResourceModel->checkResourceAvailability(resourcesNeeded, resourcesAvailable);
+}
+
+Status ResourceManagerServiceNew::checkResourceAvailability(
+        const std::vector<MediaResourceParcel>& resourcesNeeded,
+        bool* _aidl_return) {
+    if (IsCodecAvailabilityMetricsFeatureOn() && _aidl_return) {
+        std::scoped_lock lock{mLock};
+        *_aidl_return = checkResourceAvailability_l(resourcesNeeded, nullptr);
+    }
     return Status::ok();
 }
 
@@ -262,6 +296,62 @@ Status ResourceManagerServiceNew::updateResource(
     mResourceTracker->updateResource(clientInfo, resources);
 
     return Status::ok();
+}
+
+void ResourceManagerServiceNew::logResourceAvailability(
+        const ClientInfoParcel& clientInfo,
+        bool isCodecStarted,
+        const std::vector<MediaResourceParcel>& resources) {
+    if (IsCodecAvailabilityMetricsFeatureOn()) {
+        std::vector<MediaResourceParcel> systemResources;
+        systemResources.reserve(resources.size());
+        for (const MediaResourceParcel& res : resources) {
+            // Ignore the other resource types.
+            if (res.type >= MediaResourceType::kHwResourceTypeMin) {
+                systemResources.push_back(res);
+            }
+        }
+        if (systemResources.empty()) {
+            // No system resources. So nothing to do.
+            return;
+        }
+        std::vector<MediaResourceParcel> resourcesAvailable;
+        bool available = checkResourceAvailability_l(systemResources, &resourcesAvailable);
+        // If the codec has started, we expect resource to be available.
+        // If the codec failed to start, we expect resource to be unavailable.
+        bool doesResourceTrackingMatch = (isCodecStarted == available);
+        if (!doesResourceTrackingMatch) {
+            // Log this info only when we see mismatch in resource tracking.
+            std::string resourcesAvailableInfo = toString(resourcesAvailable);
+            std::string resourcesInRequestInfo = toString(systemResources);
+            String8 log = String8::format(
+                    "ResourceTracking mismatched for [%lld: %s] codec "
+                    "while %s "
+                    "Available System Resources: %s "
+                    "Resources In Request: %s",
+                    (long long) clientInfo.id, clientInfo.name.c_str(),
+                    isCodecStarted ? "starting" : "reclaiming",
+                    resourcesAvailableInfo.c_str(),
+                    resourcesInRequestInfo.c_str());
+            mServiceLog->add(log);
+            ALOGE("%s: %s", __func__, log.c_str());
+        }
+
+        mResourceManagerMetrics->pushResourceStatusAtom(clientInfo, isCodecStarted, available,
+                                                        doesResourceTrackingMatch,
+                                                        resourcesAvailable,
+                                                        systemResources);
+    }
+}
+
+std::vector<MediaResourceParcel> ResourceManagerServiceNew::getAvailableResource() const {
+    std::scoped_lock lock{mLock};
+    return mResourceModel->getAvailableResources();
+}
+
+void ResourceManagerServiceNew::getResourceTrackingDetails(int* events, int* matches) const {
+    std::scoped_lock lock{mLock};
+    return mResourceManagerMetrics->getResourceTrackingDetails(events, matches);
 }
 
 void ResourceManagerServiceNew::getResourceDump(std::string& resourceLog) const {
@@ -291,7 +381,7 @@ bool ResourceManagerServiceNew::getTargetClients(
     uint32_t callingImportance = std::max(0, clientInfo.importance);
     ReclaimRequestInfo reclaimRequestInfo{callingPid, clientInfo.id, callingImportance, resources};
     std::vector<ClientInfo> clients;
-    if (!mDefaultResourceModel->getAllClients(reclaimRequestInfo, clients)) {
+    if (!mResourceModel->getAllClients(reclaimRequestInfo, clients)) {
         if (clients.empty()) {
             ALOGI("%s: There aren't any clients with given resources. Nothing to reclaim",
                   __func__);
@@ -346,7 +436,7 @@ bool ResourceManagerServiceNew::getLowestPriorityBiggestClient_l(
                                           0, // default importance
                                           resources};
     std::vector<ClientInfo> clients;
-    mDefaultResourceModel->getAllClients(reclaimRequestInfo, clients);
+    mResourceModel->getAllClients(reclaimRequestInfo, clients);
 
     // Use the ProcessPriorityReclaimPolicy to select a client to reclaim from.
     std::unique_ptr<IReclaimPolicy> reclaimPolicy

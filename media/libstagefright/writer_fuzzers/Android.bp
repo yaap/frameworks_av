@@ -36,6 +36,7 @@ cc_defaults {
         "include",
     ],
     static_libs: [
+        "android.media.extractor.flags-aconfig-cc",
         "com.android.media.flags.editing-aconfig-cc",
         "liblog",
         "libstagefright",
@@ -59,7 +60,7 @@ cc_defaults {
     ],
     fuzz_config: {
         cc: [
-            "android-media-fuzzing-reports@google.com",
+            "android-media-editing@google.com",
         ],
         componentid: 155276,
         hotlists: [

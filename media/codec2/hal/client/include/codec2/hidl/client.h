@@ -521,6 +521,13 @@ struct Codec2Client::Component : public Codec2Client::Configurable {
     void onBufferAttachedToOutputSurface(
             uint32_t generation);
 
+    // Notify a buffer is detached from output surface.
+    void onBufferDetachedFromOutputSurface(uint32_t generation, uint64_t bufferId);
+
+    // Notify buffers are removed from output surface.
+    void onBuffersRemovedFromOutputSurface(uint32_t generation,
+                                           const std::vector<uint64_t>& removedBufferIds);
+
     // When the client received \p workList and the blocks inside
     // \p workList are IGBA based graphic blocks, specify the owner
     // as the current IGBA for the future operations.
@@ -530,6 +537,8 @@ struct Codec2Client::Component : public Codec2Client::Configurable {
             const std::list<std::unique_ptr<C2Work>>& workList);
 
     c2_status_t initApexHandler(
+            ApexCodec_ComponentStore *store,
+            const C2String &name,
             const std::shared_ptr<Listener> &listener,
             const std::shared_ptr<Component> &comp);
 
@@ -655,6 +664,10 @@ struct Codec2Client::InputSurfaceConnection {
 
     // signal Eos to the connected video encoder.
     c2_status_t signalEos();
+
+    // media.c2 V2 interface
+    // Whether InputBufferDone is notified to the client or not.
+    c2_status_t notifiesInputBufferDoneToClient(bool* inputBufferDone);
 
     // base cannot be null.
     InputSurfaceConnection(const std::shared_ptr<Base>& base);

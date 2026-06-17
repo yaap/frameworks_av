@@ -16,15 +16,21 @@
 
 #define LOG_TAG "IsochronousClockModel"
 //#define LOG_NDEBUG 0
-#include <log/log.h>
 
+#include "IsochronousClockModel.h"
+
+// go/keep-sorted start
+#include <audio_utils/Time.h>
+#include <log/log.h>
+#include <utility/AAudioUtilities.h>
+#include <utility/AudioClock.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
+#include <algorithm>
 #include <inttypes.h>
 #include <stdint.h>
-#include <algorithm>
-
-#include "utility/AudioClock.h"
-#include "utility/AAudioUtilities.h"
-#include "IsochronousClockModel.h"
+// go/keep-sorted end
 
 using namespace aaudio;
 
@@ -274,6 +280,13 @@ int64_t IsochronousClockModel::convertPositionToTime(int64_t framePosition) cons
     return time;
 }
 
+int64_t IsochronousClockModel::convertPositionToBootTime(int64_t framePosition) {
+    // Computes the offset to convert montonic time to boottime.
+    android::audio_utils::adjustTimeOffset(
+            SYSTEM_TIME_MONOTONIC, SYSTEM_TIME_BOOTTIME, &mBoottimeOffset);
+    return convertPositionToTime(framePosition) + mBoottimeOffset;
+}
+
 int64_t IsochronousClockModel::convertTimeToPosition(int64_t nanoTime) const {
     if (mState == STATE_STOPPED) {
         return mMarkerFramePosition;
@@ -306,6 +319,7 @@ int64_t IsochronousClockModel::convertLatestTimeToPosition(int64_t nanoTime) con
 void IsochronousClockModel::dump() const {
     ALOGD("mMarkerFramePosition = %" PRId64, mMarkerFramePosition);
     ALOGD("mMarkerNanoTime      = %" PRId64, mMarkerNanoTime);
+    ALOGD("mBoottimeOffset      = %jd", mBoottimeOffset);
     ALOGD("mSampleRate          = %6d", mSampleRate);
     ALOGD("mFramesPerBurst      = %6d", mFramesPerBurst);
     ALOGD("mMaxMeasuredLatenessNanos = %6" PRId64, mMaxMeasuredLatenessNanos);

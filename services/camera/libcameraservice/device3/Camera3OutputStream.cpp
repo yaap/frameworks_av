@@ -60,15 +60,16 @@ Camera3OutputStream::Camera3OutputStream(int id,
         android_dataspace dataSpace, camera_stream_rotation_t rotation,
         nsecs_t timestampOffset, const std::string& physicalCameraId,
         const std::unordered_set<int32_t> &sensorPixelModesUsed, IPCTransport transport,
-        int setId, bool isMultiResolution, int64_t dynamicRangeProfile,
+        int setId, int multiResMode, int64_t dynamicRangeProfile,
         int64_t streamUseCase, bool deviceTimeBaseIsRealtime, int timestampBase,
         int mirrorMode, int32_t colorSpace, bool useReadoutTimestamp) :
         Camera3IOStreamBase(id, CAMERA_STREAM_OUTPUT, width, height,
                             /*maxSize*/0, format, dataSpace, rotation,
-                            physicalCameraId, sensorPixelModesUsed, setId, isMultiResolution,
+                            physicalCameraId, sensorPixelModesUsed, setId, multiResMode,
                             dynamicRangeProfile, streamUseCase, deviceTimeBaseIsRealtime,
                             timestampBase, colorSpace),
         mConsumer(consumer),
+        mIsShared(false),
         mTransform(0),
         mTraceFirstBuffer(true),
         mUseBufferManager(false),
@@ -95,14 +96,15 @@ Camera3OutputStream::Camera3OutputStream(int id,
         android_dataspace dataSpace, camera_stream_rotation_t rotation,
         nsecs_t timestampOffset, const std::string& physicalCameraId,
         const std::unordered_set<int32_t> &sensorPixelModesUsed, IPCTransport transport,
-        int setId, bool isMultiResolution, int64_t dynamicRangeProfile,
+        int setId, int multiResMode, int64_t dynamicRangeProfile,
         int64_t streamUseCase, bool deviceTimeBaseIsRealtime, int timestampBase,
         int mirrorMode, int32_t colorSpace, bool useReadoutTimestamp) :
         Camera3IOStreamBase(id, CAMERA_STREAM_OUTPUT, width, height, maxSize,
                             format, dataSpace, rotation, physicalCameraId, sensorPixelModesUsed,
-                            setId, isMultiResolution, dynamicRangeProfile, streamUseCase,
+                            setId, multiResMode, dynamicRangeProfile, streamUseCase,
                             deviceTimeBaseIsRealtime, timestampBase, colorSpace),
         mConsumer(consumer),
+        mIsShared(false),
         mTransform(0),
         mTraceFirstBuffer(true),
         mUseBufferManager(false),
@@ -120,9 +122,11 @@ Camera3OutputStream::Camera3OutputStream(int id,
         mState = STATE_ERROR;
     }
 
-    if (mConsumer == NULL) {
-        ALOGE("%s: Consumer is NULL!", __FUNCTION__);
-        mState = STATE_ERROR;
+    if (!flags::seamless_transitions()) {
+        if (mConsumer == NULL) {
+            ALOGE("%s: Consumer is NULL!", __FUNCTION__);
+            mState = STATE_ERROR;
+        }
     }
 
     bool needsReleaseNotify = setId > CAMERA3_STREAM_SET_ID_INVALID;
@@ -135,15 +139,16 @@ Camera3OutputStream::Camera3OutputStream(int id,
         camera_stream_rotation_t rotation, nsecs_t timestampOffset,
         const std::string& physicalCameraId,
         const std::unordered_set<int32_t> &sensorPixelModesUsed, IPCTransport transport,
-        int setId, bool isMultiResolution, int64_t dynamicRangeProfile,
+        int setId, int multiResMode, int64_t dynamicRangeProfile,
         int64_t streamUseCase, bool deviceTimeBaseIsRealtime, int timestampBase,
         int32_t colorSpace, bool useReadoutTimestamp) :
         Camera3IOStreamBase(id, CAMERA_STREAM_OUTPUT, width, height,
                             /*maxSize*/0, format, dataSpace, rotation,
-                            physicalCameraId, sensorPixelModesUsed, setId, isMultiResolution,
+                            physicalCameraId, sensorPixelModesUsed, setId, multiResMode,
                             dynamicRangeProfile, streamUseCase, deviceTimeBaseIsRealtime,
                             timestampBase, colorSpace),
         mConsumer(nullptr),
+        mIsShared(false),
         mTransform(0),
         mTraceFirstBuffer(true),
         mUseBufferManager(false),
@@ -154,19 +159,21 @@ Camera3OutputStream::Camera3OutputStream(int id,
         mMirrorMode(OutputConfiguration::MIRROR_MODE_AUTO),
         mDequeueBufferLatency(kDequeueLatencyBinSize),
         mIPCTransport(transport) {
-    // Deferred consumer only support preview surface format now.
-    if (format != HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
-        ALOGE("%s: Deferred consumer only supports IMPLEMENTATION_DEFINED format now!",
-                __FUNCTION__);
-        mState = STATE_ERROR;
-    }
+    if (!flags::seamless_transitions()) {
+        // Deferred consumer only support preview surface format now.
+        if (format != HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
+            ALOGE("%s: Deferred consumer only supports IMPLEMENTATION_DEFINED format now!",
+                    __FUNCTION__);
+            mState = STATE_ERROR;
+        }
 
-    // Validation check for the consumer usage flag.
-    if ((consumerUsage & GraphicBuffer::USAGE_HW_TEXTURE) == 0 &&
-            (consumerUsage & GraphicBuffer::USAGE_HW_COMPOSER) == 0) {
-        ALOGE("%s: Deferred consumer usage flag is illegal %" PRIu64 "!",
-              __FUNCTION__, consumerUsage);
-        mState = STATE_ERROR;
+        // Validation check for the consumer usage flag.
+        if ((consumerUsage & GraphicBuffer::USAGE_HW_TEXTURE) == 0 &&
+                (consumerUsage & GraphicBuffer::USAGE_HW_COMPOSER) == 0) {
+            ALOGE("%s: Deferred consumer usage flag is illegal %" PRIu64 "!",
+                  __FUNCTION__, consumerUsage);
+            mState = STATE_ERROR;
+        }
     }
 
     bool needsReleaseNotify = setId > CAMERA3_STREAM_SET_ID_INVALID;
@@ -182,16 +189,17 @@ Camera3OutputStream::Camera3OutputStream(int id, camera_stream_type_t type,
                                          const std::unordered_set<int32_t> &sensorPixelModesUsed,
                                          IPCTransport transport,
                                          uint64_t consumerUsage, nsecs_t timestampOffset,
-                                         int setId, bool isMultiResolution,
+                                         int setId, int multiResMode,
                                          int64_t dynamicRangeProfile, int64_t streamUseCase,
                                          bool deviceTimeBaseIsRealtime, int timestampBase,
                                          int32_t colorSpace, bool useReadoutTimestamp) :
         Camera3IOStreamBase(id, type, width, height,
                             /*maxSize*/0,
                             format, dataSpace, rotation,
-                            physicalCameraId, sensorPixelModesUsed, setId, isMultiResolution,
+                            physicalCameraId, sensorPixelModesUsed, setId, multiResMode,
                             dynamicRangeProfile, streamUseCase, deviceTimeBaseIsRealtime,
                             timestampBase, colorSpace),
+        mIsShared(false),
         mTransform(0),
         mTraceFirstBuffer(true),
         mUseBufferManager(false),
@@ -212,11 +220,25 @@ Camera3OutputStream::Camera3OutputStream(int id, camera_stream_type_t type,
 
 Camera3OutputStream::~Camera3OutputStream() {
     disconnectLocked();
+    if (flags::seamless_transitions()) {
+        if (!mRemovedConsumers.empty()) {
+            ALOGE("%s: Stream %d: Clearing removed surfaces that still has"
+                    " pending buffers!", __FUNCTION__, mId);
+            mRemovedConsumers.clear();
+        }
+    }
 }
 
 status_t Camera3OutputStream::getBufferLocked(camera_stream_buffer *buffer,
-        const std::vector<size_t>&) {
+        const std::vector<size_t>& surface_ids) {
     ATRACE_HFR_CALL();
+
+    if (flags::seamless_transitions() && ((!surface_ids.empty() &&
+            (surface_ids[0] != mCurrentSurfaceId)) || (mConsumer == nullptr))) {
+        ALOGE("%s: Stream %d: Invalid surface Id: %zu vs. %u!", __FUNCTION__, mId,
+                surface_ids[0], mCurrentSurfaceId);
+        return BAD_VALUE;
+    }
 
     ANativeWindowBuffer* anb;
     int fenceFd = -1;
@@ -246,7 +268,7 @@ status_t Camera3OutputStream::queueBufferToConsumer(sp<ANativeWindow>& consumer,
 status_t Camera3OutputStream::returnBufferLocked(
         const camera_stream_buffer &buffer,
         nsecs_t timestamp, nsecs_t readoutTimestamp,
-        int32_t transform, const std::vector<size_t>& surface_ids) {
+        const std::vector<int32_t>& transforms, const std::vector<size_t>& surface_ids) {
     ATRACE_HFR_CALL();
 
     if (mHandoutTotalBufferCount == 1) {
@@ -254,7 +276,7 @@ status_t Camera3OutputStream::returnBufferLocked(
     }
 
     status_t res = returnAnyBufferLocked(buffer, timestamp, readoutTimestamp,
-                                         /*output*/true, transform, surface_ids);
+                                         /*output*/true, transforms, surface_ids);
 
     if (res != OK) {
         return res;
@@ -335,19 +357,98 @@ status_t Camera3OutputStream::fixUpHidlJpegBlobHeader(ANativeWindowBuffer* anwBu
     return OK;
 }
 
+bool Camera3OutputStream::processRemovedConsumerLocked(
+        std::unordered_map<size_t, RemovedConsumer>::iterator& removedConsumer,
+        ANativeWindowBuffer *anwBuffer, int anwReleaseFence) {
+    bool bufferReturned = false;
+
+    // If the call to cancelBuffer is successful, then 'anwBuffer' will no longer
+    // be valid. Keep the buffer handle valid until it is needed for the
+    // 'onBufferFreed' bookkeeping callback.
+    sp<GraphicBuffer> graphicBuffer = GraphicBuffer::from(anwBuffer);
+
+    sp<ANativeWindow> currentConsumer = (*removedConsumer).second.mConsumer;
+    mLock.unlock();
+    auto res = currentConsumer->cancelBuffer(currentConsumer.get(), anwBuffer,
+            anwReleaseFence);
+    mLock.lock();
+    if (res == OK) {
+        bufferReturned = true;
+        (*removedConsumer).second.mHandoutTotalBufferCount--;
+        sp<Camera3StreamBufferFreedListener> callback = mBufferFreedListener.promote();
+        if (callback != nullptr) {
+            callback->onBufferFreed(mId, anwBuffer->handle);
+        }
+    } else {
+        ALOGE("%s: Stream %d: Error cancelling buffer from removed native window:"
+                " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
+    }
+
+    if ((*removedConsumer).second.mHandoutTotalBufferCount == 0 || res == NO_INIT) {
+        removedConsumer = mRemovedConsumers.erase(removedConsumer);
+    } else {
+        removedConsumer++;
+    }
+
+    return bufferReturned;
+}
+
+bool Camera3OutputStream::cancelOldBuffer(const std::vector<size_t>& surface_ids,
+        ANativeWindowBuffer *anwBuffer, int anwReleaseFence) {
+    if (anwBuffer == nullptr) {
+        return false;
+    }
+
+    Mutex::Autolock l(mLock);
+    bool bufferReturned = false;
+    if (!surface_ids.empty()) {
+        auto removedConsumer = mRemovedConsumers.find(surface_ids[0]);
+        if (removedConsumer != mRemovedConsumers.end()) {
+            bufferReturned = processRemovedConsumerLocked(removedConsumer, anwBuffer,
+                    anwReleaseFence);
+        }
+    }
+
+    if (!bufferReturned) {
+        // This is possible in case of Hal buffer management. Buffers can
+        // be pre-fetched without existing capture requests and then returned
+        // without surface ids. In this scenario, we need to iterate through
+        // all cached removed consumers and try to cancel the incoming buffer.
+        auto removedConsumer = mRemovedConsumers.begin();
+        while (removedConsumer != mRemovedConsumers.end() && !bufferReturned) {
+            bufferReturned = processRemovedConsumerLocked(removedConsumer, anwBuffer,
+                    anwReleaseFence);
+        }
+    }
+
+    return bufferReturned;
+}
+
 status_t Camera3OutputStream::returnBufferCheckedLocked(
             const camera_stream_buffer &buffer,
             nsecs_t timestamp,
             nsecs_t readoutTimestamp,
             [[maybe_unused]] bool output,
-            int32_t transform,
+            const std::vector<int32_t>& transforms,
             const std::vector<size_t>& surface_ids,
             /*out*/
             sp<Fence> *releaseFenceOut) {
 
     ALOG_ASSERT(output, "Expected output to be true");
 
-    status_t res;
+    camera_buffer_status bufferStatus = buffer.status;
+    bool wrongSurfaceId = false;
+    if (flags::seamless_transitions() && (!mIsShared) &&
+            ((!surface_ids.empty() && (surface_ids[0] != mCurrentSurfaceId)) ||
+             (mConsumer == nullptr))) {
+        // This can happen when inflight requests return buffers from an older
+        // removed surface or the current surface is now deferred/(not valid).
+        ALOGE("%s: Stream %d: Invalid surface id or deferred surface!", __FUNCTION__, mId);
+        bufferStatus = CAMERA_BUFFER_STATUS_ERROR;
+        wrongSurfaceId = true;
+    }
+
+    status_t res = OK;
 
     // Fence management - always honor release fence from HAL
     sp<Fence> releaseFence = new Fence(buffer.release_fence);
@@ -368,22 +469,29 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
     /**
      * Return buffer back to ANativeWindow
      */
-    if (buffer.status == CAMERA_BUFFER_STATUS_ERROR || mDropBuffers || timestamp == 0) {
+    if (bufferStatus == CAMERA_BUFFER_STATUS_ERROR || mDropBuffers || timestamp == 0) {
         // Cancel buffer
         if (mDropBuffers) {
             ALOGV("%s: Dropping a frame for stream %d.", __FUNCTION__, mId);
-        } else if (buffer.status == CAMERA_BUFFER_STATUS_ERROR) {
+        } else if (bufferStatus == CAMERA_BUFFER_STATUS_ERROR) {
             ALOGV("%s: A frame is dropped for stream %d due to buffer error.", __FUNCTION__, mId);
         } else {
             ALOGE("%s: Stream %d: timestamp shouldn't be 0", __FUNCTION__, mId);
         }
 
-        res = currentConsumer->cancelBuffer(currentConsumer.get(),
-                anwBuffer,
-                anwReleaseFence);
-        if (shouldLogError(res, state)) {
-            ALOGE("%s: Stream %d: Error cancelling buffer to native window:"
-                  " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
+        bool bufferReturned = false;
+        if (wrongSurfaceId) {
+            bufferReturned = cancelOldBuffer(surface_ids, anwBuffer, anwReleaseFence);
+        }
+
+        if (!bufferReturned && (currentConsumer != nullptr)) {
+            res = currentConsumer->cancelBuffer(currentConsumer.get(),
+                    anwBuffer,
+                    anwReleaseFence);
+            if (shouldLogError(res, state)) {
+                ALOGE("%s: Stream %d: Error cancelling buffer to native window:"
+                      " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
+            }
         }
 
         notifyBufferReleased(anwBuffer);
@@ -424,7 +532,7 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
             nsecs_t readoutTime = (readoutTimestamp != 0 ? readoutTimestamp : timestamp)
                     - mTimestampOffset;
             res = mPreviewFrameSpacer->queuePreviewBuffer(captureTime, readoutTime,
-                    transform, anwBuffer, anwReleaseFence);
+                    transforms.empty() ? -1 : transforms[0], anwBuffer, anwReleaseFence);
             if (res != OK) {
                 ALOGE("%s: Stream %d: Error queuing buffer to preview buffer spacer: %s (%d)",
                         __FUNCTION__, mId, strerror(-res), res);
@@ -435,7 +543,21 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
             nsecs_t presentTime = mSyncToDisplay ?
                     syncTimestampToDisplayLocked(captureTime, releaseFence) : captureTime;
 
-            setTransform(transform);
+            if (transforms.size() > 1 && (transforms.size() == surface_ids.size())) {
+                for (size_t i = 0; i < surface_ids.size(); i++) {
+                    setTransform(transforms[i], surface_ids[i]);
+                }
+            } else if (!transforms.empty()){
+                if (flags::seamless_transitions()) {
+                    setTransform(transforms[0], mCurrentSurfaceId);
+                } else {
+                    setTransform(transforms[0]);
+                }
+            } else {
+                ALOGV("%s: Stream %d: Failed to set stream transform!"
+                        "Transforms size: %zu surface ids size %zu", __FUNCTION__, mId,
+                        transforms.size(), surface_ids.size());
+            }
             res = native_window_set_buffers_timestamp(mConsumer.get(), presentTime);
             if (res != OK) {
                 ALOGE("%s: Stream %d: Error setting timestamp: %s (%d)",
@@ -460,11 +582,15 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
 
     // Once a valid buffer has been returned to the queue, can no longer
     // dequeue all buffers for preallocation.
-    if (buffer.status != CAMERA_BUFFER_STATUS_ERROR) {
+    if (bufferStatus != CAMERA_BUFFER_STATUS_ERROR) {
         mStreamUnpreparable = true;
     }
 
     *releaseFenceOut = releaseFence;
+
+    if (wrongSurfaceId) {
+        return UNKNOWN_TRANSACTION;
+    }
 
     return res;
 }
@@ -474,6 +600,9 @@ void Camera3OutputStream::dump(int fd, [[maybe_unused]] const Vector<String16> &
     lines += fmt::sprintf("    Stream[%d]: Output\n", mId);
     lines += fmt::sprintf("      Consumer name: %s\n", (mConsumer.get() != nullptr) ?
             mConsumer->getConsumerName() : "Deferred");
+    if (flags::seamless_transitions()) {
+        lines += fmt::sprintf("    Stream[%d]: Surface Id: %d\n", mId, mCurrentSurfaceId);
+    }
     write(fd, lines.c_str(), lines.size());
 
     Camera3IOStreamBase::dump(fd, args);
@@ -488,9 +617,16 @@ status_t Camera3OutputStream::setTransform(int transform, int surfaceId) {
 
     status_t res = OK;
 
-    if (surfaceId != 0) {
-        ALOGE("%s: Invalid surfaceId %d", __FUNCTION__, surfaceId);
-        return BAD_VALUE;
+    if (flags::seamless_transitions()) {
+        if (surfaceId != mCurrentSurfaceId) {
+            ALOGE("%s: Invalid surfaceId %d", __FUNCTION__, surfaceId);
+            return BAD_VALUE;
+        }
+    } else {
+        if (surfaceId != 0) {
+            ALOGE("%s: Invalid surfaceId %d", __FUNCTION__, surfaceId);
+            return BAD_VALUE;
+        }
     }
 
     if (transform == -1) return res;
@@ -604,6 +740,18 @@ status_t Camera3OutputStream::configureConsumerQueueLocked(bool allowPreviewResp
         return res;
     }
 
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(BQ_EXTENDEDALLOCATE)
+    const auto& additionalOptions = getAdditionalOptions();
+    if (additionalOptions.size() > 0) {
+        res = mConsumer->setAdditionalOptions(additionalOptions);
+        if (res != OK) {
+            ALOGE("%s: Unable to configure stream additional options for stream %d",
+                  __FUNCTION__, mId);
+            return res;
+        }
+    }
+#endif
+
     int maxConsumerBuffers = 0;
     res = static_cast<ANativeWindow*>(mConsumer.get())->query(
             mConsumer.get(),
@@ -642,7 +790,7 @@ status_t Camera3OutputStream::configureConsumerQueueLocked(bool allowPreviewResp
             // camera service. So no need to update mMaxCachedBufferCount.
             mTotalBufferCount += kDisplaySyncExtraBuffer;
         } else if (defaultToSpacer) {
-            mPreviewFrameSpacer = new PreviewFrameSpacer(this, mConsumer);
+            mPreviewFrameSpacer = new PreviewFrameSpacer(this, mConsumer, mCurrentSurfaceId);
             // For preview frame spacer, the extra buffer is kept by camera
             // service. So update mMaxCachedBufferCount.
             mMaxCachedBufferCount = 1;
@@ -656,7 +804,9 @@ status_t Camera3OutputStream::configureConsumerQueueLocked(bool allowPreviewResp
             }
         }
     }
-    mHandoutTotalBufferCount = 0;
+    if (!flags::seamless_transitions()) {
+        mHandoutTotalBufferCount = 0;
+    }
     mFrameCount = 0;
     mLastTimestamp = 0;
 
@@ -698,8 +848,10 @@ status_t Camera3OutputStream::configureConsumerQueueLocked(bool allowPreviewResp
      * Also Camera3BufferManager does not support display/texture streams as they have its own
      * buffer management logic.
      */
+    bool isAsyncStreams = (getOriginalFormat() == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED
+            && (isConsumedByHWComposer() || isConsumedByHWTexture()));
     if (mBufferManager != 0 && mSetId > CAMERA3_STREAM_SET_ID_INVALID &&
-            !(isConsumedByHWComposer() || isConsumedByHWTexture())) {
+            (isMultiResolution() || !isAsyncStreams)) {
         uint64_t consumerUsage = 0;
         getEndpointUsage(&consumerUsage);
         uint32_t width = (mMaxSize == 0) ? getWidth() : mMaxSize;
@@ -707,7 +859,8 @@ status_t Camera3OutputStream::configureConsumerQueueLocked(bool allowPreviewResp
         StreamInfo streamInfo(
                 getId(), getStreamSetId(), width, height, getFormat(), getDataSpace(),
                 mUsage | consumerUsage, mTotalBufferCount,
-                /*isConfigured*/true, isMultiResolution());
+                /*isConfigured*/true, getMultiResMode(), getAdditionalOptions(),
+                mUseReadoutTime, getTimestampBase());
         wp<Camera3OutputStream> weakThis(this);
         res = mBufferManager->registerStream(weakThis,
                 streamInfo);
@@ -873,10 +1026,10 @@ void Camera3OutputStream::onCachedBufferQueued() {
     mOutputBufferReturnedSignal.signal();
 }
 
-status_t Camera3OutputStream::disconnectLocked() {
+status_t Camera3OutputStream::disconnectLocked(bool force) {
     status_t res;
 
-    if ((res = Camera3IOStreamBase::disconnectLocked()) != OK) {
+    if ((res = Camera3IOStreamBase::disconnectLocked(force)) != OK) {
         return res;
     }
 
@@ -1019,12 +1172,115 @@ status_t Camera3OutputStream::setBufferManager(sp<Camera3BufferManager> bufferMa
     return OK;
 }
 
-status_t Camera3OutputStream::updateStream(const std::vector<SurfaceHolder> &/*outputSurfaces*/,
+ssize_t Camera3OutputStream::getSurfaceId(const sp<Surface> &surface) {
+    if (flags::seamless_transitions()) {
+        Mutex::Autolock l(mLock);
+        ssize_t id = -1;
+        if (mConsumer == surface) {
+            return mCurrentSurfaceId;
+        }
+
+        return id;
+    }
+
+    return 0;
+}
+
+ssize_t Camera3OutputStream::getCurrentSurfaceId() const {
+    Mutex::Autolock l(mLock);
+    return mCurrentSurfaceId;
+}
+
+status_t Camera3OutputStream::updateInternalStream(
+        KeyedVector<sp<Surface>, size_t> * outputMap /*out*/) {
+    if (!flags::seamless_transitions()) {
+        ALOGE("%s: this method is not supported!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    if (isBlockedByPrepare()) {
+        ALOGE("%s: Stream update is blocked by an ongoing prepare operation!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    if (outputMap == nullptr) {
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock l(mLock);
+
+    if (mConsumer.get() == nullptr) {
+        ALOGE("%s: Stream update on deferred output!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    mCurrentSurfaceId++;
+    outputMap->add(mConsumer, mCurrentSurfaceId);
+
+    return OK;
+}
+
+status_t Camera3OutputStream::updateStream(const std::vector<SurfaceHolder> &outputSurfaces,
             const std::vector<OutputStreamInfo> &/*outputInfo*/,
-            const std::vector<size_t> &/*removedSurfaceIds*/,
-            KeyedVector<sp<Surface>, size_t> * /*outputMapo*/) {
-    ALOGE("%s: this method is not supported!", __FUNCTION__);
-    return INVALID_OPERATION;
+            const std::vector<size_t> &removedSurfaceIds,
+            KeyedVector<sp<Surface>, size_t> * outputMap) {
+    if (!flags::seamless_transitions()) {
+        ALOGE("%s: this method is not supported!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    if (isBlockedByPrepare()) {
+        ALOGE("%s: Stream update is blocked by an ongoing prepare operation!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    if (outputMap == nullptr) {
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock l(mLock);
+
+    if (!removedSurfaceIds.empty() && (mConsumer.get() != nullptr)) {
+        RemovedConsumer removedConsumer = {mHandoutTotalBufferCount, mConsumer};
+
+        auto ret = disconnectLocked(true /*force*/);
+        if (ret != OK) {
+            return ret;
+        }
+
+        if (mHandoutTotalBufferCount > 0) {
+            mRemovedConsumers.emplace(mCurrentSurfaceId, removedConsumer);
+        }
+        mConsumer = nullptr;
+        mCurrentSurfaceId++;
+        mState = STATE_IN_CONFIG;
+    }
+
+    if (!outputSurfaces.empty()) {
+        for (const auto& consumerIt : mRemovedConsumers) {
+            auto removedConsumer = consumerIt.second.mConsumer;
+            if (removedConsumer == outputSurfaces[0].mSurface) {
+                ALOGE("%s: Output surface already registered and awaiting buffers!",
+                        __FUNCTION__);
+                return BAD_VALUE;
+            }
+        }
+
+        auto ret = setConsumersLocked(outputSurfaces);
+        if (ret != OK) {
+            return ret;
+        }
+
+        ret = configureQueueLocked();
+        if (ret != OK) {
+            return ret;
+        }
+
+        mState = STATE_CONFIGURED;
+        outputMap->add(outputSurfaces[0].mSurface, mCurrentSurfaceId);
+    }
+
+    return OK;
 }
 
 void Camera3OutputStream::BufferProducerListener::onBufferReleased() {
@@ -1159,14 +1415,26 @@ status_t Camera3OutputStream::notifyBufferReleased(ANativeWindowBuffer* /*anwBuf
 bool Camera3OutputStream::isConsumerConfigurationDeferred(size_t surface_id) const {
     Mutex::Autolock l(mLock);
 
-    if (surface_id != 0) {
-        ALOGE("%s: surface_id %zu for Camera3OutputStream should be 0!", __FUNCTION__, surface_id);
+    if (flags::seamless_transitions()) {
+        if (surface_id != mCurrentSurfaceId) {
+            ALOGE("%s: surface_id %zu for Camera3OutputStream should be %u!", __FUNCTION__,
+                    surface_id, mCurrentSurfaceId);
+        }
+    } else {
+        if (surface_id != 0) {
+            ALOGE("%s: surface_id %zu for Camera3OutputStream should be 0!", __FUNCTION__,
+                    surface_id);
+        }
     }
     return mConsumer == nullptr;
 }
 
 status_t Camera3OutputStream::setConsumers(const std::vector<SurfaceHolder>& consumers) {
     Mutex::Autolock l(mLock);
+    return setConsumersLocked(consumers);
+}
+
+status_t Camera3OutputStream::setConsumersLocked(const std::vector<SurfaceHolder>& consumers) {
     if (consumers.size() != 1) {
         ALOGE("%s: it's illegal to set %zu consumer surfaces!",
                   __FUNCTION__, consumers.size());
@@ -1541,6 +1809,20 @@ nsecs_t Camera3OutputStream::syncTimestampToDisplayLocked(nsecs_t t, sp<Fence> r
 bool Camera3OutputStream::shouldLogError(status_t res) {
     Mutex::Autolock l(mLock);
     return shouldLogError(res, mState);
+}
+
+status_t Camera3OutputStream::getUniqueSurfaceIds(
+        const std::vector<size_t>& surfaceIds,
+        /*out*/std::vector<size_t>* outUniqueIds) {
+    Mutex::Autolock l(mLock);
+    if (outUniqueIds == nullptr || surfaceIds.size() > 1) {
+        return BAD_VALUE;
+    }
+
+    outUniqueIds->clear();
+    outUniqueIds->push_back(mCurrentSurfaceId);
+
+    return OK;
 }
 
 }; // namespace camera3

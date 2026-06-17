@@ -191,6 +191,11 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
             status = DEAD_OBJECT;
             goto end;
         }
+        if (flags & CBLK_POISONED) {
+            ALOGV("Track poisoned");
+            status = PERMISSION_DENIED;
+            goto end;
+        }
         if (flags & CBLK_DISABLED) {
             ALOGV("Track disabled");
             status = NOT_ENOUGH_DATA;
@@ -313,7 +318,7 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
             break;
         }
 
-        int32_t old = android_atomic_and(~CBLK_FUTEX_WAKE, &cblk->mFutex);
+        int32_t old = android_atomic_and(~(CBLK_FUTEX_WAKE | CBLK_FUTEX_NOTIFY), &cblk->mFutex);
 
         // Check inactive to prevent waiting if the track has been disabled due to underrun
         // (or invalidated).  The subsequent call to obtainBufer will return NOT_ENOUGH_DATA
@@ -322,14 +327,23 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
         const bool inactive = current_flags & (CBLK_INVALID | CBLK_DISABLED);
 
         if (!(old & CBLK_FUTEX_WAKE) && !inactive) {
+            // At this point, the "old" state of the futex wait doesn't have the WAKE bit set
+            // which means the server hasn't delivered data before we cleared it.
+
             if (measure && !beforeIsValid) {
                 clock_gettime(CLOCK_MONOTONIC, &before);
                 beforeIsValid = true;
             }
-            errno = 0;
-            (void) syscall(__NR_futex, &cblk->mFutex,
+
+            // Log before waiting so we know we aren't frozen.
+            ALOGV("%s: cblk->mFutex: %#x  old mFutex: %#x  wait: %p",
+                    __func__, android_atomic_load(&cblk->mFutex), old, ts);
+
+            long ret = syscall(__NR_futex, &cblk->mFutex,
                     mClientInServer ? FUTEX_WAIT_PRIVATE : FUTEX_WAIT, old & ~CBLK_FUTEX_WAKE, ts);
-            status_t error = errno; // clock_gettime can affect errno
+            status_t error = ret == -1 ? errno : 0; // clock_gettime can affect errno
+            ALOGD_IF(ret == -1 && error == 0, "%s: futex failed but no error set.", __func__);
+
             // update total elapsed time spent waiting
             if (measure) {
                 struct timespec after;
@@ -350,14 +364,19 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
             }
             switch (error) {
             case 0:            // normal wakeup by server, or by binderDied()
+                ALOGV("%s: wake success", __func__);
+                break;
+            case ETIMEDOUT:    // time-out expired
+                ALOGV("%s: wake timeout", __func__);
+                break;
             case EWOULDBLOCK:  // benign race condition with server
             case EINTR:        // wait was interrupted by signal or other spurious wakeup
-            case ETIMEDOUT:    // time-out expired
                 // FIXME these error/non-0 status are being dropped
+                ALOGD("%s: benign status '%s' (recheck)", __func__, strerror(error));
                 break;
             default:
                 status = error;
-                ALOGE("%s unexpected error %s", __func__, strerror(status));
+                ALOGE("%s: unexpected error %s", __func__, strerror(error));
                 goto end;
             }
         }
@@ -946,11 +965,20 @@ void ServerProxy::releaseBuffer(Buffer* buffer)
     }
     // FIXME AudioRecord wakeup needs to be optimized; it currently wakes up client every time
     if (!mIsOut || (mAvailToClient + stepCount >= minimum)) {
-        ALOGV("mAvailToClient=%zu stepCount=%zu minimum=%zu", mAvailToClient, stepCount, minimum);
         int32_t old = android_atomic_or(CBLK_FUTEX_WAKE, &cblk->mFutex);
+        ALOGV("%s: mAvailToClient: %zu stepCount: %zu minimum: %zu  old mFutex: %#x",
+                __func__, mAvailToClient, stepCount, minimum, old);
         if (!(old & CBLK_FUTEX_WAKE)) {
-            (void) syscall(__NR_futex, &cblk->mFutex,
+            long ret = syscall(__NR_futex, &cblk->mFutex,
                     mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE, INT_MAX);
+            if (ret == 0) {
+                ALOGW("%s: dropped wake", __func__);
+            } else if (ret < 0) {
+                ALOGW("%s: wake error:%s", __func__, strerror(errno));
+            } else if (ret > 1) {
+                ALOGD("%s: woke %ld threads, expecting 1", __func__, ret);
+            }
+            mSkippedWake = ret < 1;  // store whether the last wake was skipped.
         }
     }
 
@@ -1013,7 +1041,7 @@ bool  AudioTrackServerProxy::setStreamEndDone() {
             (android_atomic_or(CBLK_STREAM_END_DONE, &cblk->mFlags) & CBLK_STREAM_END_DONE) != 0;
     if (!old) {
         (void) syscall(__NR_futex, &cblk->mFutex, mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE,
-                1);
+                INT32_MAX);
     }
     return old;
 }

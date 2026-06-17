@@ -186,7 +186,8 @@ status_t AudioPlayback::fillBuffer() {
     size_t bytesAvailable = mMemCapacity - mBytesUsedSoFar;
     while (bytesAvailable > 0) {
         AudioTrack::Buffer trackBuffer;
-        trackBuffer.frameCount = mTrack->frameCount() * 2;
+        const size_t framesNeeded = (bytesAvailable + mTrack->frameSize() - 1) / mTrack->frameSize();
+        trackBuffer.frameCount = std::min(mTrack->frameCount() * 2, framesNeeded);
         status_t status = mTrack->obtainBuffer(&trackBuffer, 1, &nonContig);
         if (OK == status) {
             size_t bytesToCopy = std::min(bytesAvailable, trackBuffer.size());
@@ -706,32 +707,9 @@ status_t isAutomotivePlatform(bool* isAutomotive) {
 }
 
 status_t listAudioPorts(std::vector<audio_port_v7>& portsVec) {
-    int attempts = 5;
-    status_t status;
-    unsigned int generation1, generation;
-    unsigned int numPorts;
-    do {
-        if (attempts-- < 0) {
-            status = TIMED_OUT;
-            break;
-        }
-        // query for number of ports.
-        numPorts = 0;
-        status = AudioSystem::listAudioPorts(AUDIO_PORT_ROLE_NONE, AUDIO_PORT_TYPE_NONE, &numPorts,
-                                             nullptr, &generation1);
-        if (status != NO_ERROR) {
-            ALOGE("AudioSystem::listAudioPorts returned error %d", status);
-            break;
-        }
-        portsVec.resize(numPorts);
-        status = AudioSystem::listAudioPorts(AUDIO_PORT_ROLE_NONE, AUDIO_PORT_TYPE_NONE, &numPorts,
-                                             portsVec.data(), &generation);
-    } while (generation1 != generation && status == NO_ERROR);
-    if (status != NO_ERROR) {
-        numPorts = 0;
-        portsVec.clear();
-    }
-    return status;
+    unsigned int generation;
+    return AudioSystem::listAudioPorts(AUDIO_PORT_ROLE_NONE, AUDIO_PORT_TYPE_NONE,
+                                             portsVec, &generation);
 }
 
 namespace {
@@ -774,30 +752,8 @@ status_t getPortByAttributes(audio_port_role_t role, audio_port_type_t type,
 }
 
 status_t listAudioPatches(std::vector<struct audio_patch>& patchesVec) {
-    int attempts = 5;
-    status_t status;
-    unsigned int generation1, generation;
-    unsigned int numPatches;
-    do {
-        if (attempts-- < 0) {
-            status = TIMED_OUT;
-            break;
-        }
-        // query for number of patches.
-        numPatches = 0;
-        status = AudioSystem::listAudioPatches(&numPatches, nullptr, &generation1);
-        if (status != NO_ERROR) {
-            ALOGE("AudioSystem::listAudioPatches returned error %d", status);
-            break;
-        }
-        patchesVec.resize(numPatches);
-        status = AudioSystem::listAudioPatches(&numPatches, patchesVec.data(), &generation);
-    } while (generation1 != generation && status == NO_ERROR);
-    if (status != NO_ERROR) {
-        numPatches = 0;
-        patchesVec.clear();
-    }
-    return status;
+    unsigned int generation;
+    return AudioSystem::listAudioPatches(patchesVec, &generation);
 }
 
 status_t getPatchForOutputMix(audio_io_handle_t audioIo, audio_patch& patch) {

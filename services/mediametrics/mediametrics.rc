@@ -3,4 +3,6 @@ service mediametrics /system/bin/mediametrics
     user media
     group media
     ioprio rt 4
-    task_profiles AudioAppCapacity
+    task_profiles AudioAppCapacity HighPerformance
+    # we may update this from a module
+    updatable

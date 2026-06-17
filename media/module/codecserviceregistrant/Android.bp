@@ -12,6 +12,7 @@ cc_defaults {
     runtime_libs: [
         "libcodec2_soft_aacdec",
         "libcodec2_soft_aacenc",
+        "libcodec2_soft_xheaacenc",
         "libcodec2_soft_amrnbdec",
         "libcodec2_soft_amrnbenc",
         "libcodec2_soft_amrwbdec",
@@ -69,7 +70,7 @@ cc_library {
     ],
 
     defaults: [
-        "libcodec2-aidl-defaults",
+        "libcodec2-aidl-V2-defaults",
         "libcodec2-hidl-defaults",
         "libcodec2-runtime-libs",
     ],

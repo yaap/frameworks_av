@@ -431,6 +431,8 @@ inline static const char *asString_AV1Level(int32_t i, const char *def = "??") {
 inline constexpr int32_t HEVCProfileMain        = 0x01;
 inline constexpr int32_t HEVCProfileMain10      = 0x02;
 inline constexpr int32_t HEVCProfileMainStill   = 0x04;
+inline constexpr int32_t HEVCProfileMain400     = 0x08;
+inline constexpr int32_t HEVCProfileMain444     = 0x10;
 inline constexpr int32_t HEVCProfileMain10HDR10 = 0x1000;
 inline constexpr int32_t HEVCProfileMain10HDR10Plus = 0x2000;
 
@@ -439,6 +441,8 @@ inline static const char *asString_HEVCProfile(int32_t i, const char *def = "??"
         case HEVCProfileMain:               return "Main";
         case HEVCProfileMain10:             return "Main10";
         case HEVCProfileMainStill:          return "MainStill";
+        case HEVCProfileMain400:            return "Main400";
+        case HEVCProfileMain444:            return "Main444";
         case HEVCProfileMain10HDR10:        return "Main10HDR10";
         case HEVCProfileMain10HDR10Plus:    return "Main10HDR10Plus";
         default:                            return def;
@@ -720,6 +724,78 @@ inline static const char *asString_APVBandLevel(int32_t i, const char *def = "??
         default:                return def;
     }
 }
+
+// VVC ProfileLevel
+inline constexpr int32_t VVCProfileMain8                = 0x01;
+inline constexpr int32_t VVCProfileMain10               = 0x02;
+inline constexpr int32_t VVCProfileMain10Still          = 0x04;
+inline constexpr int32_t VVCProfileMain10HDR10          = 0x1000;
+inline constexpr int32_t VVCProfileMain10HDR10Plus      = 0x2000;
+
+inline static const char *asString_VVCProfile(int32_t i, const char *def = "??") {
+    switch (i) {
+        case VVCProfileMain8:                   return "Main8";
+        case VVCProfileMain10:                  return "Main10";
+        case VVCProfileMain10Still:             return "Main10Still";
+        case VVCProfileMain10HDR10:             return "Main10HDR10";
+        case VVCProfileMain10HDR10Plus:         return "Main10HDR10Plus";
+        default:                                return def;
+    }
+}
+
+inline constexpr int32_t VVCMainTierLevel10 = 0x1;
+inline constexpr int32_t VVCMainTierLevel20 = 0x2;
+inline constexpr int32_t VVCMainTierLevel21 = 0x4;
+inline constexpr int32_t VVCMainTierLevel30 = 0x8;
+inline constexpr int32_t VVCMainTierLevel31 = 0x10;
+inline constexpr int32_t VVCMainTierLevel40 = 0x20;
+inline constexpr int32_t VVCHighTierLevel40 = 0x40;
+inline constexpr int32_t VVCMainTierLevel41 = 0x80;
+inline constexpr int32_t VVCHighTierLevel41 = 0x100;
+inline constexpr int32_t VVCMainTierLevel50 = 0x200;
+inline constexpr int32_t VVCHighTierLevel50 = 0x400;
+inline constexpr int32_t VVCMainTierLevel51 = 0x800;
+inline constexpr int32_t VVCHighTierLevel51 = 0x1000;
+inline constexpr int32_t VVCMainTierLevel52 = 0x2000;
+inline constexpr int32_t VVCHighTierLevel52 = 0x4000;
+inline constexpr int32_t VVCMainTierLevel60 = 0x8000;
+inline constexpr int32_t VVCHighTierLevel60 = 0x10000;
+inline constexpr int32_t VVCMainTierLevel61 = 0x20000;
+inline constexpr int32_t VVCHighTierLevel61 = 0x40000;
+inline constexpr int32_t VVCMainTierLevel62 = 0x80000;
+inline constexpr int32_t VVCHighTierLevel62 = 0x100000;
+inline constexpr int32_t VVCMainTierLevel63 = 0x200000;
+inline constexpr int32_t VVCHighTierLevel63 = 0x400000;
+
+inline static const char *asString_VVCTierLevel(int32_t i, const char *def = "??") {
+    switch (i) {
+        case VVCMainTierLevel10:   return "Main 1.0";
+        case VVCMainTierLevel20:   return "Main 2.0";
+        case VVCMainTierLevel21:   return "Main 2.1";
+        case VVCMainTierLevel30:   return "Main 3.0";
+        case VVCMainTierLevel31:   return "Main 3.1";
+        case VVCMainTierLevel40:   return "Main 4.0";
+        case VVCHighTierLevel40:   return "High 4.0";
+        case VVCMainTierLevel41:   return "Main 4.1";
+        case VVCHighTierLevel41:   return "High 4.1";
+        case VVCMainTierLevel50:   return "Main 5.0";
+        case VVCHighTierLevel50:   return "High 5.0";
+        case VVCMainTierLevel51:   return "Main 5.1";
+        case VVCHighTierLevel51:   return "High 5.1";
+        case VVCMainTierLevel52:   return "Main 5.2";
+        case VVCHighTierLevel52:   return "High 5.2";
+        case VVCMainTierLevel60:   return "Main 6.0";
+        case VVCHighTierLevel60:   return "High 6.0";
+        case VVCMainTierLevel61:   return "Main 6.1";
+        case VVCHighTierLevel61:   return "High 6.1";
+        case VVCMainTierLevel62:   return "Main 6.2";
+        case VVCHighTierLevel62:   return "High 6.2";
+        case VVCMainTierLevel63:   return "Main 6.3";
+        case VVCHighTierLevel63:   return "High 6.3";
+        default:                   return def;
+    }
+}
+
 
 // IAMF ProfileLevel
 inline constexpr int32_t IAMF_CODEC_OPUS            = 0x1;
@@ -1003,6 +1079,7 @@ inline constexpr char MIMETYPE_VIDEO_MPEG2[] = "video/mpeg2";
 inline constexpr char MIMETYPE_VIDEO_RAW[] = "video/raw";
 inline constexpr char MIMETYPE_VIDEO_DOLBY_VISION[] = "video/dolby-vision";
 inline constexpr char MIMETYPE_VIDEO_SCRAMBLED[] = "video/scrambled";
+inline constexpr char MIMETYPE_VIDEO_VVC[] = "video/vvc";
 
 inline constexpr char MIMETYPE_AUDIO_AMR_NB[] = "audio/3gpp";
 inline constexpr char MIMETYPE_AUDIO_AMR_WB[] = "audio/amr-wb";
@@ -1083,9 +1160,11 @@ inline constexpr char KEY_CREATE_INPUT_SURFACE_SUSPENDED[] = "create-input-buffe
 inline constexpr char KEY_DURATION[] = "durationUs";
 inline constexpr char KEY_FEATURE_[] = "feature-";
 inline constexpr char KEY_FLAC_COMPRESSION_LEVEL[] = "flac-compression-level";
+inline constexpr char KEY_HORIZONTAL_FLIP[] = "horizontal-flip";
 inline constexpr char KEY_FRAME_RATE[] = "frame-rate";
 inline constexpr char KEY_GRID_COLUMNS[] = "grid-cols";
 inline constexpr char KEY_GRID_ROWS[] = "grid-rows";
+inline constexpr char KEY_HDR_ST2094_50_INFO[] = "hdr-st2094-50-info";
 inline constexpr char KEY_HDR_STATIC_INFO[] = "hdr-static-info";
 inline constexpr char KEY_HDR10_PLUS_INFO[] = "hdr10-plus-info";
 inline constexpr char KEY_HEIGHT[] = "height";
@@ -1131,9 +1210,11 @@ inline constexpr char KEY_SAMPLE_RATE[] = "sample-rate";
 inline constexpr char KEY_SLICE_HEIGHT[] = "slice-height";
 inline constexpr char KEY_STRIDE[] = "stride";
 inline constexpr char KEY_TEMPORAL_LAYERING[] = "ts-schema";
+inline constexpr char KEY_TEMPORAL_LAYER_ID[] = "temporal-layer-id";
 inline constexpr char KEY_TILE_HEIGHT[] = "tile-height";
 inline constexpr char KEY_TILE_WIDTH[] = "tile-width";
 inline constexpr char KEY_TRACK_ID[] = "track-id";
+inline constexpr char KEY_VIDEO_BITRATE_LAYERING[] = "video-bitrate-layering";
 inline constexpr char KEY_VIDEO_ENCODING_STATISTICS_LEVEL[] = "video-encoding-statistics-level";
 inline constexpr char KEY_VIDEO_QP_AVERAGE[] = "video-qp-average";
 inline constexpr char KEY_VIDEO_QP_B_MAX[] = "video-qp-b-max";
@@ -1184,6 +1265,20 @@ inline constexpr int32_t INFO_OUTPUT_FORMAT_CHANGED  = -2;
 inline constexpr int32_t INFO_TRY_AGAIN_LATER        = -1;
 inline constexpr int32_t VIDEO_SCALING_MODE_SCALE_TO_FIT               = 1;
 inline constexpr int32_t VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING = 2;
+
+inline constexpr int32_t SECURITY_MODEL_SANDBOXED = 0;
+inline constexpr int32_t SECURITY_MODEL_MEMORY_SAFE = 1;
+inline constexpr int32_t SECURITY_MODEL_TRUSTED_CONTENT_ONLY = 2;
+
+inline static const char *asString_SecurityModel(int32_t i, const char *def = "??") {
+    switch (i) {
+        case SECURITY_MODEL_SANDBOXED:            return "Sandboxed";
+        case SECURITY_MODEL_MEMORY_SAFE:          return "MemorySafe";
+        case SECURITY_MODEL_TRUSTED_CONTENT_ONLY: return "TrustedContentOnly";
+        default:                                  return def;
+    }
+}
+
 inline constexpr char PARAMETER_KEY_OFFSET_TIME[] = "time-offset-us";
 inline constexpr char PARAMETER_KEY_REQUEST_SYNC_FRAME[] = "request-sync";
 inline constexpr char PARAMETER_KEY_SUSPEND[] = "drop-input-frames";

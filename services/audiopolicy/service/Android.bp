@@ -30,8 +30,8 @@ cc_defaults {
         "capture_state_listener-aidl-cpp",
         "com.android.media.audio-aconfig-cc",
         "framework-permission-aidl-cpp",
-        "libPlatformProperties",
         "libactivitymanager_aidl",
+        "libaudiobase",
         "libaudioclient",
         "libaudioclient_aidl_conversion",
         "libaudiofoundation",
@@ -61,6 +61,9 @@ cc_defaults {
         "libxml2",
         "packagemanager_aidl-cpp",
         "spatializer-aidl-cpp",
+    ],
+    static_libs: [
+        "libPlatformProperties",
     ],
 }
 

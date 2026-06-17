@@ -19,6 +19,14 @@ flag {
 
 flag {
     namespace: "camera_platform"
+    name: "device_removed_callback"
+    is_exported: true
+    description: "Notify clients when camera devices are no longer present"
+    bug: "442831091"
+}
+
+flag {
+    namespace: "camera_platform"
     name: "concert_mode"
     is_exported: true
     description: "Introduces a new concert mode camera extension type"
@@ -39,6 +47,14 @@ flag {
     is_exported: true
     description: "Flash brightness level control in manual flash mode"
     bug: "238348881"
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "vendor_defined_camera_extensions"
+    is_exported: true
+    description: "Enable vendors to define and implement device specific camera extension modes"
+    bug: "419869310"
 }
 
 flag {
@@ -104,16 +120,6 @@ flag {
 
 flag {
     namespace: "camera_platform"
-    name: "dumpsys_request_stream_ids"
-    description: "Add stream id information to last request dumpsys"
-    bug: "357913929"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
-}
-
-flag {
-    namespace: "camera_platform"
     name: "mirror_mode_shared_surfaces"
     is_exported: true
     description: "Support setting and getting mirror mode for shared surfaces"
@@ -173,16 +179,6 @@ flag {
 
 flag {
     namespace: "camera_platform"
-    name: "fmq_metadata"
-    description: "Allow CameraMetadata transfer for ndk / sdk clients."
-    bug: "362791857"
-    metadata {
-        purpose: PURPOSE_BUGFIX
-    }
-}
-
-flag {
-    namespace: "camera_platform"
     name: "desktop_effects"
     description: "Applies system controlled effects targetting video conferencing"
     bug: "376797335"
@@ -214,10 +210,125 @@ flag {
 
 flag {
     namespace: "camera_platform"
-    name: "surface_format_fix"
-    description: "Consider format overrides for RGB output formats"
-    bug: "424865503"
+    name: "seamless_transitions"
+    is_exported: true
+    description: "Enable clients to add and remove deferred surfaces during capture sessions"
+    bug: "329909911"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "fix_managed_profiles_receiver"
+    description: "Adds a BC receiver for the proper parent user on CameraProxyService"
+    bug: "442009819"
     metadata {
         purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "configure_streams_batch"
+    description: "Batch binder calls in createCaptureSession"
+    bug: "414526014"
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "new_dynamic_range_profiles"
+    is_exported: true
+    description: "Add support for new AGTM dynamic range profile"
+    bug: "455903743"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "gralloc_additional_options"
+    description: "Add additionalOptions gralloc flag for camera buffers"
+    bug: "410091316"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    is_exported: true
+    name: "logical_multi_camera_additional_results"
+    description: "Add additional metadata info to the logical camera result"
+    bug: "447619057"
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "camera_warm_up"
+    description: "Send hint to camera HAL to warm up pipelines"
+    bug: "382543313"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+     namespace: "camera_platform"
+     name: "camera_device_type_api"
+     is_exported: true
+     description: "Add APIs for camera devices to report their type, such as internal or remote"
+     bug: "447688067"
+     metadata {
+         purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "multi_resolution_concurrent_readers"
+    is_exported: true
+    description: "Support concurrent readers in multi-resolution outputs"
+    bug: "447659256"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "camera_raw14_format"
+    is_exported: true
+    description: "Add new RAW14 image format"
+    bug: "446724373"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "output_configuration_get_usage"
+    is_exported: true
+    description: "Unhide the getUsage function in OutputConfiguration"
+    bug: "473886000"
+    metadata {
+        purpose: PURPOSE_FEATURE
+    }
+}
+
+flag {
+    namespace: "camera_platform"
+    name: "output_configuration_get_physical_camera_id"
+    is_exported: true
+    description: "Unhide the getPhysicalCameraId function in OutputConfiguration"
+    bug: "474383302"
+    metadata {
+        purpose: PURPOSE_FEATURE
     }
 }

@@ -62,18 +62,20 @@ void CameraServiceProxyWrapper::CameraSessionStatsWrapper::onOpen(
 
 void CameraServiceProxyWrapper::CameraSessionStatsWrapper::onClose(
     sp<hardware::ICameraServiceProxy>& proxyBinder, int32_t latencyMs,
-    bool deviceError) {
+    bool deviceError, int32_t errorState) {
     Mutex::Autolock l(mLock);
 
     mSessionStats.mNewCameraState = CameraSessionStats::CAMERA_STATE_CLOSED;
     mSessionStats.mLatencyMs = latencyMs;
     mSessionStats.mDeviceError = deviceError;
     mSessionStats.mSessionIndex = 0;
+    mSessionStats.mErrorState = errorState;
     updateProxyDeviceState(proxyBinder);
 }
 
 void CameraServiceProxyWrapper::CameraSessionStatsWrapper::onStreamConfigured(
-        int operatingMode, bool internalReconfig, int32_t latencyMs) {
+        int operatingMode, bool internalReconfig, int32_t latencyMs,
+        int inputFormat) {
     Mutex::Autolock l(mLock);
 
     if (internalReconfig) {
@@ -81,6 +83,7 @@ void CameraServiceProxyWrapper::CameraSessionStatsWrapper::onStreamConfigured(
     } else {
         mSessionStats.mLatencyMs = latencyMs;
         mSessionStats.mSessionType = operatingMode;
+        mSessionStats.mInputFormat = inputFormat;
     }
 }
 
@@ -103,7 +106,7 @@ void CameraServiceProxyWrapper::CameraSessionStatsWrapper::onIdle(
         int64_t requestCount, int64_t resultErrorCount, bool deviceError,
         const std::string& userTag, int32_t videoStabilizationMode, bool usedUltraWide,
         bool usedZoomOverride, std::pair<int32_t, int32_t> mostRequestedFpsRange,
-        const std::vector<hardware::CameraStreamStats>& streamStats) {
+        const std::vector<hardware::CameraStreamStats>& streamStats, int32_t errorState) {
     Mutex::Autolock l(mLock);
 
     mSessionStats.mNewCameraState = CameraSessionStats::CAMERA_STATE_IDLE;
@@ -116,6 +119,7 @@ void CameraServiceProxyWrapper::CameraSessionStatsWrapper::onIdle(
     mSessionStats.mUsedZoomOverride = usedZoomOverride;
     mSessionStats.mMostRequestedFpsRange = mostRequestedFpsRange;
     mSessionStats.mStreamStats = streamStats;
+    mSessionStats.mErrorState = errorState;
 
     updateProxyDeviceState(proxyBinder);
 
@@ -367,7 +371,7 @@ int CameraServiceProxyWrapper::getAutoframingOverride(const std::string& package
 }
 
 void CameraServiceProxyWrapper::logStreamConfigured(const std::string& id,
-        int operatingMode, bool internalConfig, int32_t latencyMs) {
+        int operatingMode, bool internalConfig, int32_t latencyMs, int32_t inputFormat) {
     std::shared_ptr<CameraSessionStatsWrapper> sessionStats;
     {
         Mutex::Autolock l(mLock);
@@ -379,9 +383,9 @@ void CameraServiceProxyWrapper::logStreamConfigured(const std::string& id,
         sessionStats = mSessionStatsMap[id];
     }
 
-    ALOGV("%s: id %s, operatingMode %d, internalConfig %d, latencyMs %d",
-            __FUNCTION__, id.c_str(), operatingMode, internalConfig, latencyMs);
-    sessionStats->onStreamConfigured(operatingMode, internalConfig, latencyMs);
+    ALOGV("%s: id %s, operatingMode %d, internalConfig %d, latencyMs %d, inputFormat %d",
+            __FUNCTION__, id.c_str(), operatingMode, internalConfig, latencyMs, inputFormat);
+    sessionStats->onStreamConfigured(operatingMode, internalConfig, latencyMs, inputFormat);
 }
 
 void CameraServiceProxyWrapper::logActive(const std::string& id, float maxPreviewFps) {
@@ -405,7 +409,7 @@ void CameraServiceProxyWrapper::logIdle(const std::string& id,
         int64_t requestCount, int64_t resultErrorCount, bool deviceError,
         const std::string& userTag, int32_t videoStabilizationMode, bool usedUltraWide,
         bool usedZoomOverride, std::pair<int32_t, int32_t> mostRequestedFpsRange,
-        const std::vector<hardware::CameraStreamStats>& streamStats) {
+        const std::vector<hardware::CameraStreamStats>& streamStats, int32_t errorState) {
     std::shared_ptr<CameraSessionStatsWrapper> sessionStats;
     {
         Mutex::Autolock l(mLock);
@@ -418,9 +422,10 @@ void CameraServiceProxyWrapper::logIdle(const std::string& id,
     }
 
     ALOGV("%s: id %s, requestCount %" PRId64 ", resultErrorCount %" PRId64 ", deviceError %d"
-            ", userTag %s, videoStabilizationMode %d, most common FPS [%d,%d]",
+            ", userTag %s, videoStabilizationMode %d, most common FPS [%d,%d], errorState %d",
             __FUNCTION__, id.c_str(), requestCount, resultErrorCount, deviceError, userTag.c_str(),
-            videoStabilizationMode, mostRequestedFpsRange.first, mostRequestedFpsRange.second);
+            videoStabilizationMode, mostRequestedFpsRange.first, mostRequestedFpsRange.second,
+            errorState);
     for (size_t i = 0; i < streamStats.size(); i++) {
         ALOGV("%s: streamStats[%zu]: w %d h %d, requestedCount %" PRId64 ", dropCount %"
                 PRId64 ", startTimeMs %d" ,
@@ -432,12 +437,12 @@ void CameraServiceProxyWrapper::logIdle(const std::string& id,
     sp<hardware::ICameraServiceProxy> proxyBinder = getCameraServiceProxy();
     sessionStats->onIdle(proxyBinder, requestCount, resultErrorCount, deviceError, userTag,
             videoStabilizationMode, usedUltraWide, usedZoomOverride,
-            mostRequestedFpsRange, streamStats);
+            mostRequestedFpsRange, streamStats, errorState);
 }
 
 void CameraServiceProxyWrapper::logOpen(const std::string& id, int facing,
             const std::string& clientPackageName, int effectiveApiLevel, bool isNdk,
-            int32_t latencyMs) {
+            bool sharedMode, int32_t latencyMs) {
     std::shared_ptr<CameraSessionStatsWrapper> sessionStats;
     {
         Mutex::Autolock l(mLock);
@@ -457,19 +462,19 @@ void CameraServiceProxyWrapper::logOpen(const std::string& id, int facing,
 
         sessionStats = std::make_shared<CameraSessionStatsWrapper>(
                 id, facing, CameraSessionStats::CAMERA_STATE_OPEN, clientPackageName,
-                apiLevel, isNdk, latencyMs, logId);
+                apiLevel, isNdk, sharedMode, latencyMs, logId);
         mSessionStatsMap.emplace(id, sessionStats);
         ALOGV("%s: Adding id %s", __FUNCTION__, id.c_str());
     }
 
-    ALOGV("%s: id %s, facing %d, effectiveApiLevel %d, isNdk %d, latencyMs %d",
-            __FUNCTION__, id.c_str(), facing, effectiveApiLevel, isNdk, latencyMs);
+    ALOGV("%s: id %s, facing %d, effectiveApiLevel %d, isNdk %d, sharedMode %d, latencyMs %d",
+            __FUNCTION__, id.c_str(), facing, effectiveApiLevel, isNdk, sharedMode, latencyMs);
     sp<hardware::ICameraServiceProxy> proxyBinder = getCameraServiceProxy();
     sessionStats->onOpen(proxyBinder);
 }
 
 void CameraServiceProxyWrapper::logClose(const std::string& id, int32_t latencyMs,
-        bool deviceError) {
+        bool deviceError, int32_t errorState) {
     std::shared_ptr<CameraSessionStatsWrapper> sessionStats;
     {
         Mutex::Autolock l(mLock);
@@ -493,7 +498,7 @@ void CameraServiceProxyWrapper::logClose(const std::string& id, int32_t latencyM
     ALOGV("%s: id %s, latencyMs %d, deviceError %d", __FUNCTION__,
             id.c_str(), latencyMs, deviceError);
     sp<hardware::ICameraServiceProxy> proxyBinder = getCameraServiceProxy();
-    sessionStats->onClose(proxyBinder, latencyMs, deviceError);
+    sessionStats->onClose(proxyBinder, latencyMs, deviceError, errorState);
 }
 
 bool CameraServiceProxyWrapper::isCameraDisabled(int userId) {
@@ -565,5 +570,21 @@ void CameraServiceProxyWrapper::notifyWatchdog(pid_t clientPid, bool isNativePid
                 status.exceptionMessage().c_str());
     }
 }
+
+void CameraServiceProxyWrapper::notifyCameraDistractionRestriction(
+        hardware::camera2::ICameraDeviceUser::AudioRestriction mode) {
+    sp<ICameraServiceProxy> proxyBinder = getCameraServiceProxy();
+    if (proxyBinder == nullptr) {
+        ALOGW("%s: ICameraServiceProxy is null!", __FUNCTION__);
+        return;
+    }
+
+    auto status = proxyBinder->notifyCameraDistractionRestriction(mode);
+    if (!status.isOk()) {
+        ALOGE("%s: Failed calling notifyCameraDistrctionRestriction: %s", __FUNCTION__,
+                status.exceptionMessage().c_str());
+    }
+}
+
 
 }  // namespace android

@@ -22,26 +22,68 @@
 #include "ValidateId.h"
 #include "iface_statsd.h"
 
+#include <media/MediaMetricsInternal.h>
+
+#include <dlfcn.h>
 #include <pwd.h> //getpwuid
+#include <stdio.h>
 
 #include <android-base/stringprintf.h>
-#include <android/content/pm/IPackageManagerNative.h>  // package info
 #include <audio_utils/clock.h>                 // clock conversions
 #include <binder/IPCThreadState.h>             // get calling uid
-#include <binder/IServiceManager.h>            // checkCallingPermission
+#include <binder/IServiceManager.h>
 #include <cutils/properties.h>                 // for property_get
-#include <mediautils/MemoryLeakTrackUtil.h>
-#include <memunreachable/memunreachable.h>
 #include <private/android_filesystem_config.h> // UID
 #include <stats_media_metrics.h>
 
+#ifdef METRICS_IN_MODULE
+
+#include <aidl/android/media/BnMediaMetricsService.h>
+#include <android/binder_auto_utils.h>  // for AIBinder stuff
+#include <android/binder_ibinder.h>
+#include <android/binder_manager.h>
+#include <android/permission_manager.h>
+
+#else
+
+#include <android/content/pm/IPackageManagerNative.h>  // package info
+#include <mediautils/MemoryLeakTrackUtil.h>
+#include <mediautils/ServiceUtilities.h>        // for mediautils::UidInfo::getInfo()
+#include <memunreachable/memunreachable.h>
+
+#endif
+
 #include <set>
+#include <unordered_map>
+
+#include <dlfcn.h>
 
 namespace android {
 
 using base::StringPrintf;
 using mediametrics::Item;
 using mediametrics::startsWith;
+
+
+/**
+ * Submits the indicated record to the mediaanalytics service.
+ *
+ * \param item the item to submit.
+ * \return status failure, which is negative on binder transaction failure.
+ *         As the transaction is one-way, remote failures will not be reported.
+ */
+
+binder::Status
+MediaMetricsService::submitStructuredItem(const StructuredItem& b) {
+    status_t status = UNKNOWN_ERROR;
+    std::shared_ptr<mediametrics::Item> item = nullptr;
+
+    item = mediametrics::readFromStructuredItem(&b);
+    if (item != nullptr) {
+        status = submitInternal(item);
+    }
+    return binder::Status::fromStatusT(status);
+}
 
 // individual records kept in memory: age or count
 // age: <= 28 hours (1 1/6 days)
@@ -86,9 +128,43 @@ bool MediaMetricsService::useUidForPackage(
     // NOLINTEND(bugprone-branch-clone)
 }
 
+static pid_t getClientPid() {
+    pid_t pid;
+
+#ifdef  METRICS_IN_MODULE
+    pid = AIBinder_getCallingPid();
+#else
+    pid = IPCThreadState::self()->getCallingPid();
+#endif
+    return pid;
+}
+
+static int32_t getClientUid() {
+    int32_t uid;
+
+#ifdef METRICS_IN_MODULE
+    // use an NDK supported call
+    uid = AIBinder_getCallingUid();
+#else
+    // we can use internal calls
+    uid = IPCThreadState::self()->getCallingUid();
+#endif
+
+    return uid;
+}
+
+// cache of uid -> packageinfo mapping
+// static
+std::mutex MediaMetricsService::sLock;
+std::unordered_map<int, std::string> MediaMetricsService::sUid2Packages;
+std::queue<int> MediaMetricsService::sCachedUids;
+
 /* static */
 std::pair<std::string, int64_t>
 MediaMetricsService::getSanitizedPackageNameAndVersionCode(uid_t uid) {
+
+#ifndef METRICS_IN_MODULE
+        // in audio_utils, usese framework-only functions
     const std::shared_ptr<const mediautils::UidInfo::Info> info =
             mediautils::UidInfo::getInfo(uid);
     if (useUidForPackage(info->package, info->installer)) {
@@ -96,6 +172,70 @@ MediaMetricsService::getSanitizedPackageNameAndVersionCode(uid_t uid) {
     } else {
         return { info->package, info->versionCode };
     }
+#else
+    std::string pkg;
+
+    // keep a cache of uid->packageName
+    // start over on each reboot of the device
+    //
+    // Assumes:
+    // (1) uid's are NOT reused without a reboot
+    //     [so if an app is removed, we believe uid is not reused]
+
+    // mutex between reading here and updating below
+    {
+        std::lock_guard _l(sLock);
+
+        if (sUid2Packages.find(uid) != sUid2Packages.end()) {
+            pkg = sUid2Packages[uid];
+            // implement a cheap LRU algorithm
+            int accessed = sCachedUids.front();
+            sCachedUids.pop();
+            sCachedUids.push(accessed);
+
+            return { pkg, /* versionCode */ 0 };
+        }
+        // fall through to look it up the hard way
+    }
+
+    if (pkg.empty()) {
+        ALOGV("Constructing from getpw() entries for uid %d", uid);
+        struct passwd pw{}, *result;
+        char buf[1024]; // extra buffer space - should exceed what is
+                        // required in struct passwd_pw (tested),
+                        // and even then this is only used in backup
+                        // when the package manager is unavailable.
+        if (getpwuid_r(uid, &pw, buf, sizeof(buf), &result) == 0
+                && result != nullptr
+                && result->pw_name != nullptr) {
+            pkg = result->pw_name;
+        }
+    }
+
+    if (pkg.empty()) {
+        // last ditch fallback
+        ALOGV("last ditch fallback for uid %d", uid);
+        pkg = "fallback-" + std::to_string(uid);
+    }
+
+    ALOGV("we finish mapping uid %d to pkg: %s", uid, pkg.c_str());
+
+    // mutex between updating here and reading above
+    {
+        std::lock_guard _l(sLock);
+
+        // save whatever we generated, even if it wasn't our preferred getPackageInfo result
+        if (sCachedUids.size() >= MAX_CACHED_UIDS) {
+            int dropping = sCachedUids.front();
+            sCachedUids.pop();
+            sUid2Packages.erase(dropping);
+        }
+        sUid2Packages[uid] = pkg;
+        sCachedUids.push(uid);
+    }
+
+    return { pkg, /* versionCode */ 0 };
+#endif
 }
 
 MediaMetricsService::MediaMetricsService()
@@ -114,12 +254,12 @@ MediaMetricsService::~MediaMetricsService()
     mItems.clear();
 }
 
-status_t MediaMetricsService::submitInternal(mediametrics::Item *item, bool release)
+status_t MediaMetricsService::submitInternal(std::shared_ptr<mediametrics::Item>& item)
 {
     // calling PID is 0 for one-way calls.
-    const pid_t pid = IPCThreadState::self()->getCallingPid();
+    const pid_t pid = getClientPid();
     const pid_t pid_given = item->getPid();
-    const uid_t uid = IPCThreadState::self()->getCallingUid();
+    const uid_t uid = getClientUid();
     const uid_t uid_given = item->getUid();
 
     //ALOGD("%s: caller pid=%d uid=%d,  item pid=%d uid=%d", __func__,
@@ -174,7 +314,6 @@ status_t MediaMetricsService::submitInternal(mediametrics::Item *item, bool rele
 
     // validate the record; we discard if we don't like it
     if (isContentValid(item, isTrusted) == false) {
-        if (release) delete item;
         return PERMISSION_DENIED;
     }
 
@@ -182,8 +321,6 @@ status_t MediaMetricsService::submitInternal(mediametrics::Item *item, bool rele
     // sure it doesn't appear in the finalized list.
 
     if (item->count() == 0) {
-        ALOGV("%s: dropping empty record...", __func__);
-        if (release) delete item;
         return BAD_VALUE;
     }
 
@@ -197,9 +334,6 @@ status_t MediaMetricsService::submitInternal(mediametrics::Item *item, bool rele
         item->setTimestamp(now);
     }
 
-    // now attach either the item or its dup to a const shared pointer
-    std::shared_ptr<const mediametrics::Item> sitem(release ? item : item->dup());
-
     // register log session ids with singleton.
     if (startsWith(item->getKey(), "metrics.manager")) {
         std::string logSessionId;
@@ -209,15 +343,54 @@ status_t MediaMetricsService::submitInternal(mediametrics::Item *item, bool rele
         }
     }
 
-    (void)mAudioAnalytics.submit(sitem, isTrusted);
+    (void)mAudioAnalytics.submit(item, isTrusted);
 
-    (void)dump2Statsd(sitem, mStatsdLog);  // failure should be logged in function.
-    saveItem(sitem);
+    (void)dump2Statsd(item, mStatsdLog);  // failure should be logged in function.
+    saveItem(item);
     return NO_ERROR;
 }
 
+#ifdef  METRICS_IN_MODULE
+status_t MediaMetricsService::dump(int fd, const char **argv, uint32_t argc) {
+
+    // NDK can't use these before v33 (akd Android T)
+    // we're going to let the older releases through
+    // Note; these modifications (to run in module using NDK) are not used on
+    // devices before SDK=36, so we should not encounter this issue
+    // APermissionManager_checkPermission introduced in api 31
+    if (__builtin_available(android 31, *)) {
+        int32_t result_operation = PERMISSION_MANAGER_STATUS_ERROR_UNKNOWN;
+        int32_t result_check = PERMISSION_MANAGER_PERMISSION_DENIED;
+        const pid_t pid = getClientPid();
+        const uid_t uid = getClientUid();
+
+        ALOGV("module, did not actually attempt the permission check, granted anyway");
+        result_operation = PERMISSION_MANAGER_STATUS_OK;
+        result_check = PERMISSION_MANAGER_PERMISSION_GRANTED;
+
+        if (result_operation != PERMISSION_MANAGER_STATUS_OK ||
+            result_check != PERMISSION_MANAGER_PERMISSION_GRANTED) {
+            const std::string result = StringPrintf("Permission Denial: "
+                    "disallow MediaMetricsService dump from pid=%d, uid=%d\n",
+                    pid, uid);
+            write(fd, result.c_str(), result.size());
+            return NO_ERROR;
+        }
+    }
+
+
+    uint32_t i;
+    Vector<String16> args;
+
+    for (i = 0; i < argc; i++) {
+        args.push_back(String16(argv[i]));
+    }
+    return ldump(fd, args);
+}
+#else
 status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
 {
+    // permissions for framework side
     if (checkCallingPermission(String16("android.permission.DUMP")) == false) {
         const std::string result = StringPrintf("Permission Denial: "
                 "can't dump MediaMetricsService from pid=%d, uid=%d\n",
@@ -227,6 +400,12 @@ status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
         return NO_ERROR;
     }
 
+    return ldump(fd, args);
+}
+#endif
+
+status_t MediaMetricsService::ldump(int fd, const Vector<String16>& args)
+{
     static const String16 allOption("--all");
     static const String16 clearOption("--clear");
     static const String16 heapOption("--heap");
@@ -237,20 +416,27 @@ status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
 
     bool all = false;
     bool clear = false;
+#ifndef METRICS_IN_MODULE
     bool heap = false;
     bool unreachable = false;
+#endif
     int64_t sinceNs = 0;
     std::string prefix;
 
     const size_t n = args.size();
     for (size_t i = 0; i < n; i++) {
-        if (args[i] == allOption) {
+        String16 arg(args[i]);
+        if (allOption == args[i]) {
             all = true;
-        } else if (args[i] == clearOption) {
+        } else if (clearOption == args[i]) {
             clear = true;
-        } else if (args[i] == heapOption) {
+        }
+#ifndef METRICS_IN_MODULE
+        else if (heapOption == args[i]) {
             heap = true;
-        } else if (args[i] == helpOption) {
+        }
+#endif
+        else if (helpOption == args[i]) {
             // TODO: consider function area dumping.
             // dumpsys media.metrics audiotrack,codec
             // or dumpsys media.metrics audiotrack codec
@@ -268,12 +454,12 @@ status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
                     "--unreachable show unreachable memory (leaks)\n";
             write(fd, result, std::size(result));
             return NO_ERROR;
-        } else if (args[i] == prefixOption) {
+        } else if (prefixOption == args[i]) {
             ++i;
             if (i < n) {
                 prefix = String8(args[i]).c_str();
             }
-        } else if (args[i] == sinceOption) {
+        } else if (sinceOption == args[i]) {
             ++i;
             if (i < n) {
                 String8 value(args[i]);
@@ -288,9 +474,12 @@ status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
                     sinceNs = sec * NANOS_PER_SECOND;
                 }
             }
-        } else if (args[i] == unreachableOption) {
+        }
+#ifndef METRICS_IN_MODULE
+        else if (unreachableOption == args[i]) {
             unreachable = true;
         }
+#endif
     }
     std::stringstream result;
     {
@@ -354,7 +543,9 @@ status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
     write(fd, str.c_str(), str.size());
 
     // Check heap and unreachable memory outside of lock.
+#ifndef METRICS_IN_MODULE
     if (heap) {
+        // appears to be unavailable in NDK.
         dprintf(fd, "\nDumping heap:\n");
         std::string s = dumpMemoryAddresses(100 /* limit */);
         write(fd, s.c_str(), s.size());
@@ -362,9 +553,11 @@ status_t MediaMetricsService::dump(int fd, const Vector<String16>& args)
     if (unreachable) {
         dprintf(fd, "\nDumping unreachable memory:\n");
         // TODO - should limit be an argument parameter?
+        // GetUnreachableMemoryString appears to be platform-only
         std::string s = GetUnreachableMemoryString(true /* contents */, 100 /* limit */);
         write(fd, s.c_str(), s.size());
     }
+#endif
     return NO_ERROR;
 }
 
@@ -498,11 +691,14 @@ void MediaMetricsService::saveItem(const std::shared_ptr<const mediametrics::Ite
 }
 
 /* static */
-bool MediaMetricsService::isContentValid(const mediametrics::Item *item, bool isTrusted)
+bool MediaMetricsService::isContentValid(const std::shared_ptr<mediametrics::Item>& item,
+                                         bool isTrusted)
 {
     if (isTrusted) return true;
+
     // untrusted uids can only send us a limited set of keys
     const std::string &key = item->getKey();
+
     if (startsWith(key, "audio.")) return true;
     if (startsWith(key, "drm.vendor.")) return true;
     if (startsWith(key, "mediadrm.")) return true;

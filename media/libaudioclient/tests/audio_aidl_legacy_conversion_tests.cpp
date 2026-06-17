@@ -124,6 +124,23 @@ AudioChannelLayout make_ACL_VoiceCall() {
             AudioChannelLayout::VOICE_CALL_MONO);
 }
 
+AudioChannelLayout make_ACL_Acn(AudioChannelLayout::Ambisonics::SourceLayout layout,
+                                int channelCount) {
+    return AudioChannelLayout::make<AudioChannelLayout::Tag::acnMask>(
+            ((static_cast<int32_t>(layout) << AudioChannelLayout::ACN_SOURCE_LAYOUT_BIT_SHIFT) &
+             AudioChannelLayout::ACN_SOURCE_LAYOUT_BIT_MASK) |
+            (channelCount & AudioChannelLayout::ACN_CHANNEL_COUNT_BIT_MASK));
+}
+
+AudioChannelLayout make_ACL_FullSphereAcn(int order) {
+    return make_ACL_Acn(AudioChannelLayout::Ambisonics::SourceLayout::FULL_SPHERE,
+                        (order + 1) * (order + 1));
+}
+
+AudioChannelLayout make_ACL_HorizontalAcn(int order) {
+    return make_ACL_Acn(AudioChannelLayout::Ambisonics::SourceLayout::HORIZONTAL, 2 * order + 1);
+}
+
 AudioDeviceDescription make_AudioDeviceDescription(AudioDeviceType type,
                                                    const std::string& connection = "") {
     AudioDeviceDescription result;
@@ -343,7 +360,11 @@ INSTANTIATE_TEST_SUITE_P(
                                 AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
                                         AudioChannelLayout::CHANNEL_TOP_SIDE_LEFT),
                                 AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
-                                        AudioChannelLayout::CHANNEL_TOP_SIDE_RIGHT)),
+                                        AudioChannelLayout::CHANNEL_TOP_SIDE_RIGHT),
+                                make_ACL_FullSphereAcn(AudioChannelLayout::Ambisonics::MIN_ORDER),
+                                make_ACL_HorizontalAcn(AudioChannelLayout::Ambisonics::MIN_ORDER),
+                                make_ACL_FullSphereAcn(AudioChannelLayout::Ambisonics::MAX_ORDER),
+                                make_ACL_HorizontalAcn(AudioChannelLayout::Ambisonics::MAX_ORDER)),
                 testing::Values(false, true)));
 INSTANTIATE_TEST_SUITE_P(AudioChannelVoiceRoundTrip, AudioChannelLayoutRoundTripTest,
                          // In legacy constants the voice call is only defined for input.
@@ -429,7 +450,29 @@ INSTANTIATE_TEST_SUITE_P(
                 std::make_tuple(  // Mask 'A'
                         AUDIO_CHANNEL_IN_STEREO | AUDIO_CHANNEL_IN_VOICE_UPLINK, true, false),
                 std::make_tuple(  // Mask 'B'
-                        AUDIO_CHANNEL_IN_STEREO | AUDIO_CHANNEL_IN_VOICE_DNLINK, true, false)));
+                        AUDIO_CHANNEL_IN_STEREO | AUDIO_CHANNEL_IN_VOICE_DNLINK, true, false),
+                // Valid legacy ACN masks
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0, false, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14, false, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0, true, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14, true, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0_HRZ, false, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14_HRZ, false, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0_HRZ, true, true),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14_HRZ, true, true),
+                // Invalid legacy ACN masks
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0 + 1, false, false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14 + 1, false, false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0_HRZ + 1, false, false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14_HRZ + 1, false, false),
+                std::make_tuple(AUDIO_CHANNEL_INDEX_ACN | (AUDIO_ACN_HORIZONTAL << 1) | 1, false,
+                                false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0 + 1, true, false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14 + 1, true, false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_0_HRZ + 1, true, false),
+                std::make_tuple(AUDIO_CHANNEL_ACN_ORDER_14_HRZ + 1, true, false),
+                std::make_tuple(AUDIO_CHANNEL_INDEX_ACN | (AUDIO_ACN_HORIZONTAL << 1) | 1, true,
+                                false)));
 
 class AudioDeviceDescriptionRoundTripTest : public testing::TestWithParam<AudioDeviceDescription> {
 };

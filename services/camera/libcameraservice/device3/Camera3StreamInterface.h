@@ -210,9 +210,9 @@ class Camera3StreamInterface : public virtual RefBase {
     virtual int      getStreamSetId() const = 0;
 
     /**
-     * Is this stream part of a multi-resolution stream set
+     * Get the multi-resolution stream set mode: OFF, ON, or ON_CONCURRENT
      */
-    virtual bool     isMultiResolution() const = 0;
+    virtual int     getMultiResMode() const = 0;
 
     /**
      * Get the HAL stream group id for a multi-resolution stream set
@@ -236,6 +236,7 @@ class Camera3StreamInterface : public virtual RefBase {
     virtual android_dataspace getOriginalDataSpace() const = 0;
     virtual int getMaxHalBuffers() const = 0;
     virtual int getMaxTotalBuffers() const = 0;
+    virtual nsecs_t getTimestampOffset() const = 0;
 
     /**
      * Offline processing
@@ -427,7 +428,8 @@ class Camera3StreamInterface : public virtual RefBase {
     virtual status_t returnBuffer(const camera_stream_buffer &buffer,
             nsecs_t timestamp, nsecs_t readoutTimestamp, bool timestampIncreasing = true,
             const std::vector<size_t>& surface_ids = std::vector<size_t>(),
-            uint64_t frameNumber = 0, int32_t transform = -1) = 0;
+            uint64_t frameNumber = 0,
+            const std::vector<int32_t>& transforms = std::vector<int32_t>()) = 0;
 
     /**
      * Fill in the camera_stream_buffer with the next valid buffer for this

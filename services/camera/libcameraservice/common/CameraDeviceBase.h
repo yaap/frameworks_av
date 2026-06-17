@@ -79,8 +79,10 @@ typedef struct TransformMapValue {
     int mirrorMode;
     int32_t transform;
 } TransfromMapValue_t;
-// Mapping of output stream index to mirror mode and transformation entry
-typedef std::unordered_map<int, TransformMapValue> TransformationMap;
+// Mapping of surface ids to transform values
+typedef std::unordered_map<size_t, TransformMapValue> SurfaceTransformMap;
+// Mapping of output stream index to surface transforms
+typedef std::unordered_map<int, SurfaceTransformMap> TransformationMap;
 
 /**
  * Base interface for version >= 2 camera device classes, which interface to
@@ -194,7 +196,7 @@ class CameraDeviceBase : public virtual FrameProducer {
             const std::unordered_set<int32_t>  &sensorPixelModesUsed,
             std::vector<int> *surfaceIds = nullptr,
             int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
-            bool isShared = false, bool isMultiResolution = false,
+            bool isShared = false, int multiResMode = OutputConfiguration::MULTI_RES_OFF,
             uint64_t consumerUsage = 0,
             int64_t dynamicProfile = ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
             int64_t streamUseCase = ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
@@ -218,7 +220,7 @@ class CameraDeviceBase : public virtual FrameProducer {
             const std::unordered_set<int32_t> &sensorPixelModesUsed,
             std::vector<int> *surfaceIds = nullptr,
             int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
-            bool isShared = false, bool isMultiResolution = false,
+            bool isShared = false, int multiResMode = OutputConfiguration::MULTI_RES_OFF,
             uint64_t consumerUsage = 0,
             int64_t dynamicProfile = ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
             int64_t streamUseCase = ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
@@ -490,7 +492,16 @@ class CameraDeviceBase : public virtual FrameProducer {
     virtual status_t updateStream(int streamId, const std::vector<SurfaceHolder> &newSurfaces,
             const std::vector<android::camera3::OutputStreamInfo> &outputInfo,
             const std::vector<size_t> &removedSurfaceIds,
-            KeyedVector<sp<Surface>, size_t> *outputMap/*out*/) = 0;
+            bool modifyRequests,
+            KeyedVector<sp<Surface>, size_t> *outputMap/*out*/,
+            int64_t *lastFrameNumber = nullptr /*out*/) = 0;
+
+    /**
+     * Update the surface id of a given internal stream.
+     */
+    virtual status_t updateInternalStream(int streamId, size_t surfaceId,
+            KeyedVector<sp<Surface>, size_t> *outputMap/*out*/,
+            int64_t *lastFrameNumber = nullptr /*out*/) = 0;
 
     /**
      * Drop buffers for stream of streamId if dropping is true. If dropping is false, do not
@@ -596,6 +607,11 @@ class CameraDeviceBase : public virtual FrameProducer {
     // Inject session parameters into an existing client.
     virtual status_t injectSessionParams(
         const CameraMetadata& sessionParams) = 0;
+
+    /**
+     * get the device Error State
+     */
+    virtual int32_t getErrorState() = 0;
 
     // Lock to synchronize onDeviceActive and onDeviceIdle callbacks when camera
     // has been opened in shared mode.

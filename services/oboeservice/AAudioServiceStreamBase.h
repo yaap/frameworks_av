@@ -20,6 +20,7 @@
 #include <assert.h>
 #include <mutex>
 
+#include <aaudio/DrainType.h>
 #include <aaudio/IAAudioClientCallback.h>
 #include <android-base/thread_annotations.h>
 #include <android/media/audio/common/AudioPlaybackRate.h>
@@ -86,7 +87,12 @@ public:
     // because we had to wait until we generated the handle.
     void logOpen(aaudio_handle_t streamHandle);
 
-    aaudio_result_t close() EXCLUDES(mLock);
+    /**
+     * Close the stream.
+     * @param force If true, close the stream immediately. Otherwise, drain all data and then
+     *              close the stream.
+     */
+    aaudio_result_t close(bool force) EXCLUDES(mLock);
 
     /**
      * Start the flow of audio data.
@@ -127,7 +133,7 @@ public:
 
     aaudio_result_t updateTimestamp() EXCLUDES(mLock);
 
-    aaudio_result_t drain(int64_t wakeUpNanos, bool allowSoftWakeUp,
+    aaudio_result_t drain(int64_t wakeUpNanos, DrainType drainType,
                           android::audio_utils::TimerQueue::handle_t* handle) EXCLUDES(mLock);
 
     aaudio_result_t activate(android::audio_utils::TimerQueue::handle_t handle) EXCLUDES(mLock);
@@ -137,14 +143,25 @@ public:
     aaudio_result_t getPlaybackParameters(
             android::media::audio::common::AudioPlaybackRate* rate) EXCLUDES(mLock);
 
-    virtual aaudio_result_t startClient(const android::AudioClient& client,
-                                        const audio_attributes_t *attr __unused,
-                                        audio_port_handle_t *clientHandle __unused) {
-        ALOGD("AAudioServiceStreamBase::startClient(%p, ...) AAUDIO_ERROR_UNAVAILABLE", &client);
+    virtual aaudio_result_t createClient(const android::AudioClient& client,
+                                         const audio_attributes_t& /*attr*/,
+                                         audio_port_handle_t* /*clientHandle*/,
+                                         audio_io_handle_t* /*ioHandle*/) {
+        ALOGD("AAudioServiceStreamBase::createClient(%p, ...) AAUDIO_ERROR_UNAVAILABLE", &client);
         return AAUDIO_ERROR_UNAVAILABLE;
     }
 
-    virtual aaudio_result_t stopClient(audio_port_handle_t clientHandle __unused) {
+    virtual aaudio_result_t startClient(audio_port_handle_t clientHandle) {
+        ALOGD("AAudioServiceStreamBase::startClient(%d) AAUDIO_ERROR_UNAVAILABLE", clientHandle);
+        return AAUDIO_ERROR_UNAVAILABLE;
+    }
+
+    virtual aaudio_result_t stopClient(audio_port_handle_t clientHandle) {
+        ALOGD("AAudioServiceStreamBase::stopClient(%d) AAUDIO_ERROR_UNAVAILABLE", clientHandle);
+        return AAUDIO_ERROR_UNAVAILABLE;
+    }
+
+    virtual aaudio_result_t releaseClient(audio_port_handle_t clientHandle) {
         ALOGD("AAudioServiceStreamBase::stopClient(%d) AAUDIO_ERROR_UNAVAILABLE", clientHandle);
         return AAUDIO_ERROR_UNAVAILABLE;
     }
@@ -199,10 +216,6 @@ public:
         mHandle = handle;
     }
 
-    audio_port_handle_t getPortHandle() const {
-        return mClientHandle;
-    }
-
     aaudio_stream_state_t getState() const {
         return mState;
     }
@@ -251,7 +264,7 @@ protected:
                          aaudio_sharing_mode_t sharingMode);
 
     aaudio_result_t start_l() REQUIRES(mLock);
-    virtual aaudio_result_t close_l() REQUIRES(mLock);
+    virtual aaudio_result_t close_l(bool shouldDeferClose = false) REQUIRES(mLock);
     virtual aaudio_result_t pause_l() REQUIRES(mLock);
     virtual aaudio_result_t stop_l() REQUIRES(mLock);
     void disconnect_l() REQUIRES(mLock);
@@ -318,6 +331,14 @@ protected:
         android::media::audio::common::AudioPlaybackRate* mRate;
     };
 
+    class CloseParam : public AAudioCommandParam {
+    public:
+        explicit CloseParam(bool force)
+                : AAudioCommandParam(), mForce(force) { }
+
+        const bool mForce;
+    };
+
     void setState(aaudio_stream_state_t state);
 
     /**
@@ -333,11 +354,13 @@ protected:
 
     aaudio_result_t sendXRunCount(int32_t xRunCount);
 
-    aaudio_result_t sendStartClientCommand(const android::AudioClient& client,
-                                           const audio_attributes_t *attr,
-                                           audio_port_handle_t *clientHandle) EXCLUDES(mLock);
+    aaudio_result_t sendCreateClientCommand(const android::AudioClient& client,
+                                            const audio_attributes_t& attr,
+                                            audio_port_handle_t* clientHandle,
+                                            audio_io_handle_t* ioHandle) EXCLUDES(mLock);
 
-    aaudio_result_t sendStopClientCommand(audio_port_handle_t clientHandle) EXCLUDES(mLock);
+    aaudio_result_t sendClientOperationCommand(int opCode,
+                                               audio_port_handle_t clientHandle) EXCLUDES(mLock);
 
     /**
      * @param positionFrames
@@ -351,7 +374,10 @@ protected:
 
     virtual aaudio_result_t getAudioDataDescription_l(AudioEndpointParcelable* parcelable) = 0;
 
-
+    // `mState` will only be accessed when opening the stream or from the command thread. The
+    // command thread will only run after the stream is successfully opened. In that case, it
+    // is not accessed from multiple threads simultaneously. It should be safe to access without
+    // locking.
     aaudio_stream_state_t   mState = AAUDIO_STREAM_STATE_UNINITIALIZED;
 
     bool isDisconnected_l() const REQUIRES(mLock) {
@@ -388,7 +414,7 @@ protected:
         mStandby = standby;
     }
 
-    bool isIdle_l() const REQUIRES(mLock) {
+    bool isIdle() const {
         return mState == AAUDIO_STREAM_STATE_OPEN || mState == AAUDIO_STREAM_STATE_PAUSED
                 || mState == AAUDIO_STREAM_STATE_STOPPED;
     }
@@ -409,14 +435,13 @@ protected:
 
     class DrainParam : public AAudioCommandParam {
     public:
-        DrainParam(int64_t wakeUpNanos, bool allowSoftWakeUp,
+        DrainParam(int64_t wakeUpNanos, DrainType drainType,
                    android::audio_utils::TimerQueue::handle_t* handle)
                 : AAudioCommandParam(), mWakeUpNanos(wakeUpNanos),
-                  mAllowSoftWakeUp(allowSoftWakeUp), mHandle(handle) { }
-        ~DrainParam() override = default;
+                  mDrainType(drainType), mHandle(handle) { }
 
         int64_t mWakeUpNanos;
-        bool mAllowSoftWakeUp;
+        DrainType mDrainType;
         android::audio_utils::TimerQueue::handle_t* mHandle;
     };
 
@@ -424,44 +449,46 @@ protected:
     public:
         explicit ActivateParam(android::audio_utils::TimerQueue::handle_t handle)
                 : AAudioCommandParam(), mHandle(handle) { }
-        ~ActivateParam() override = default;
 
         android::audio_utils::TimerQueue::handle_t mHandle;
     };
 
-    class StartClientParam : public AAudioCommandParam {
+    class CreateClientParam : public AAudioCommandParam {
     public:
-        StartClientParam(const android::AudioClient& client, const audio_attributes_t* attr,
-                         audio_port_handle_t* clientHandle)
-                : AAudioCommandParam(), mClient(client), mAttr(attr), mClientHandle(clientHandle) {
+        CreateClientParam(const android::AudioClient& client, const audio_attributes_t& attr,
+                          audio_port_handle_t* clientHandle, audio_io_handle_t* ioHandle)
+                : AAudioCommandParam(), mClient(client), mAttr(attr), mClientHandle(clientHandle),
+                  mIoHandle(ioHandle) {
         }
-        ~StartClientParam() override = default;
 
-        android::AudioClient mClient;
-        const audio_attributes_t* mAttr;
+        const android::AudioClient mClient;
+        const audio_attributes_t& mAttr;
         audio_port_handle_t* mClientHandle;
+        audio_io_handle_t* mIoHandle;
     };
-    virtual aaudio_result_t startClient_l(
+    aaudio_result_t createClient_l(
             const android::AudioClient& client,
-            const audio_attributes_t *attr __unused,
-            audio_port_handle_t *clientHandle __unused) REQUIRES(mLock) {
-        ALOGD("AAudioServiceStreamBase::startClient_l(%p, ...) AAUDIO_ERROR_UNAVAILABLE", &client);
-        return AAUDIO_ERROR_UNAVAILABLE;
-    }
+            const audio_attributes_t& attr,
+            audio_port_handle_t* clientHandle,
+            audio_io_handle_t* ioHandle) REQUIRES(mLock);
 
-    class StopClientParam : public AAudioCommandParam {
+    class ClientOperationParam : public AAudioCommandParam {
     public:
-        explicit StopClientParam(audio_port_handle_t clientHandle)
+        explicit ClientOperationParam(audio_port_handle_t clientHandle)
                 : AAudioCommandParam(), mClientHandle(clientHandle) {
         }
-        ~StopClientParam() override = default;
 
         audio_port_handle_t mClientHandle;
     };
+    virtual aaudio_result_t startClient_l(audio_port_handle_t clientHandle) REQUIRES(mLock) {
+            ALOGD("AAudioServiceStreamBase::stopClient(%d) AAUDIO_ERROR_UNAVAILABLE", clientHandle);
+            return AAUDIO_ERROR_UNAVAILABLE;
+    }
     virtual aaudio_result_t stopClient_l(audio_port_handle_t clientHandle) REQUIRES(mLock) {
         ALOGD("AAudioServiceStreamBase::stopClient(%d) AAUDIO_ERROR_UNAVAILABLE", clientHandle);
         return AAUDIO_ERROR_UNAVAILABLE;
     }
+    aaudio_result_t releaseClient_l(audio_port_handle_t clientHandle) REQUIRES(mLock);
 
     class SoundDoseChangedParam : public AAudioCommandParam {
     public:
@@ -500,8 +527,10 @@ protected:
         UNREGISTER_AUDIO_THREAD,
         GET_DESCRIPTION,
         EXIT_STANDBY,
+        CREATE_CLIENT,
         START_CLIENT,
         STOP_CLIENT,
+        RELEASE_CLIENT,
         UPDATE_TIMESTAMP,
         DRAIN,
         ACTIVATE,
@@ -516,8 +545,6 @@ protected:
 
     int32_t                 mFramesPerBurst = 0;
     android::AudioClient    mMmapClient; // set in open, used in MMAP start()
-    // TODO rename mClientHandle to mPortHandle to be more consistent with AudioFlinger.
-    audio_port_handle_t     mClientHandle = AUDIO_PORT_HANDLE_NONE;
 
     SimpleDoubleBuffer<Timestamp>  mAtomicStreamTimestamp;
 
@@ -561,6 +588,10 @@ private:
      */
     bool isUpMessageQueueBusy() EXCLUDES(mUpMessageQueueLock);
 
+    bool isCommandAllowed_l(int32_t command) const REQUIRES(mLock);
+
+    bool needToWakeUpBeforeCommand_l(int32_t command) const REQUIRES(mLock);
+
     aaudio_handle_t         mHandle = -1;
     bool                    mFlowing = false;
 
@@ -571,6 +602,11 @@ private:
     bool                    mDisconnected GUARDED_BY(mLock) {false};
 
     bool                    mStandby GUARDED_BY(mLock) = false;
+    // `mStandbyTime` will only be accessed when opening the stream or from the command thread.
+    // The command thread will only run after the stream is successfully opened. In that case,
+    // it is not accessed from multiple threads simultaneously. It should be safe to access
+    // without locking.
+    int64_t                 mStandbyTime = 0;
 
     bool                    mIsDraining GUARDED_BY(mLock) = false;
 
@@ -584,6 +620,9 @@ protected:
     // The lock will be held by the command thread. All operations needing the lock must run from
     // the command thread.
     std::mutex              mLock; // Prevent start/stop/close etcetera from colliding
+
+    bool                    mPendingStop GUARDED_BY(mLock) {false};
+    bool                    mPendingClose GUARDED_BY(mLock) {false};
 };
 
 } /* namespace aaudio */

@@ -24,11 +24,11 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
-#include <set>
 
 #include "CameraMetadata.h"
 #include "aidl/android/hardware/camera/device/CameraMetadata.h"
@@ -60,6 +60,18 @@ std::vector<To> convertTo(const std::vector<From>& from) {
 template <typename To, typename From>
 std::vector<To> asVectorOf(const From from) {
   return std::vector<To>({static_cast<To>(from)});
+}
+
+// Each HAL stream configuration has 4 entries, see metadata_definitions.xml
+constexpr size_t kNumEntriesPerStreamConfiguration = 4;
+
+std::vector<uint8_t> asUint8Vector(const std::string& str) {
+  std::vector<uint8_t> vec;
+  vec.reserve(str.size() + 1);
+  std::copy(str.begin(), str.end(), std::back_inserter(vec));
+  // Add a null terminator.
+  vec.push_back(0);
+  return vec;
 }
 
 }  // namespace
@@ -461,8 +473,8 @@ MetadataBuilder& MetadataBuilder::setJpegGpsCoordinates(
                            gpsCoordinates.altitude});
 
   if (!gpsCoordinates.provider.empty()) {
-    mEntryMap[ANDROID_JPEG_GPS_PROCESSING_METHOD] = std::vector<uint8_t>{
-        gpsCoordinates.provider.begin(), gpsCoordinates.provider.end()};
+    mEntryMap[ANDROID_JPEG_GPS_PROCESSING_METHOD] =
+        asUint8Vector(gpsCoordinates.provider);
   }
 
   if (gpsCoordinates.timestamp.has_value()) {
@@ -525,12 +537,15 @@ MetadataBuilder& MetadataBuilder::setAvailableRequestCapabilities(
   return *this;
 }
 
-MetadataBuilder& MetadataBuilder::setAvailableOutputStreamConfigurations(
+MetadataBuilder& MetadataBuilder::setAvailableScalerOutputStreamConfigurations(
     const std::vector<StreamConfiguration>& streamConfigurations) {
+  if (streamConfigurations.empty()) {
+    return *this;
+  }
+
   std::vector<int32_t> metadataStreamConfigs;
   std::vector<int64_t> metadataMinFrameDurations;
   std::vector<int64_t> metadataStallDurations;
-
   convertStreamConfigurationsToMetadataValues(
       streamConfigurations, metadataStreamConfigs, metadataMinFrameDurations,
       metadataStallDurations);
@@ -540,6 +555,29 @@ MetadataBuilder& MetadataBuilder::setAvailableOutputStreamConfigurations(
   mEntryMap[ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS] =
       std::move(metadataMinFrameDurations);
   mEntryMap[ANDROID_SCALER_AVAILABLE_STALL_DURATIONS] =
+      std::move(metadataStallDurations);
+
+  return *this;
+}
+
+MetadataBuilder& MetadataBuilder::setAvailableHeicOutputStreamConfigurations(
+    const std::vector<StreamConfiguration>& streamConfigurations) {
+  if (streamConfigurations.empty()) {
+    return *this;
+  }
+
+  std::vector<int32_t> metadataStreamConfigs;
+  std::vector<int64_t> metadataMinFrameDurations;
+  std::vector<int64_t> metadataStallDurations;
+  convertStreamConfigurationsToMetadataValues(
+      streamConfigurations, metadataStreamConfigs, metadataMinFrameDurations,
+      metadataStallDurations);
+
+  mEntryMap[ANDROID_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS] =
+      std::move(metadataStreamConfigs);
+  mEntryMap[ANDROID_HEIC_AVAILABLE_HEIC_MIN_FRAME_DURATIONS] =
+      std::move(metadataMinFrameDurations);
+  mEntryMap[ANDROID_HEIC_AVAILABLE_HEIC_STALL_DURATIONS] =
       std::move(metadataStallDurations);
 
   return *this;
@@ -732,16 +770,16 @@ MetadataBuilder& MetadataBuilder::setCustomMetadata(
     mCustomMetadata = nullptr;
   }
 
-  // only validate and add custom metadata if not null
-  if (customMetadata != nullptr) {
-    int ret = validate_camera_metadata_structure(customMetadata, /*size*/ NULL);
-    if (ret == OK) {
-      mCustomMetadata = clone_camera_metadata(customMetadata);
-    } else {
-      ALOGE("%s: Validate custom metadata failed with status: %d", __func__,
-            ret);
-      mCustomMetadata = nullptr;
-    }
+  if (customMetadata == nullptr) {
+    mCustomMetadata = nullptr;
+    return *this;
+  }
+  int ret = validate_camera_metadata_structure(customMetadata, /*size*/ NULL);
+  if (ret == OK) {
+    mCustomMetadata = clone_camera_metadata(customMetadata);
+  } else {
+    ALOGE("%s: Validate custom metadata failed with status: %d", __func__, ret);
+    mCustomMetadata = nullptr;
   }
   return *this;
 }
@@ -1005,16 +1043,17 @@ void convertStreamConfigurationsToMetadataValues(
     std::vector<int32_t>& metadataStreamConfigs,
     std::vector<int64_t>& metadataMinFrameDurations,
     std::vector<int64_t>& metadataStallDurations) {
-  metadataStreamConfigs.reserve(streamConfigurations.size());
-  metadataMinFrameDurations.reserve(streamConfigurations.size());
-  metadataStallDurations.reserve(streamConfigurations.size());
+  size_t numEntries =
+      streamConfigurations.size() * kNumEntriesPerStreamConfiguration;
+  metadataStreamConfigs.reserve(numEntries);
+  metadataMinFrameDurations.reserve(numEntries);
+  metadataStallDurations.reserve(numEntries);
 
   for (const auto& config : streamConfigurations) {
     metadataStreamConfigs.push_back(config.format);
     metadataStreamConfigs.push_back(config.width);
     metadataStreamConfigs.push_back(config.height);
-    metadataStreamConfigs.push_back(
-        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT);
+    metadataStreamConfigs.push_back(config.isInput);
 
     metadataMinFrameDurations.push_back(config.format);
     metadataMinFrameDurations.push_back(config.width);

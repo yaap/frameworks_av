@@ -284,6 +284,10 @@ bool ResourceTracker::removeResource(const ClientInfoParcel& clientInfo, bool va
     }
 
     infos.erase(foundClient);
+    if (infos.empty()) {
+        // Remove this from the Process Resource Map.
+        mMap.erase(found);
+    }
     return true;
 }
 
@@ -320,6 +324,10 @@ bool ResourceTracker::removeClient(int pid, const int64_t& clientId) {
     }
 
     infos.erase(foundClient);
+    if (infos.empty()) {
+        // Remove this from the Process Resource Map.
+        mMap.erase(found);
+    }
     return true;
 }
 
@@ -824,20 +832,38 @@ bool ResourceTracker::isCallingPriorityHigher(int callingPid, int pid) {
     return (callingPidPriority < priority);
 }
 
-void ResourceTracker::getMediaResourceUsageReport(
-        std::vector<MediaResourceParcel>* resources) const {
-    ResourceList resourceUsageList;
+std::vector<MediaResourceParcel> ResourceTracker::getMediaResourceUsageReport() const {
+    // Summing up resource usage by its type.
+    std::map<MediaResourceType, MediaResourceParcel> resourceUsageMap;
 
-    // Add up all the resource usage by every process into resourceUsageList
+    // Add up all the resource usage by every process into resourceUsageMap
     for (const auto& [pid, /* ResourceInfos */ infos] : mMap) {
         for (const auto& [infoKey, /* ResourceInfo */ info] : infos) {
             for (const MediaResourceParcel& res : info.resources.getResources()) {
-                resourceUsageList.add(res);
+                resourceUsageMap[res.type].type = res.type;
+                // The value associated with the resource is always non-negative.
+                int64_t value = resourceUsageMap[res.type].value;
+
+                if (res.value < INT64_MAX - value) {
+                    value += res.value;
+                    if (value < 0) {
+                        value = 0;
+                    }
+                } else {
+                    value = INT64_MAX;
+                }
+                resourceUsageMap[res.type].value = value;
             }
         }
     }
 
-    *resources = resourceUsageList.getResources();
+    std::vector<MediaResourceParcel> resources;
+    resources.reserve(resourceUsageMap.size());
+    for (const auto& [type, parcel] : resourceUsageMap) {
+        resources.push_back(parcel);
+    }
+
+    return resources;
 }
 
 } // namespace android

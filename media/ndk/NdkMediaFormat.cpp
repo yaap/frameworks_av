@@ -405,6 +405,7 @@ EXPORT const char* AMEDIAFORMAT_KEY_CSD_1 = "csd-1";
 EXPORT const char* AMEDIAFORMAT_KEY_CSD_2 = "csd-2";
 EXPORT const char* AMEDIAFORMAT_KEY_CSD_AVC = "csd-avc";
 EXPORT const char* AMEDIAFORMAT_KEY_CSD_HEVC = "csd-hevc";
+EXPORT const char* AMEDIAFORMAT_KEY_CSD_VVC = "csd-vvc";
 EXPORT const char* AMEDIAFORMAT_KEY_D263 = "d263";
 EXPORT const char* AMEDIAFORMAT_KEY_DATE = "date";
 EXPORT const char* AMEDIAFORMAT_KEY_DISCNUMBER = "discnum";
@@ -424,9 +425,11 @@ EXPORT const char* AMEDIAFORMAT_KEY_GENRE = "genre";
 EXPORT const char* AMEDIAFORMAT_KEY_GRID_COLUMNS = "grid-cols";
 EXPORT const char* AMEDIAFORMAT_KEY_GRID_ROWS = "grid-rows";
 EXPORT const char* AMEDIAFORMAT_KEY_HAPTIC_CHANNEL_COUNT = "haptic-channel-count";
+EXPORT const char* AMEDIAFORMAT_KEY_HDR_ST2094_50_INFO = "hdr-st2094-50-info";
 EXPORT const char* AMEDIAFORMAT_KEY_HDR_STATIC_INFO = "hdr-static-info";
 EXPORT const char* AMEDIAFORMAT_KEY_HDR10_PLUS_INFO = "hdr10-plus-info";
 EXPORT const char* AMEDIAFORMAT_KEY_HEIGHT = "height";
+EXPORT const char* AMEDIAFORMAT_KEY_HORIZONTAL_FLIP = "horizontal-flip";
 EXPORT const char* AMEDIAFORMAT_KEY_ICC_PROFILE = "icc-profile";
 EXPORT const char* AMEDIAFORMAT_KEY_IMPORTANCE = "importance";
 EXPORT const char* AMEDIAFORMAT_KEY_INTRA_REFRESH_PERIOD = "intra-refresh-period";
@@ -500,6 +503,7 @@ EXPORT const char* AMEDIAFORMAT_KEY_TITLE = "title";
 EXPORT const char* AMEDIAFORMAT_KEY_TRACK_ID = "track-id";
 EXPORT const char* AMEDIAFORMAT_KEY_TRACK_INDEX = "track-index";
 EXPORT const char* AMEDIAFORMAT_KEY_VALID_SAMPLES = "valid-samples";
+EXPORT const char* AMEDIAFORMAT_KEY_VIDEO_BITRATE_LAYERING = "video-bitrate-layering";
 EXPORT const char* AMEDIAFORMAT_KEY_VIDEO_ENCODING_STATISTICS_LEVEL =
         "video-encoding-statistics-level";
 EXPORT const char* AMEDIAFORMAT_KEY_VIDEO_QP_AVERAGE = "video-qp-average";
@@ -516,6 +520,4 @@ EXPORT const char* AMEDIAFORMAT_KEY_XMP_OFFSET = "xmp-offset";
 EXPORT const char* AMEDIAFORMAT_KEY_XMP_SIZE = "xmp-size";
 EXPORT const char* AMEDIAFORMAT_KEY_YEAR = "year";
 
-} // extern "C"
-
-
+}  // extern "C"

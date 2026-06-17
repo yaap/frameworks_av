@@ -60,6 +60,7 @@ void TrackClientDescriptor::dump(String8 *dst, int spaces) const
     dst->appendFormat("%*sStream: %d; Flags: %08x; Refcount: %d; InternalMute: %s\n",
             spaces, "", mStream, mFlags, mActivityCount, mInternalMute ? "Yes" : "No");
     dst->appendFormat("%*sDAP Primary Mix: %p\n", spaces, "", mPrimaryMix.promote().get());
+    dst->appendFormat("%*sUid %d\n", spaces, "", uid());
     if (!mSecondaryOutputs.empty()) {
         dst->appendFormat("%*sDAP Secondary Outputs: ", spaces - 2, "");
         for (auto desc : mSecondaryOutputs) {
@@ -101,7 +102,7 @@ SourceClientDescriptor::SourceClientDescriptor(audio_port_handle_t portId, uid_t
     TrackClientDescriptor::TrackClientDescriptor(portId, uid, AUDIO_SESSION_NONE, attributes,
         {config.sample_rate, config.channel_mask, config.format}, AUDIO_PORT_HANDLE_NONE,
         stream, strategy, volumeSource, AUDIO_OUTPUT_FLAG_NONE, false,
-        {} /* Sources do not support secondary outputs*/, nullptr, false /*isSpatialized*/),
+        {} , nullptr, false /*isSpatialized*/),
     mSrcDevice(srcDevice), mIsInternal(isInternal),
     mIsCallRx(isCallRx), mIsCallTx(isCallTx)
 {
@@ -117,6 +118,14 @@ void SourceClientDescriptor::setSwOutput(
 void SourceClientDescriptor::setHwOutput(const sp<HwAudioOutputDescriptor>& hwOutput)
 {
     mHwOutput = hwOutput;
+}
+
+std::variant<audio_port_handle_t, sp<DeviceDescriptor>> SourceClientDescriptor::portForVolume()
+        const {
+    if (!mUseSwBridge && mSrcDevice->hasGainController(true)) {
+        return mSrcDevice;
+    }
+    return mSrcDevice->getId();
 }
 
 void SourceClientDescriptor::dump(String8 *dst, int spaces) const

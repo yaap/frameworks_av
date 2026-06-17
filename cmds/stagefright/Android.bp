@@ -46,7 +46,6 @@ cc_binary {
         "libdatasource",
         "libaudioclient",
         "android.hardware.media.omx@1.0",
-        "framework-permission-aidl-cpp",
     ],
 
     static_libs: ["framework-permission-aidl-cpp"],
@@ -70,7 +69,6 @@ cc_binary {
     header_libs: [
         "libmediametrics_headers",
         "libstagefright_headers",
-        "camera_headers",
     ],
 
     shared_libs: [
@@ -79,10 +77,10 @@ cc_binary {
         "liblog",
         "libutils",
         "libbinder",
+        "libcamera_client",
         "libstagefright_foundation",
         "libdatasource",
         "libaudioclient",
-        "framework-permission-aidl-cpp",
     ],
 
     cflags: [
@@ -111,7 +109,6 @@ cc_binary {
         "libbinder",
         "libstagefright_foundation",
         "libaudioclient",
-        "framework-permission-aidl-cpp",
     ],
 
     cflags: [
@@ -141,7 +138,6 @@ cc_binary {
         "libbinder",
         "libstagefright_foundation",
         "libaudioclient",
-        "framework-permission-aidl-cpp",
     ],
 
     cflags: [

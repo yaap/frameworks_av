@@ -23,6 +23,7 @@
 #include <camera/StringUtils.h>
 
 #include <com_android_graphics_libgui_flags.h>
+#include <com_android_internal_camera_flags.h>
 #include <gui/Surface.h>
 #include <utils/Log.h>
 #include <utils/Trace.h>
@@ -32,6 +33,8 @@
 #include "utils/SessionConfigurationUtils.h"
 
 #include "DepthCompositeStream.h"
+
+namespace flags = com::android::internal::camera::flags;
 
 namespace android {
 namespace camera3 {
@@ -250,12 +253,17 @@ int64_t DepthCompositeStream::getNextFailingInputLocked(int64_t *currentTs /*ino
     return ret;
 }
 
-status_t DepthCompositeStream::processInputFrame(nsecs_t ts, const InputFrame &inputFrame) {
+status_t DepthCompositeStream::processInputFrame(nsecs_t ts, const InputFrame &inputFrame,
+        sp<Surface> currentOutput) {
     status_t res;
-    sp<ANativeWindow> outputANW = mOutputSurface;
+    sp<ANativeWindow> outputANW = currentOutput;
     ANativeWindowBuffer *anb;
     int fenceFd;
     void *dstBuffer;
+
+    if (currentOutput == nullptr) {
+        return INVALID_OPERATION;
+    }
 
     auto jpegSize = android::camera2::JpegProcessor::findJpegSize(inputFrame.jpegBuffer.data,
             inputFrame.jpegBuffer.width);
@@ -291,14 +299,14 @@ status_t DepthCompositeStream::processInputFrame(nsecs_t ts, const InputFrame &i
     // max jpeg size.
     size_t finalJpegBufferSize = maxDepthJpegBufferSize * 3;
 
-    if ((res = native_window_set_buffers_dimensions(mOutputSurface.get(), finalJpegBufferSize, 1))
+    if ((res = native_window_set_buffers_dimensions(currentOutput.get(), finalJpegBufferSize, 1))
             != OK) {
         ALOGE("%s: Unable to configure stream buffer dimensions"
                 " %zux%u for stream %d", __FUNCTION__, finalJpegBufferSize, 1U, mBlobStreamId);
         return res;
     }
 
-    res = outputANW->dequeueBuffer(mOutputSurface.get(), &anb, &fenceFd);
+    res = outputANW->dequeueBuffer(currentOutput.get(), &anb, &fenceFd);
     if (res != OK) {
         ALOGE("%s: Error retrieving output buffer: %s (%d)", __FUNCTION__, strerror(-res),
                 res);
@@ -311,14 +319,14 @@ status_t DepthCompositeStream::processInputFrame(nsecs_t ts, const InputFrame &i
     if (res != OK) {
         ALOGE("%s: Error trying to lock output buffer fence: %s (%d)", __FUNCTION__,
                 strerror(-res), res);
-        outputANW->cancelBuffer(mOutputSurface.get(), anb, /*fence*/ -1);
+        outputANW->cancelBuffer(currentOutput.get(), anb, /*fence*/ -1);
         return res;
     }
 
     if ((gb->getWidth() < finalJpegBufferSize) || (gb->getHeight() != 1)) {
         ALOGE("%s: Blob buffer size mismatch, expected %dx%d received %zux%u", __FUNCTION__,
                 gb->getWidth(), gb->getHeight(), finalJpegBufferSize, 1U);
-        outputANW->cancelBuffer(mOutputSurface.get(), anb, /*fence*/ -1);
+        outputANW->cancelBuffer(currentOutput.get(), anb, /*fence*/ -1);
         return BAD_VALUE;
     }
 
@@ -372,18 +380,18 @@ status_t DepthCompositeStream::processInputFrame(nsecs_t ts, const InputFrame &i
     res = processDepthPhotoFrame(depthPhoto, finalJpegBufferSize, dstBuffer, &actualJpegSize);
     if (res != 0) {
         ALOGE("%s: Depth photo processing failed: %s (%d)", __FUNCTION__, strerror(-res), res);
-        outputANW->cancelBuffer(mOutputSurface.get(), anb, /*fence*/ -1);
+        outputANW->cancelBuffer(currentOutput.get(), anb, /*fence*/ -1);
         return res;
     }
 
     size_t finalJpegSize = actualJpegSize + sizeof(CameraBlob);
     if (finalJpegSize > finalJpegBufferSize) {
         ALOGE("%s: Final jpeg buffer not large enough for the jpeg blob header", __FUNCTION__);
-        outputANW->cancelBuffer(mOutputSurface.get(), anb, /*fence*/ -1);
+        outputANW->cancelBuffer(currentOutput.get(), anb, /*fence*/ -1);
         return NO_MEMORY;
     }
 
-    res = native_window_set_buffers_timestamp(mOutputSurface.get(), ts);
+    res = native_window_set_buffers_timestamp(currentOutput.get(), ts);
     if (res != OK) {
         ALOGE("%s: Stream %d: Error setting timestamp: %s (%d)", __FUNCTION__,
                 getStreamId(), strerror(-res), res);
@@ -396,7 +404,12 @@ status_t DepthCompositeStream::processInputFrame(nsecs_t ts, const InputFrame &i
     CameraBlob *blob = reinterpret_cast<CameraBlob*> (header);
     blob->blobId = CameraBlobId::JPEG;
     blob->blobSizeBytes = actualJpegSize;
-    outputANW->queueBuffer(mOutputSurface.get(), anb, /*fence*/ -1);
+    res = outputANW->queueBuffer(currentOutput.get(), anb, /*fence*/ -1);
+    if (res != NO_ERROR) {
+        ALOGE("%s: Output surface update during dynamic Depth processing!", __FUNCTION__);
+        outputANW->cancelBuffer(currentOutput.get(), anb, /*fence*/ -1);
+        return INVALID_OPERATION;
+    }
 
     return res;
 }
@@ -441,6 +454,7 @@ bool DepthCompositeStream::threadLoop() {
     int64_t currentTs = INT64_MAX;
     bool newInputAvailable = false;
 
+    sp<Surface> currentOutput;
     {
         Mutex::Autolock l(mMutex);
 
@@ -478,9 +492,10 @@ bool DepthCompositeStream::threadLoop() {
                 }
             }
         }
+        currentOutput = mOutputSurface;
     }
 
-    auto res = processInputFrame(currentTs, mPendingInputFrames[currentTs]);
+    auto res = processInputFrame(currentTs, mPendingInputFrames[currentTs], currentOutput);
     Mutex::Autolock l(mMutex);
     if (res != OK) {
         ALOGE("%s: Failed processing frame with timestamp: %" PRIu64 ": %s (%d)", __FUNCTION__,
@@ -522,6 +537,15 @@ bool DepthCompositeStream::isDepthCompositeStream(const sp<Surface> &surface) {
 bool DepthCompositeStream::isDepthCompositeStreamInfo(const OutputStreamInfo& streamInfo) {
     if ((streamInfo.dataSpace == static_cast<android_dataspace_t>(HAL_DATASPACE_DYNAMIC_DEPTH)) &&
             (streamInfo.format == HAL_PIXEL_FORMAT_BLOB)) {
+        return true;
+    }
+
+    return false;
+}
+
+bool DepthCompositeStream::isDepthCompositeStreamOutput(const OutputConfiguration& output) {
+    if ((output.getDataspace() == static_cast<android_dataspace_t>(HAL_DATASPACE_DYNAMIC_DEPTH)) &&
+            (output.getFormat() == HAL_PIXEL_FORMAT_BLOB)) {
         return true;
     }
 
@@ -587,14 +611,13 @@ status_t DepthCompositeStream::checkAndGetMatchingDepthSize(size_t width, size_t
     return OK;
 }
 
-
-status_t DepthCompositeStream::createInternalStreams(const std::vector<SurfaceHolder>& consumers,
-        bool /*hasDeferredConsumer*/, uint32_t width, uint32_t height, int format,
-        camera_stream_rotation_t rotation, int *id, const std::string& physicalCameraId,
-        const std::unordered_set<int32_t> &sensorPixelModesUsed,
-        std::vector<int> *surfaceIds,
-        int /*streamSetId*/, bool /*isShared*/, int32_t /*colorSpace*/,
-        int64_t /*dynamicProfile*/, int64_t /*streamUseCase*/, bool useReadoutTimestamp) {
+status_t DepthCompositeStream::createInternalStreams(
+        const std::vector<SurfaceHolder>& consumers, bool hasDeferredConsumer, uint32_t width,
+        uint32_t height, int format, camera_stream_rotation_t rotation, int* id,
+        const std::string& physicalCameraId,
+        const std::unordered_set<int32_t>& sensorPixelModesUsed, std::vector<int>* surfaceIds,
+        int /*streamSetId*/, bool /*isShared*/, int32_t /*colorSpace*/, int64_t /*dynamicProfile*/,
+        int64_t /*streamUseCase*/, bool useReadoutTimestamp, int /*dataspace*/) {
     if (mSupportedDepthSizes.empty()) {
         ALOGE("%s: This camera device doesn't support any depth map streams!", __FUNCTION__);
         return INVALID_OPERATION;
@@ -623,8 +646,9 @@ status_t DepthCompositeStream::createInternalStreams(const std::vector<SurfaceHo
 
     ret = device->createStream(mBlobSurface, width, height, format, kJpegDataSpace, rotation,
             id, physicalCameraId, sensorPixelModesUsed, surfaceIds,
-            camera3::CAMERA3_STREAM_SET_ID_INVALID, /*isShared*/false, /*isMultiResolution*/false,
-            /*consumerUsage*/0, ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
+            camera3::CAMERA3_STREAM_SET_ID_INVALID, /*isShared*/false,
+            OutputConfiguration::MULTI_RES_OFF, /*consumerUsage*/0,
+            ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
             ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
             OutputConfiguration::TIMESTAMP_BASE_DEFAULT,
             OutputConfiguration::MIRROR_MODE_AUTO,
@@ -633,7 +657,9 @@ status_t DepthCompositeStream::createInternalStreams(const std::vector<SurfaceHo
     if (ret == OK) {
         mBlobStreamId = *id;
         mBlobSurfaceId = (*surfaceIds)[0];
-        mOutputSurface = consumers[0].mSurface;
+        if (!hasDeferredConsumer) {
+            mOutputSurface = consumers[0].mSurface;
+        }
     } else {
         return ret;
     }
@@ -647,7 +673,7 @@ status_t DepthCompositeStream::createInternalStreams(const std::vector<SurfaceHo
     ret = device->createStream(mDepthSurface, depthWidth, depthHeight, kDepthMapPixelFormat,
             kDepthMapDataSpace, rotation, &mDepthStreamId, physicalCameraId, sensorPixelModesUsed,
             &depthSurfaceId, camera3::CAMERA3_STREAM_SET_ID_INVALID, /*isShared*/false,
-            /*isMultiResolution*/false, /*consumerUsage*/0,
+            OutputConfiguration::MULTI_RES_OFF, /*consumerUsage*/0,
             ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
             ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
             OutputConfiguration::TIMESTAMP_BASE_DEFAULT,
@@ -678,15 +704,142 @@ status_t DepthCompositeStream::createInternalStreams(const std::vector<SurfaceHo
     return ret;
 }
 
-status_t DepthCompositeStream::configureStream() {
-    if (isRunning()) {
-        // Processing thread is already running, nothing more to do.
-        return NO_ERROR;
+status_t DepthCompositeStream::updateStream(int streamId,
+        const std::vector<SurfaceHolder>& newSurfaces, KeyedVector<sp<Surface>, size_t> * outputMap,
+        int64_t* lastFrameNumber) {
+
+    if (newSurfaces.size() > 1) {
+        ALOGE("%s: Multiple output surfaces are not supported!", __FUNCTION__);
+        return BAD_VALUE;
+    }
+
+    if (outputMap == nullptr) {
+        return BAD_VALUE;
+    }
+
+    if (lastFrameNumber == nullptr) {
+        return BAD_VALUE;
+    }
+
+    if (streamId != getStreamId()) {
+        ALOGE("%s: Unexpected streamId: %d vs. expected: %d", __FUNCTION__, streamId,
+              getStreamId());
+        return BAD_VALUE;
+    }
+
+    if ((newSurfaces.empty() && mOutputSurface.get() == nullptr) ||
+            (newSurfaces.size() >= 1 && (newSurfaces[0].mSurface == mOutputSurface))) {
+        // Trivial case, the client doesn't request any changes to the current output
+        outputMap->add(mOutputSurface, mBlobSurfaceId);
+        return OK;
+    }
+
+    sp<CameraDeviceBase> device = mDevice.promote();
+    if (!device.get()) {
+        ALOGE("%s: Invalid camera device!", __FUNCTION__);
+        return NO_INIT;
+    }
+
+    if (mBlobSurface.get() != nullptr) {
+        KeyedVector<sp<Surface>, size_t> outMap;
+        auto res = device->updateInternalStream(mBlobStreamId, mBlobSurfaceId, &outMap,
+                lastFrameNumber);
+        if (res != OK) {
+            ALOGE("%s: Unable to update internal Jpeg stream!", __FUNCTION__);
+            return res;
+        }
+
+        mBlobSurfaceId = outMap.valueAt(0);
+    }
+
+    if (mDepthSurface.get() != nullptr) {
+        KeyedVector<sp<Surface>, size_t> outMap;
+        int64_t lastFrame = -1;
+        auto res = device->updateInternalStream(mDepthStreamId, mDepthSurfaceId, &outMap,
+                &lastFrame);
+        if (res != OK) {
+            ALOGE("%s: Unable to update internal Depth stream!", __FUNCTION__);
+            return res;
+        }
+
+        mDepthSurfaceId = outMap.valueAt(0);
+    }
+
+    Mutex::Autolock l(mMutex);
+    if (mOutputSurface.get() != nullptr) {
+        for (auto &inputFrame : mPendingInputFrames) {
+            inputFrame.second.error = true;
+        }
+
+        auto res = mOutputSurface->disconnect(NATIVE_WINDOW_API_CAMERA);
+        if (res != OK) {
+            ALOGE("%s: Unable to disconnect to native window for stream %d",
+                    __FUNCTION__, mBlobStreamId);
+            return res;
+        }
+
+        mOutputSurface = nullptr;
+    }
+
+    if (!newSurfaces.empty()) {
+        mOutputSurface = newSurfaces[0].mSurface;
+    }
+
+    status_t res = configureStream(false /*outputConnected*/);
+    if (res == NO_ERROR && (mOutputSurface.get() != nullptr)) {
+        outputMap->add(mOutputSurface, mBlobSurfaceId);
+    }
+
+    return res;
+}
+
+status_t DepthCompositeStream::setConsumerSurfaces(int streamId,
+                                                   const std::vector<SurfaceHolder>& consumers,
+                                                   std::vector<int>* surfaceIds /*out*/) {
+    if ((surfaceIds == nullptr) || consumers.empty()) {
+        return BAD_VALUE;
+    }
+
+    if (consumers.size() > 1) {
+        ALOGE("%s: Multiple output surfaces are not supported!", __FUNCTION__);
+        return BAD_VALUE;
+    }
+
+    if (streamId != getStreamId()) {
+        ALOGE("%s: Unexpected streamId: %d vs. expected: %d", __FUNCTION__, streamId,
+              getStreamId());
+        return BAD_VALUE;
+    }
+
+    if (mOutputSurface.get() != nullptr) {
+        ALOGE("%s: Composite stream is not deferred!", __FUNCTION__);
+        return INVALID_OPERATION;
+    }
+
+    mOutputSurface = consumers[0].mSurface;
+    auto ret = configureStream(false /*outputConnected*/);
+    if (ret == OK) {
+        surfaceIds->push_back(mBlobSurfaceId);
+    }
+
+    return OK;
+}
+
+status_t DepthCompositeStream::configureStream(bool outputConnected) {
+    if (!flags::seamless_transitions() || outputConnected) {
+        if (isRunning()) {
+            // Processing thread is already running, nothing more to do.
+            return NO_ERROR;
+        }
     }
 
     if (mOutputSurface.get() == nullptr) {
-        ALOGE("%s: No valid output surface set!", __FUNCTION__);
-        return NO_INIT;
+        if (flags::seamless_transitions()) {
+            return NO_ERROR;
+        } else {
+            ALOGE("%s: No valid output surface set!", __FUNCTION__);
+            return NO_INIT;
+        }
     }
 
     auto res = mOutputSurface->connect(NATIVE_WINDOW_API_CAMERA, mStreamSurfaceListener);
@@ -729,6 +882,10 @@ status_t DepthCompositeStream::configureStream() {
                     anwConsumer, maxProducerBuffers + maxConsumerBuffers)) != OK) {
         ALOGE("%s: Unable to set buffer count for stream %d", __FUNCTION__, mBlobStreamId);
         return res;
+    }
+
+    if (flags::seamless_transitions() && isRunning()) {
+        return NO_ERROR;
     }
 
     run("DepthCompositeStreamProc");

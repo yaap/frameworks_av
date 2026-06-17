@@ -21,7 +21,9 @@ import android.hardware.camera2.ICameraDeviceCallbacks;
 import android.hardware.camera2.ICameraOfflineSession;
 import android.hardware.camera2.impl.CameraMetadataNative;
 import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.utils.OutputAndInputStreamIds;
 import android.hardware.camera2.params.SessionConfiguration;
+import android.hardware.camera2.utils.SessionConfigurationAndStreamIds;
 import android.hardware.camera2.utils.SubmitInfo;
 import android.hardware.common.fmq.MQDescriptor;
 import android.hardware.common.fmq.SynchronizedReadWrite;
@@ -129,6 +131,19 @@ interface ICameraDeviceUser
     void deleteStream(int streamId);
 
     /**
+     * Configure the given set of streams, while deleting the streams which
+     * have been removed from the previous session
+     *
+     * @param sessionConfigurationAndStreamIds The session configuration to configure and
+     *                                         the stream ids to be deleted.
+     * @return OutputAndInputStreamIds data structure containing the stream ids of the
+     *                                 newly created output streams and the input streams.
+     *
+     */
+    OutputAndInputStreamIds configureStreams(
+            in SessionConfigurationAndStreamIds sessionConfigurationAndStreamIds);
+
+    /**
      * Create an output stream
      *
      * <p>Create an output stream based on the given output configuration</p>
@@ -193,9 +208,12 @@ interface ICameraDeviceUser
 
     // Keep in sync with public API in
     // frameworks/base/core/java/android/hardware/camera2/CameraDevice.java
-    const int AUDIO_RESTRICTION_NONE = 0;
-    const int AUDIO_RESTRICTION_VIBRATION = 1;
-    const int AUDIO_RESTRICTION_VIBRATION_SOUND = 3;
+    @Backing(type="int")
+    enum AudioRestriction {
+        NONE = 0,
+        VIBRATION = 1,
+        VIBRATION_SOUND = 3
+    }
 
     /**
       * Set audio restriction mode for this camera device.
@@ -203,14 +221,14 @@ interface ICameraDeviceUser
       * @param mode the audio restriction mode ID as above
       *
       */
-    void setCameraAudioRestriction(int mode);
+    void setCameraAudioRestriction(AudioRestriction mode);
 
     /**
       * Get global audio restriction mode for all camera clients.
       *
       * @return the currently applied system-wide audio restriction mode
       */
-    int getGlobalAudioRestriction();
+    AudioRestriction getGlobalAudioRestriction();
 
     /**
      * Offline processing main entry point
@@ -230,4 +248,14 @@ interface ICameraDeviceUser
      *         false if another higher priority client with primary access is also using the camera.
      */
     boolean isPrimaryClient();
+
+    /**
+     * Update the output surfaces in the currently configured stream
+     * configurations.
+     *
+     * @param streamIds the set of stream ids to be updated
+     * @param configurations the new output configuration per each stream
+     *
+     */
+    void updateOutputConfigurations(in int[] streamIds, in OutputConfiguration[] configurations);
 }

@@ -17,6 +17,9 @@
 #ifndef ANDROID_SERVERS_CAMERA3_STREAM_H
 #define ANDROID_SERVERS_CAMERA3_STREAM_H
 
+#include <string>
+#include <vector>
+
 #include <gui/Flags.h>
 #include <gui/Surface.h>
 #include <utils/RefBase.h>
@@ -30,6 +33,8 @@
 namespace android {
 
 namespace camera3 {
+
+typedef ::aidl::android::hardware::graphics::common::ExtendableType GrallocExtendableType;
 
 /**
  * A class for managing a single stream of input or output data from the camera
@@ -155,6 +160,7 @@ class Camera3Stream :
      * Is this stream part of a multi-resolution stream set
      */
     bool             isMultiResolution() const;
+    int              getMultiResMode() const;
     /**
      * Get the HAL stream group id for a multi-resolution stream set
      */
@@ -171,6 +177,9 @@ class Camera3Stream :
     uint64_t           getUsage() const;
     void               setUsage(uint64_t usage);
     void               setFormatOverride(bool formatOverridden);
+    const std::vector<gui::AdditionalOptions>& getAdditionalOptions() const;
+    void               setAdditionalOptions(const std::vector<GrallocExtendableType>&
+                                            additionalOptions);
     bool               isFormatOverridden() const;
     int                getOriginalFormat() const;
     int64_t            getDynamicRangeProfile() const;
@@ -357,7 +366,8 @@ class Camera3Stream :
     status_t         returnBuffer(const camera_stream_buffer &buffer,
             nsecs_t timestamp, nsecs_t readoutTimestamp, bool timestampIncreasing,
             const std::vector<size_t>& surface_ids = std::vector<size_t>(),
-            uint64_t frameNumber = 0, int32_t transform = -1);
+            uint64_t frameNumber = 0,
+            const std::vector<int32_t>& transform = std::vector<int32_t>());
 
     /**
      * Fill in the camera_stream_buffer with the next valid buffer for this
@@ -506,7 +516,7 @@ class Camera3Stream :
             android_dataspace dataSpace, camera_stream_rotation_t rotation,
             const std::string& physicalCameraId,
             const std::unordered_set<int32_t> &sensorPixelModesUsed,
-            int setId, bool isMultiResolution, int64_t dynamicRangeProfile,
+            int setId, int multiResMode, int64_t dynamicRangeProfile,
             int64_t streamUseCase, bool deviceTimeBaseIsRealtime, int timestampBase,
             int32_t colorSpace);
 
@@ -525,7 +535,8 @@ class Camera3Stream :
     virtual status_t getBufferLocked(camera_stream_buffer *buffer,
             const std::vector<size_t>& surface_ids = std::vector<size_t>());
     virtual status_t returnBufferLocked(const camera_stream_buffer &buffer,
-            nsecs_t timestamp, nsecs_t readoutTimestamp, int32_t transform,
+            nsecs_t timestamp, nsecs_t readoutTimestamp,
+            const std::vector<int32_t>& transform = std::vector<int32_t>(),
             const std::vector<size_t>& surface_ids = std::vector<size_t>());
 
     virtual status_t getInputBufferLocked(camera_stream_buffer *buffer, Size* size);
@@ -536,7 +547,7 @@ class Camera3Stream :
     virtual status_t getInputSurfaceLocked(sp<Surface> *surface);
 
     // Can return -ENOTCONN when we are already disconnected (not an error)
-    virtual status_t disconnectLocked() = 0;
+    virtual status_t disconnectLocked(bool force = false) = 0;
 
     // Configure the buffer queue interface to the other end of the stream,
     // after the HAL has provided usage and max_buffers values. After this call,
@@ -557,6 +568,9 @@ class Camera3Stream :
     // Get cached output buffer count.
     virtual size_t   getCachedOutputBufferCountLocked() const = 0;
     virtual size_t   getMaxCachedOutputBuffersLocked() const = 0;
+
+    // Get the timestamp offset from CaptureResult timestamp to buffer timestamp
+    virtual nsecs_t getTimestampOffset() const = 0;
 
     // Get the usage flags for the other endpoint, or return
     // INVALID_OPERATION if they cannot be obtained.
@@ -631,11 +645,13 @@ class Camera3Stream :
     std::string mPhysicalCameraId;
     nsecs_t mLastTimestamp;
 
-    bool mIsMultiResolution = false;
+    int mMultiResMode = OutputConfiguration::MULTI_RES_OFF;
     bool mSupportOfflineProcessing = false;
 
     bool mDeviceTimeBaseIsRealtime;
     int mTimestampBase;
+
+    std::vector<gui::AdditionalOptions> mAdditionalOptions;
 }; // class Camera3Stream
 
 }; // namespace camera3

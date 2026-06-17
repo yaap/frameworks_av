@@ -25,8 +25,11 @@
 #include <utils/Log.h>
 #include <utils/Trace.h>
 #include <camera/StringUtils.h>
+#include <com_android_internal_camera_flags.h>
 #include "device3/Camera3IOStreamBase.h"
 #include "device3/StatusTracker.h"
+
+namespace flags = com::android::internal::camera::flags;
 
 namespace android {
 
@@ -37,11 +40,11 @@ Camera3IOStreamBase::Camera3IOStreamBase(int id, camera_stream_type_t type,
         android_dataspace dataSpace, camera_stream_rotation_t rotation,
         const std::string& physicalCameraId,
         const std::unordered_set<int32_t> &sensorPixelModesUsed,
-        int setId, bool isMultiResolution, int64_t dynamicRangeProfile, int64_t streamUseCase,
+        int setId, int multiResMode, int64_t dynamicRangeProfile, int64_t streamUseCase,
         bool deviceTimeBaseIsRealtime, int timestampBase, int32_t colorSpace) :
         Camera3Stream(id, type,
                 width, height, maxSize, format, dataSpace, rotation,
-                physicalCameraId, sensorPixelModesUsed, setId, isMultiResolution,
+                physicalCameraId, sensorPixelModesUsed, setId, multiResMode,
                 dynamicRangeProfile, streamUseCase, deviceTimeBaseIsRealtime, timestampBase,
                 colorSpace),
         mTotalBufferCount(0),
@@ -151,7 +154,7 @@ size_t Camera3IOStreamBase::getMaxCachedOutputBuffersLocked() const {
     return mMaxCachedBufferCount;
 }
 
-status_t Camera3IOStreamBase::disconnectLocked() {
+status_t Camera3IOStreamBase::disconnectLocked(bool force) {
     switch (mState) {
         case STATE_IN_RECONFIG:
         case STATE_CONFIGURED:
@@ -163,6 +166,10 @@ status_t Camera3IOStreamBase::disconnectLocked() {
             ALOGV("%s: Stream %d: Already disconnected",
                   __FUNCTION__, mId);
             return -ENOTCONN;
+    }
+
+    if (flags::seamless_transitions() && force) {
+        return OK;
     }
 
     if (mHandoutTotalBufferCount > 0) {
@@ -248,7 +255,7 @@ status_t Camera3IOStreamBase::returnAnyBufferLocked(
         nsecs_t timestamp,
         nsecs_t readoutTimestamp,
         bool output,
-        int32_t transform,
+        const std::vector<int32_t>& transforms,
         const std::vector<size_t>& surface_ids) {
     status_t res;
 
@@ -266,7 +273,7 @@ status_t Camera3IOStreamBase::returnAnyBufferLocked(
 
     sp<Fence> releaseFence;
     res = returnBufferCheckedLocked(buffer, timestamp, readoutTimestamp,
-                                    output, transform, surface_ids,
+                                    output, transforms, surface_ids,
                                     &releaseFence);
     // Res may be an error, but we still want to decrement our owned count
     // to enable clean shutdown. So we'll just return the error but otherwise
@@ -281,8 +288,12 @@ status_t Camera3IOStreamBase::returnAnyBufferLocked(
     }
 
     mHandoutTotalBufferCount--;
-    if (mHandoutTotalBufferCount == 0 && mState != STATE_IN_CONFIG &&
-            mState != STATE_IN_RECONFIG && mState != STATE_PREPARING) {
+    bool deferredConsumer = false;
+    if (flags::seamless_transitions() && (res == UNKNOWN_TRANSACTION)) {
+        deferredConsumer = true;
+    }
+    if (mHandoutTotalBufferCount == 0 && ((mState != STATE_IN_CONFIG &&
+            mState != STATE_IN_RECONFIG && mState != STATE_PREPARING) || deferredConsumer)) {
         /**
          * Avoid a spurious IDLE->ACTIVE->IDLE transition when using buffers
          * before/after register_stream_buffers during initial configuration

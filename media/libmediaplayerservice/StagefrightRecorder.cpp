@@ -53,6 +53,7 @@
 #include <media/stagefright/MPEG4Writer.h>
 #include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/MediaDefs.h>
+#include <media/stagefright/MediaCodecList.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/MediaCodecSource.h>
 #include <media/stagefright/OggWriter.h>
@@ -317,6 +318,11 @@ status_t StagefrightRecorder::setOutputFormat(output_format of) {
         of >= OUTPUT_FORMAT_LIST_END) {
         ALOGE("Invalid output format: %d", of);
         return BAD_VALUE;
+    }
+
+    if (mWriter != NULL) {
+        ALOGE("output format cannot be changed after prepare");
+        return INVALID_OPERATION;
     }
 
     if (of == OUTPUT_FORMAT_DEFAULT) {
@@ -619,6 +625,16 @@ status_t StagefrightRecorder::setParamVideoBitRateMode(int32_t bitRateMode) {
         return BAD_VALUE;
     }
     mVideoBitRateMode = bitRateMode;
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamVideoEncodingQuality(int32_t quality) {
+    ALOGV("setParamVideoEncodingQuality: %d", quality);
+    if (quality < 0) {
+        ALOGE("Unsupported video encoding quality: %d", quality);
+        return BAD_VALUE;
+    }
+    mVideoEncodingQuality = quality;
     return OK;
 }
 
@@ -1019,6 +1035,12 @@ status_t StagefrightRecorder::setParameter(
         int32_t video_bitrate_mode;
         if (safe_strtoi32(value.c_str(), &video_bitrate_mode)) {
             return setParamVideoBitRateMode(video_bitrate_mode);
+        }
+    } else if (key == "video-param-encoding-quality"
+        && android::media::mediarecorder::quality_setting_support()) {
+        int32_t video_encoding_quality;
+        if (safe_strtoi32(value.c_str(), &video_encoding_quality)) {
+            return setParamVideoEncodingQuality(video_encoding_quality);
         }
     } else if (key == "video-param-rotation-angle-degrees") {
         int32_t degrees;
@@ -2085,6 +2107,9 @@ status_t StagefrightRecorder::setupVideoEncoder(
         format->setInt32("rotation-degrees", mRotationDegrees);
     }
 
+    if (mVideoEncodingQuality != -1) {
+        format->setInt32("quality", mVideoEncodingQuality);
+    }
     format->setInt32("bitrate", mVideoBitRate);
     format->setInt32("bitrate-mode", mVideoBitRateMode);
     format->setInt32("frame-rate", mFrameRate);
@@ -2512,6 +2537,7 @@ status_t StagefrightRecorder::reset() {
     mVideoBitRate  = 192000;
     // Following MediaCodec's default
     mVideoBitRateMode = BITRATE_MODE_VBR;
+    mVideoEncodingQuality = -1;
     mSampleRate    = 8000;
     mAudioChannels = 1;
     mAudioBitRate  = 12200;

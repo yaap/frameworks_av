@@ -41,6 +41,7 @@
 #include "android/binder_status.h"
 #include "system/camera_metadata.h"
 #include "util/AidlUtil.h"
+#include "util/JpegUtil.h"
 #include "util/MetadataUtil.h"
 #include "util/Util.h"
 
@@ -78,8 +79,6 @@ namespace flags = ::android::companion::virtualdevice::flags;
 
 // Prefix of camera name - "device@1.1/virtual/{camera_id}"
 const char* kDevicePathPrefix = "device@1.1/virtual/";
-
-constexpr int32_t kMaxJpegSize = 13 * 1024 * 1024 /* 13MiB */;
 
 constexpr std::chrono::nanoseconds kMaxFrameDuration =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -163,7 +162,7 @@ std::optional<Resolution> getMaxResolution(
   auto itMax = std::max_element(configs.begin(), configs.end(),
                                 [](const SupportedStreamConfiguration& a,
                                    const SupportedStreamConfiguration& b) {
-                                  return a.width * b.height < a.width * b.height;
+                                  return a.width * a.height < b.width * b.height;
                                 });
   if (itMax == configs.end()) {
     ALOGE(
@@ -225,12 +224,31 @@ std::map<Resolution, int> getResolutionToMaxFpsMap(
   return resolutionToMaxFpsMap;
 }
 
+void separateScalerAndHeicInputConfigurations(
+    const std::vector<SupportedStreamConfiguration>& allInputConfigs,
+    std::vector<SupportedStreamConfiguration>& outScalerStreamInputConfigs,
+    std::vector<SupportedStreamConfiguration>& outHeicStreamInputConfigs) {
+  for (const auto& inputConfig : allInputConfigs) {
+    if (inputConfig.imageFormat == Format::HEIC) {
+      outHeicStreamInputConfigs.push_back(inputConfig);
+    } else {
+      outScalerStreamInputConfigs.push_back(inputConfig);
+    }
+  }
+}
+
 // Populates the maxResolution and the outputConfigurations
 // from the list of supported stream configs
-status_t convertSupportedStreams(
+//
+// Note: the provided configurations must represent scaler streams
+status_t convertSupportedScalerStreams(
     const std::vector<SupportedStreamConfiguration>& supportedInputConfig,
     Resolution& maxResolution,
     std::vector<MetadataBuilder::StreamConfiguration>& outputConfigurations) {
+  if (supportedInputConfig.empty()) {
+    return OK;
+  }
+
   std::optional<Resolution> resolution = getMaxResolution(supportedInputConfig);
   if (!resolution.has_value()) {
     return BAD_VALUE;
@@ -255,12 +273,143 @@ status_t convertSupportedStreams(
               .width = resolution.width,
               .height = resolution.height,
               .format = static_cast<int32_t>(format),
+              .isInput = ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
               .minFrameDuration = std::chrono::nanoseconds(1s) / maxFps,
               .minStallDuration = 0s};
         });
   }
 
   return OK;
+}
+
+// Populates the maxResolution and the outputConfigurations
+// from the list of supported stream configs
+//
+// Note: the provided configurations must represent HEIC streams
+status_t convertSupportedHeicStreams(
+    const std::vector<SupportedStreamConfiguration>& supportedInputConfigs,
+    Resolution& maxResolution,
+    std::vector<MetadataBuilder::StreamConfiguration>& outputConfigurations) {
+  if (supportedInputConfigs.empty()) {
+    return OK;
+  }
+
+  std::optional<Resolution> resolution = getMaxResolution(supportedInputConfigs);
+  if (!resolution.has_value()) {
+    ALOGE("%s: Failed to identify max resolution", __func__);
+    return BAD_VALUE;
+  }
+  maxResolution.width = resolution.value().width;
+  maxResolution.height = resolution.value().height;
+
+  outputConfigurations.reserve(supportedInputConfigs.size());
+
+  for (const auto& inputConfig : supportedInputConfigs) {
+    if (inputConfig.width <= 0 || inputConfig.height <= 0 ||
+        inputConfig.imageFormat != Format::HEIC || inputConfig.maxFps <= 0) {
+      ALOGE(
+          "%s: Received invalid HEIC format: width=%d, height=%d, format=0x%x, "
+          "maxFps=%d",
+          __func__, inputConfig.width, inputConfig.height,
+          inputConfig.imageFormat, inputConfig.maxFps);
+      return BAD_VALUE;
+    }
+
+    outputConfigurations.emplace_back(MetadataBuilder::StreamConfiguration{
+        .width = inputConfig.width,
+        .height = inputConfig.height,
+        .format = static_cast<int>(PixelFormat::BLOB),
+        .isInput = ANDROID_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS_OUTPUT,
+        .minFrameDuration = std::chrono::nanoseconds(1s) / inputConfig.maxFps,
+        .minStallDuration = 0s});
+  }
+
+  return OK;
+}
+
+status_t updateStreamConfigurationMetadataHelper(
+    HelperCameraMetadata& metadataHelper,
+    const std::vector<MetadataBuilder::StreamConfiguration>&
+        scalerOutputConfigurations,
+    int androidAvailableStreamConfigurationsKey,
+    int androidAvailableMinFrameDurationsKey,
+    int androidAvailableStallDurationsKey) {
+  std::vector<int32_t> metadataStreamConfigs;
+  std::vector<int64_t> metadataMinFrameDurations;
+  std::vector<int64_t> metadataStallDurations;
+
+  convertStreamConfigurationsToMetadataValues(
+      scalerOutputConfigurations, metadataStreamConfigs,
+      metadataMinFrameDurations, metadataStallDurations);
+
+  status_t ret = metadataHelper.update(androidAvailableStreamConfigurationsKey,
+                                       metadataStreamConfigs.data(),
+                                       metadataStreamConfigs.size());
+  if (ret != OK) {
+    ALOGE("%s: Can not set available stream configurations, metadata key=%d",
+          __func__, androidAvailableStreamConfigurationsKey);
+    return ret;
+  }
+
+  ret = metadataHelper.update(androidAvailableMinFrameDurationsKey,
+                              metadataMinFrameDurations.data(),
+                              metadataMinFrameDurations.size());
+  if (ret != OK) {
+    ALOGE("%s: Can not set available min frame durations, metadata key: %d",
+          __func__, androidAvailableMinFrameDurationsKey);
+    return ret;
+  }
+
+  ret = metadataHelper.update(androidAvailableStallDurationsKey,
+                              metadataStallDurations.data(),
+                              metadataStallDurations.size());
+  if (ret != OK) {
+    ALOGE("%s: Can not set available stall durations, metadata key=%d",
+          __func__, androidAvailableStallDurationsKey);
+    return ret;
+  }
+
+  return OK;
+}
+
+status_t updateScalerStreamConfigurationMetadata(
+    HelperCameraMetadata& metadataHelper,
+    const std::vector<MetadataBuilder::StreamConfiguration>&
+        scalerOutputConfigurations) {
+  if (scalerOutputConfigurations.empty()) {
+    return OK;
+  }
+
+  ALOGV(
+      "%s: Adding %zu output scaler configurations to configured "
+      "CameraCharacteristics.",
+      __func__, scalerOutputConfigurations.size());
+
+  return updateStreamConfigurationMetadataHelper(
+      metadataHelper, scalerOutputConfigurations,
+      ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
+      ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
+      ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
+}
+
+status_t updateHeicStreamConfigurationMetadata(
+    HelperCameraMetadata& metadataHelper,
+    const std::vector<MetadataBuilder::StreamConfiguration>&
+        heicOutputConfigurations) {
+  if (heicOutputConfigurations.empty()) {
+    return OK;
+  }
+
+  ALOGV(
+      "%s: Adding %zu output HEIC configurations to configured "
+      "CameraCharacteristics.",
+      __func__, heicOutputConfigurations.size());
+
+  return updateStreamConfigurationMetadataHelper(
+      metadataHelper, heicOutputConfigurations,
+      ANDROID_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS,
+      ANDROID_HEIC_AVAILABLE_HEIC_MIN_FRAME_DURATIONS,
+      ANDROID_HEIC_AVAILABLE_HEIC_STALL_DURATIONS);
 }
 
 std::unique_ptr<AidlCameraMetadata> createDefaultCameraCharacteristics(
@@ -388,23 +537,53 @@ std::unique_ptr<AidlCameraMetadata> createDefaultCameraCharacteristics(
       .setAvailableCapabilities(
           {ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE});
 
-  std::vector<MetadataBuilder::StreamConfiguration> outputConfigurations;
-  Resolution maxResolution;
-  if (convertSupportedStreams(supportedInputConfig, maxResolution,
-                              outputConfigurations) != OK) {
+  // TODO(b/458068663): Consolidate stream configuration metadata handling
+  // across the default and update cases
+  std::vector<SupportedStreamConfiguration> scalerStreamInputConfigs;
+  std::vector<SupportedStreamConfiguration> heicStreamInputConfigs;
+  separateScalerAndHeicInputConfigurations(
+      supportedInputConfig, scalerStreamInputConfigs, heicStreamInputConfigs);
+
+  std::vector<MetadataBuilder::StreamConfiguration> scalerOutputConfigurations;
+  std::vector<MetadataBuilder::StreamConfiguration> heicOutputConfigurations;
+
+  Resolution maxScalerResolution;
+  if (convertSupportedScalerStreams(scalerStreamInputConfigs,
+                                    maxScalerResolution,
+                                    scalerOutputConfigurations) != OK) {
     ALOGE(
-        "Can not get max resolution from the input stream configs, output "
+        "Can not get max resolution from the scaler input stream configs, "
+        "output "
         "streams not configured!");
     return nullptr;
   }
 
+  ALOGV(
+      "Adding %zu scaler output configurations to default "
+      "CameraCharacteristics.",
+      scalerOutputConfigurations.size());
+  builder.setAvailableScalerOutputStreamConfigurations(
+      scalerOutputConfigurations);
+
+  Resolution maxHeicResolution;
+  if (convertSupportedHeicStreams(heicStreamInputConfigs, maxHeicResolution,
+                                  heicOutputConfigurations) != OK) {
+    ALOGE("%s: Failed to convert supported HEIC input streams", __func__);
+    return nullptr;
+  }
+
+  ALOGV(
+      "Adding %zu HEIC output configurations to default CameraCharacteristics.",
+      heicOutputConfigurations.size());
+  builder.setAvailableHeicOutputStreamConfigurations(heicOutputConfigurations);
+
+  Resolution maxResolution = (maxHeicResolution < maxScalerResolution)
+                                 ? maxScalerResolution
+                                 : maxHeicResolution;
+
   builder.setSensorActiveArraySize(0, 0, maxResolution.width,
                                    maxResolution.height);
   builder.setSensorPixelArraySize(maxResolution.width, maxResolution.height);
-
-  ALOGV("Adding %zu output configurations to default CameraCharacteristics.",
-        outputConfigurations.size());
-  builder.setAvailableOutputStreamConfigurations(outputConfigurations);
 
   return builder.setAvailableCharacteristicKeys().build();
 }
@@ -412,68 +591,76 @@ std::unique_ptr<AidlCameraMetadata> createDefaultCameraCharacteristics(
 status_t updateStreamConfigurations(
     HelperCameraMetadata& metadataHelper,
     const std::vector<SupportedStreamConfiguration>& supportedInputConfig) {
-  std::vector<MetadataBuilder::StreamConfiguration> outputConfigurations;
-  Resolution maxResolution;
+  std::vector<SupportedStreamConfiguration> scalerStreamInputConfigs;
+  std::vector<SupportedStreamConfiguration> heicStreamInputConfigs;
+  separateScalerAndHeicInputConfigurations(
+      supportedInputConfig, scalerStreamInputConfigs, heicStreamInputConfigs);
 
-  status_t ret = convertSupportedStreams(supportedInputConfig, maxResolution,
-                                         outputConfigurations);
+  std::vector<MetadataBuilder::StreamConfiguration> scalerOutputConfigurations;
+  std::vector<MetadataBuilder::StreamConfiguration> heicOutputConfigurations;
+
+  Resolution maxScalerResolution;
+  status_t ret = convertSupportedScalerStreams(
+      scalerStreamInputConfigs, maxScalerResolution, scalerOutputConfigurations);
   if (ret != OK) {
     ALOGE(
-        "Can not get max resolution from the input stream configs, output "
+        "Can not get max resolution from the scaler input stream configs, "
+        "output "
         "streams not configured!");
     return ret;
   }
 
-  auto activeArraySizeVec =
-      std::vector<int32_t>({0, 0, maxResolution.width, maxResolution.height});
-  ret = metadataHelper.update(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE,
-                              activeArraySizeVec.data(),
-                              activeArraySizeVec.size());
+  ret = updateScalerStreamConfigurationMetadata(metadataHelper,
+                                                scalerOutputConfigurations);
   if (ret != OK) {
-    ALOGE("Can not set SENSOR_INFO_ACTIVE_ARRAY_SIZE!");
-    return ret;
-  }
-  auto pixelArraySizeVec =
-      std::vector<int32_t>({maxResolution.width, maxResolution.height});
-  ret =
-      metadataHelper.update(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
-                            pixelArraySizeVec.data(), pixelArraySizeVec.size());
-  if (ret != OK) {
-    ALOGE("Can not set ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE!");
+    ALOGE("%s: failed to update scaler stream configuration metadata", __func__);
     return ret;
   }
 
-  ALOGV("Adding %zu output configurations to configured CameraCharacteristics.",
-        outputConfigurations.size());
-  std::vector<int32_t> metadataStreamConfigs;
-  std::vector<int64_t> metadataMinFrameDurations;
-  std::vector<int64_t> metadataStallDurations;
-
-  convertStreamConfigurationsToMetadataValues(
-      outputConfigurations, metadataStreamConfigs, metadataMinFrameDurations,
-      metadataStallDurations);
-  ret = metadataHelper.update(ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
-                              metadataStreamConfigs.data(),
-                              metadataStreamConfigs.size());
+  Resolution maxHeicResolution;
+  ret = convertSupportedHeicStreams(heicStreamInputConfigs, maxHeicResolution,
+                                    heicOutputConfigurations);
   if (ret != OK) {
-    ALOGE("Can not set ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS!");
+    ALOGE(
+        "Can not get max resolution from the heic input stream configs, "
+        "output "
+        "streams not configured!");
     return ret;
   }
 
-  ret = metadataHelper.update(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
-                              metadataMinFrameDurations.data(),
-                              metadataMinFrameDurations.size());
+  ret = updateHeicStreamConfigurationMetadata(metadataHelper,
+                                              heicOutputConfigurations);
   if (ret != OK) {
-    ALOGE("Can not set ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS!");
+    ALOGE("%s: failed to update HEIC stream configuration metadata", __func__);
     return ret;
   }
 
-  ret = metadataHelper.update(ANDROID_SCALER_AVAILABLE_STALL_DURATIONS,
-                              metadataStallDurations.data(),
-                              metadataStallDurations.size());
-  if (ret != OK) {
-    ALOGE("Can not set ANDROID_SCALER_AVAILABLE_STALL_DURATIONS!");
-    return ret;
+  Resolution maxResolution = (maxHeicResolution < maxScalerResolution)
+                                 ? maxScalerResolution
+                                 : maxHeicResolution;
+
+  if (!metadataHelper.exists(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE)) {
+    auto activeArraySizeVec =
+        std::vector<int32_t>({0, 0, maxResolution.width, maxResolution.height});
+    ret = metadataHelper.update(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE,
+                                activeArraySizeVec.data(),
+                                activeArraySizeVec.size());
+    if (ret != OK) {
+      ALOGE("Can not set ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE!");
+      return ret;
+    }
+  }
+
+  if (!metadataHelper.exists(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE)) {
+    auto pixelArraySizeVec =
+        std::vector<int32_t>({maxResolution.width, maxResolution.height});
+    ret = metadataHelper.update(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
+                                pixelArraySizeVec.data(),
+                                pixelArraySizeVec.size());
+    if (ret != OK) {
+      ALOGE("Can not set ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE!");
+      return ret;
+    }
   }
 
   return ret;
@@ -487,7 +674,7 @@ std::optional<AidlCameraMetadata> initCameraCharacteristics(
   if (!std::all_of(supportedInputConfig.begin(), supportedInputConfig.end(),
                    [](const SupportedStreamConfiguration& config) {
                      return isFormatSupportedForInput(
-                         config.width, config.height, config.pixelFormat,
+                         config.width, config.height, config.imageFormat,
                          config.maxFps);
                    })) {
     ALOGE("%s: input configuration contains unsupported format", __func__);
@@ -559,12 +746,10 @@ VirtualCameraDevice::VirtualCameraDevice(
       mVirtualCameraClientCallback(configuration.virtualCameraCallback),
       mSupportedInputConfigurations(configuration.supportedStreamConfigs),
       mPerFrameCameraMetadataEnabled(
-          flags::virtual_camera_metadata()
-              ? configuration.perFrameCameraMetadataEnabled
-              : false),
-      mConfigCameraCharacteristics(flags::virtual_camera_metadata()
-                                       ? configuration.cameraCharacteristics
-                                       : std::nullopt) {
+          configuration.perFrameCameraMetadataEnabled),
+      mConfigCameraCharacteristics(configuration.cameraCharacteristics),
+      mIsMultiInputStreamEnabled(flags::camera_multiple_input_streams() &&
+                                 configuration.isMultiInputStreamEnabled) {
   std::optional<AidlCameraMetadata> metadata = initCameraCharacteristics(
       mSupportedInputConfigurations, configuration.sensorOrientation,
       configuration.lensFacing, mConfigCameraCharacteristics, deviceId);
@@ -608,7 +793,12 @@ ndk::ScopedAStatus VirtualCameraDevice::getResourceCost(
   if (_aidl_return == nullptr) {
     return cameraStatus(Status::ILLEGAL_ARGUMENT);
   }
-  _aidl_return->resourceCost = 100;  // ¯\_(ツ)_/¯
+  // a virtual camera uses global device resources, has no specific camera hardware limitations
+  if (flags::virtual_camera_lower_resource_cost()) {
+    _aidl_return->resourceCost = 10;
+  } else {
+    _aidl_return->resourceCost = 100;
+  }
   return ndk::ScopedAStatus::ok();
 }
 
@@ -629,6 +819,22 @@ bool VirtualCameraDevice::isStreamCombinationSupported(
   if (streamConfiguration.streams.empty()) {
     ALOGE("%s: Querying empty configuration", __func__);
     return false;
+  }
+  if (!flags::virtual_camera_direct_blob_transfer()) {
+    bool containsBlobInput =
+        std::any_of(mSupportedInputConfigurations.begin(),
+                    mSupportedInputConfigurations.end(),
+                    [](const SupportedStreamConfiguration& inputConfig) {
+                      return isBlobFormat(inputConfig.imageFormat);
+                    });
+    if (containsBlobInput) {
+      ALOGE(
+          "%s: input configurations contains BLOB format. This is "
+          "not allowed since flags::virtual_camera_direct_blob_transfer "
+          "is disabled",
+          __func__);
+      return false;
+    }
   }
 
   const std::vector<Stream>& streams = streamConfiguration.streams;
@@ -657,9 +863,14 @@ bool VirtualCameraDevice::isStreamCombinationSupported(
       return false;
     }
 
-    if (stream.rotation != StreamRotation::ROTATION_0 ||
-        !isSupportedOutputFormat(stream.format)) {
-      ALOGV("Unsupported output stream type");
+    if (stream.rotation != StreamRotation::ROTATION_0) {
+      ALOGW("%s: Rotation is not supported", __func__);
+      return false;
+    }
+
+    if (!isSupportedOutputFormat(stream.format)) {
+      ALOGW("Unsupported output stream format:%s stream:%s ",
+            toString(stream.format).c_str(), stream.toString().c_str());
       return false;
     }
 
@@ -671,8 +882,26 @@ bool VirtualCameraDevice::isStreamCombinationSupported(
 
     Resolution requestedResolution(stream.width, stream.height);
     auto matchesSupportedInputConfig =
-        [requestedResolution](const SupportedStreamConfiguration& config) {
+        [requestedResolution,
+         &stream](const SupportedStreamConfiguration& config) {
           Resolution supportedInputResolution(config.width, config.height);
+
+          // Check for matching input that enables direct blob transfer
+          //
+          // Note: skip isJpegStreamConfig(stream) here because a JPEG output
+          // stream can be generated from a bitmap input, e.g. YUV
+          if (isBlobFormat(config.imageFormat) || isHeicStreamConfig(stream)) {
+            if (!areMatchingBlobTypes(stream, config)) {
+              return false;
+            }
+
+            // If a direct blob transfer is possible, then the resolutions must
+            // match exactly
+            return requestedResolution == supportedInputResolution;
+          }
+
+          // Direct blob transfer not possible here, so resolutions need not
+          // perfectly match
           return requestedResolution <= supportedInputResolution &&
                  isApproximatellySameAspectRatio(requestedResolution,
                                                  supportedInputResolution);
@@ -680,7 +909,7 @@ bool VirtualCameraDevice::isStreamCombinationSupported(
     if (std::none_of(mSupportedInputConfigurations.begin(),
                      mSupportedInputConfigurations.end(),
                      matchesSupportedInputConfig)) {
-      ALOGV("Requested config doesn't match any supported input config");
+      ALOGW("Requested config doesn't match any supported input config");
       return false;
     }
   }
@@ -705,8 +934,19 @@ ndk::ScopedAStatus VirtualCameraDevice::open(
     std::shared_ptr<ICameraDeviceSession>* _aidl_return) {
   ALOGV("%s", __func__);
 
-  *_aidl_return = ndk::SharedRefBase::make<VirtualCameraSession>(
-      sharedFromThis(), in_callback, mVirtualCameraClientCallback);
+  {
+    std::lock_guard<std::mutex> lock(mSessionLock);
+    auto currentSession = mSession.lock();
+    if (currentSession != nullptr) {
+      return cameraStatus(Status::CAMERA_IN_USE);
+    }
+
+    auto session = ndk::SharedRefBase::make<VirtualCameraSession>(
+        sharedFromThis(), in_callback, mVirtualCameraClientCallback);
+    *_aidl_return = session;
+
+    mSession = session;
+  }
 
   if (virtualdevice::flags::virtual_camera_on_open()) {
     if (mVirtualCameraClientCallback != nullptr) {
@@ -790,6 +1030,22 @@ std::shared_ptr<VirtualCameraDevice> VirtualCameraDevice::sharedFromThis() {
   // std::enable_shared_from_this. This is recommended replacement for
   // shared_from_this() per documentation in binder_interface_utils.h.
   return ref<VirtualCameraDevice>();
+}
+
+void VirtualCameraDevice::closeSession(bool notifyError) {
+  ALOGV("Close all sessions. notifyError %d", notifyError);
+  std::shared_ptr<VirtualCameraSession> session;
+  {
+    std::lock_guard<std::mutex> lock(mSessionLock);
+    session = mSession.lock();
+    mSession.reset();
+  }
+  if (session != nullptr) {
+    if (notifyError) {
+      session->notifyDeviceError();
+    }
+    session->close();
+  }
 }
 
 }  // namespace virtualcamera

@@ -16,30 +16,35 @@
 
 #define LOG_TAG "AudioStreamBuilder"
 //#define LOG_NDEBUG 0
-#include <utils/Log.h>
 
-#include <new>
-#include <numeric>
-#include <stdint.h>
-#include <vector>
+#include "AudioStreamBuilder.h"
 
+// go/keep-sorted start
 #include <aaudio/AAudio.h>
 #include <aaudio/AAudioTesting.h>
 #include <android/media/audio/common/AudioMMapPolicy.h>
 #include <android/media/audio/common/AudioMMapPolicyInfo.h>
 #include <android/media/audio/common/AudioMMapPolicyType.h>
+#include <android_media_audio.h>
+#include <binding/AAudioBinderClient.h>
+#include <client/AudioStreamInternalCapture.h>
+#include <client/AudioStreamInternalPlay.h>
+#include <core/AudioStream.h>
+#include <legacy/AudioStreamRecord.h>
+#include <legacy/AudioStreamTrack.h>
 #include <media/AudioSystem.h>
 #include <system/aaudio/AAudio.h>
+#include <utility/AAudioUtilities.h>
+#include <utility/AudioGlobal.h>
+#include <utils/Log.h>
+// go/keep-sorted end
 
-#include "binding/AAudioBinderClient.h"
-#include "client/AudioStreamInternalCapture.h"
-#include "client/AudioStreamInternalPlay.h"
-#include "core/AudioGlobal.h"
-#include "core/AudioStream.h"
-#include "core/AudioStreamBuilder.h"
-#include "legacy/AudioStreamRecord.h"
-#include "legacy/AudioStreamTrack.h"
-#include "utility/AAudioUtilities.h"
+// go/keep-sorted start
+#include <new>
+#include <numeric>
+#include <stdint.h>
+#include <vector>
+// go/keep-sorted end
 
 using namespace aaudio;
 
@@ -51,9 +56,6 @@ using android::media::audio::common::AudioMMapPolicyType;
 #define AAUDIO_MMAP_EXCLUSIVE_POLICY_DEFAULT   AAUDIO_POLICY_NEVER
 #define AAUDIO_MMAP_POLICY_DEFAULT_AIDL        AudioMMapPolicy::NEVER
 #define AAUDIO_MMAP_EXCLUSIVE_POLICY_DEFAULT_AIDL AudioMMapPolicy::NEVER
-
-#define FRAMES_PER_DATA_CALLBACK_MIN 1
-#define FRAMES_PER_DATA_CALLBACK_MAX (1024 * 1024)
 
 /*
  * AudioStreamBuilder
@@ -89,6 +91,25 @@ static aaudio_result_t builder_createStream(aaudio_direction_t direction,
             result = AAUDIO_ERROR_ILLEGAL_ARGUMENT;
     }
     return result;
+}
+
+AudioStreamBuilder* AudioStreamBuilder::setRoutingChangedCallbackProc(
+        AAudioStream_routingChangedCallback proc) {
+    if (!android_media_audio_partial_flush_for_pcm_offload()) {
+        ALOGI("%s, ignored as the feature flag is not enabled.", __func__);
+        return this;
+    }
+    mRoutingChangedCallbackProc = proc;
+    return this;
+}
+
+AudioStreamBuilder* AudioStreamBuilder::setRoutingChangedCallbackUserData(void *userData) {
+    if (!android_media_audio_partial_flush_for_pcm_offload()) {
+        ALOGI("%s, ignored as the feature flag is not enabled.", __func__);
+        return this;
+    }
+    mRoutingChangedCallbackUserData = userData;
+    return this;
 }
 
 // Try to open using MMAP path if that is allowed.
@@ -255,27 +276,6 @@ void AudioStreamBuilder::stopUsingStream(AudioStream *stream) {
     android::sp<AudioStream> spAudioStream(stream);
     ALOGV("%s() strongCount = %d", __func__, spAudioStream->getStrongCount());
     spAudioStream->decStrong(nullptr);
-}
-
-aaudio_result_t AudioStreamBuilder::validate() const {
-
-    // Check for values that are ridiculously out of range to prevent math overflow exploits.
-    // The service will do a better check.
-    aaudio_result_t result = AAudioStreamParameters::validate();
-    if (result != AAUDIO_OK) {
-        return result;
-    }
-
-    // Prevent ridiculous values from causing problems.
-    if (mFramesPerDataCallback != AAUDIO_UNSPECIFIED
-        && (mFramesPerDataCallback < FRAMES_PER_DATA_CALLBACK_MIN
-            || mFramesPerDataCallback > FRAMES_PER_DATA_CALLBACK_MAX)) {
-        ALOGE("framesPerDataCallback out of range = %d",
-              mFramesPerDataCallback);
-        return AAUDIO_ERROR_OUT_OF_RANGE;
-    }
-
-    return AAUDIO_OK;
 }
 
 aaudio_result_t AudioStreamBuilder::addTag(const char* tag) {

@@ -28,6 +28,7 @@
 #include "IAfThread.h"
 #include "ResamplerBufferProvider.h"
 
+#include <android/media/IAudioPolicyService.h>
 #include <audio_utils/StringUtils.h>
 #include <audio_utils/minifloat.h>
 #include <com_android_media_audio.h>
@@ -46,6 +47,7 @@
 #include <utils/Log.h>
 #include <utils/Trace.h>
 
+#include <chrono>
 #include <linux/futex.h>
 #include <math.h>
 #include <sys/syscall.h>
@@ -64,8 +66,6 @@
 #else
 #define ALOGVV(a...) do { } while(0)
 #endif
-
-namespace audioserver_flags = com::android::media::audioserver;
 
 namespace android {
 
@@ -103,7 +103,8 @@ TrackBase::TrackBase(
             const alloc_type alloc,
             track_type type,
             audio_port_handle_t portId,
-            std::string metricsId)
+            std::string metricsId,
+            const std::string& codecProvenance)
     :
         mThread(thread),
         mAllocType(alloc),
@@ -118,6 +119,7 @@ TrackBase::TrackBase(
         mChannelCount(isOut ?
                 audio_channel_count_from_out_mask(channelMask) :
                 audio_channel_count_from_in_mask(channelMask)),
+        mCodecProvenance(codecProvenance),
         mFrameSize(audio_bytes_per_frame(mChannelCount, format)),
         mFrameCount(frameCount),
         mSessionId(sessionId),
@@ -334,6 +336,8 @@ void TrackBase::deferRestartIfDisabled()
             const auto actual = weakTrack.promote();
             if (actual) actual->restartIfDisabled();
         });
+    ALOGV("%s signal playback thread", __func__);
+    thread->asyncBroadcast();
 }
 
 void TrackBase::beginBatteryAttribution() {
@@ -858,8 +862,10 @@ sp<IAfTrack> IAfTrack::create(
         size_t frameCountToBeReady,
         float speed,
         bool isSpatialized,
-        bool isBitPerfect) {
-    return sp<Track>::make(thread,
+        bool isBitPerfect,
+        const std::string& codecProvenance) {
+    // Note: sp<>::make does not propagate thread safety analysis, so use "new" here.
+    return new Track(thread,
             client,
             streamType,
             attr,
@@ -879,7 +885,8 @@ sp<IAfTrack> IAfTrack::create(
             frameCountToBeReady,
             speed,
             isSpatialized,
-            isBitPerfect);
+            isBitPerfect,
+            codecProvenance);
 }
 
 // Track constructor must be called with AudioFlinger::mLock and ThreadBase::mLock held
@@ -904,7 +911,8 @@ Track::Track(
             size_t frameCountToBeReady,
             float speed,
             bool isSpatialized,
-            bool isBitPerfect)
+            bool isBitPerfect,
+            const std::string& codecProvenance)
     :
     AfPlaybackCommon(*this, *thread,
                      attr, attributionSource, thread->isOffloadOrMmap(), type != TYPE_PATCH),
@@ -920,7 +928,8 @@ Track::Track(
                   (type == TYPE_PATCH) ? ( buffer == NULL ? ALLOC_LOCAL : ALLOC_NONE) : ALLOC_CBLK,
                   type,
                   portId,
-                  std::string(AMEDIAMETRICS_KEY_PREFIX_AUDIO_TRACK) + std::to_string(portId)),
+                  std::string(AMEDIAMETRICS_KEY_PREFIX_AUDIO_TRACK) + std::to_string(portId),
+                  codecProvenance),
     mFillingStatus(FS_INVALID),
     // mRetryCount initialized later when needed
     mSharedBuffer(sharedBuffer),
@@ -1834,6 +1843,13 @@ void Track::copyMetadataTo(MetadataInserter& backInserter) const
     }
     strncpy(metadata.tags, tagStr.c_str(), AUDIO_ATTRIBUTES_TAGS_MAX_SIZE);
     metadata.tags[AUDIO_ATTRIBUTES_TAGS_MAX_SIZE - 1] = '\0';
+    if (mCodecProvenance.size() >= AUDIO_ATTRIBUTES_CODEC_PROVENANCE_MAX_SIZE) {
+        ALOGW("%s: mCodecProvenance truncated, size %zu >= %d", __func__,
+              mCodecProvenance.size(), AUDIO_ATTRIBUTES_CODEC_PROVENANCE_MAX_SIZE);
+    }
+    strncpy(metadata.codec_provenance, mCodecProvenance.c_str(),
+            AUDIO_ATTRIBUTES_CODEC_PROVENANCE_MAX_SIZE);
+    metadata.codec_provenance[AUDIO_ATTRIBUTES_CODEC_PROVENANCE_MAX_SIZE - 1] = '\0';
     *backInserter++ = metadata;
 }
 
@@ -2044,6 +2060,12 @@ status_t Track::setSyncEvent(
     return NO_ERROR;
 }
 
+void Track::poison()
+{
+    TrackBase::poison();
+    signalClientFlag(CBLK_POISONED);
+}
+
 void Track::invalidate()
 {
     TrackBase::invalidate();
@@ -2067,7 +2089,7 @@ void Track::signalClientFlag(int32_t flag)
     // FIXME should use proxy, and needs work
     audio_track_cblk_t* cblk = mCblk;
     android_atomic_or(flag, &cblk->mFlags);
-    android_atomic_release_store(0x40000000, &cblk->mFutex);
+    android_atomic_or(CBLK_FUTEX_NOTIFY, &cblk->mFutex);
     // client is not in server, so FUTEX_WAKE is needed instead of FUTEX_WAKE_PRIVATE
     (void) syscall(__NR_futex, &cblk->mFutex, FUTEX_WAKE, INT_MAX);
 }
@@ -2625,6 +2647,7 @@ sp<IAfPatchTrack> IAfPatchTrack::create(
         void* buffer,
         size_t bufferSize,
         audio_output_flags_t flags,
+        audio_port_handle_t portId,
         const Timeout& timeout,
         size_t frameCountToBeReady, /** Default behaviour is to start
                                          *  as soon as possible to have
@@ -2632,7 +2655,8 @@ sp<IAfPatchTrack> IAfPatchTrack::create(
                                          *  even if it might glitch. */
         float speed)
 {
-    return sp<PatchTrack>::make(
+    // Note: sp<>::make does not propagate thread safety analysis, so use "new" here.
+    return new PatchTrack(
             playbackThread,
             streamType,
             sampleRate,
@@ -2642,6 +2666,7 @@ sp<IAfPatchTrack> IAfPatchTrack::create(
             buffer,
             bufferSize,
             flags,
+            portId,
             timeout,
             frameCountToBeReady,
             speed);
@@ -2656,6 +2681,7 @@ PatchTrack::PatchTrack(IAfPlaybackThread* playbackThread,
                                                      void *buffer,
                                                      size_t bufferSize,
                                                      audio_output_flags_t flags,
+                                                     audio_port_handle_t portId,
                                                      const Timeout& timeout,
                                                      size_t frameCountToBeReady,
                                                      float speed)
@@ -2669,7 +2695,7 @@ PatchTrack::PatchTrack(IAfPlaybackThread* playbackThread,
               sampleRate, format, channelMask, frameCount,
               buffer, bufferSize, nullptr /* sharedBuffer */,
               AUDIO_SESSION_NONE, getpid(), audioServerAttributionSource(getpid()), flags,
-              TYPE_PATCH, AUDIO_PORT_HANDLE_NONE, frameCountToBeReady, speed,
+              TYPE_PATCH, portId, frameCountToBeReady, speed,
               false /*isSpatialized*/, false /*isBitPerfect*/),
         PatchTrackBase(mCblk ? new AudioTrackClientProxy(mCblk, mBuffer, frameCount, mFrameSize,
                         true /*clientInServer*/) : nullptr,
@@ -2930,7 +2956,8 @@ sp<IAfRecordTrack> IAfRecordTrack::create(IAfRecordThread* thread,
         audio_port_handle_t portId,
         int32_t startFrames)
 {
-    return sp<RecordTrack>::make(
+    // Note: sp<>::make does not propagate thread safety analysis, so use "new" here.
+    return new RecordTrack(
         thread,
         client,
         attr,
@@ -3137,7 +3164,7 @@ void RecordTrack::invalidate()
     // FIXME should use proxy, and needs work
     audio_track_cblk_t* cblk = mCblk;
     android_atomic_or(CBLK_INVALID, &cblk->mFlags);
-    android_atomic_release_store(0x40000000, &cblk->mFutex);
+    android_atomic_or(CBLK_FUTEX_NOTIFY, &cblk->mFutex);
     // client is not in server, so FUTEX_WAKE is needed instead of FUTEX_WAKE_PRIVATE
     (void) syscall(__NR_futex, &cblk->mFutex, FUTEX_WAKE, INT_MAX);
 }
@@ -3688,64 +3715,110 @@ void PassthruPatchRecord::releaseBuffer(
     buffer->raw = nullptr;
 }
 
+#undef LOG_TAG
+#define LOG_TAG "AF::AfPlaybackCommon"
+
 // ----------------------------------------------------------------------------
 // AfPlaybackCommon
 
-static AfPlaybackCommon::EnforcementLevel getOpControlEnforcementLevel(audio_usage_t usage,
-        IAfThreadCallback& cb) {
-    using enum AfPlaybackCommon::EnforcementLevel;
-    if (cb.isHardeningOverrideEnabled()) {
-        return FULL;
+using ::com::android::media::audio::hardening_usage;
+
+static std::pair<AfPlaybackCommon::EnforcementLevel,
+                 media::IAudioManagerNative::HardeningExemptionReason>
+getHardeningDecision(audio_usage_t usage, IAfThreadCallback& cb, uid_t uid) {
+    using EnforcementLevel = AfPlaybackCommon::EnforcementLevel;
+    using enum media::IAudioPolicyService::HardeningOverride;
+    using enum media::IAudioManagerNative::HardeningExemptionReason;
+
+    using com::android::media::permission::PermissionEnum;
+
+    const auto overrided = cb.getHardeningOverride();
+    if (overrided == ENABLE || overrided == THROW) {
+        return {EnforcementLevel::FULL, NONE};
+    } else if (overrided == DISABLE) {
+        return {EnforcementLevel::NONE, OVERRIDE};
     }
     if (usage == AUDIO_USAGE_VIRTUAL_SOURCE || media::permission::isSystemUsage(usage)) {
-        return NONE;
+        return {EnforcementLevel::NONE, SYSTEM_USAGE};
     }
+
+    const auto& pp = cb.getPermissionProvider();
+    if (pp.checkPermission(PermissionEnum::MODIFY_AUDIO_ROUTING, uid).value_or(false) ||
+        pp.checkPermission(PermissionEnum::MODIFY_PHONE_STATE, uid).value_or(false)) {
+        return {EnforcementLevel::NONE, PRIVILEGED_APP};
+    }
+
     if (hardening_strict()) {
-        // TODO (b/407607395)
-        if (usage == AUDIO_USAGE_ASSISTANCE_ACCESSIBILITY) {
-            return PARTIAL;
+        if (hardening_usage()) {
+            if (usage == AUDIO_USAGE_ALARM) {
+                if (pp.checkPermission(PermissionEnum::SCHEDULE_EXACT_ALARM, uid).value_or(false) ||
+                    pp.checkPermission(PermissionEnum::USE_EXACT_ALARM, uid).value_or(false)) {
+                    return {EnforcementLevel::PARTIAL, ALARM};
+                }
+            }
+        } else {
+            if (usage == AUDIO_USAGE_ALARM) {
+                return {EnforcementLevel::PARTIAL, ALARM};
+            }
+            if (usage == AUDIO_USAGE_ASSISTANCE_ACCESSIBILITY) {
+                return {EnforcementLevel::PARTIAL, SYSTEM_USAGE};
+            }
         }
-        return FULL;
+        if (pp.checkPermission(PermissionEnum::BLUETOOTH_CONNECT, uid).value_or(false)) {
+            return {EnforcementLevel::PARTIAL, PRIVILEGED_APP};
+        }
+        if (pp.getHighestTargetSdkForUid(uid).value_or(1000) < 37) {
+            return {EnforcementLevel::PARTIAL, TARGET_SDK};
+        }
+        return {EnforcementLevel::FULL, NONE};
     } else if (hardening_partial()) {
-        return PARTIAL;
+        return {EnforcementLevel::PARTIAL, FLAG_DISABLED};
     } else {
-        return NONE;
+        return {EnforcementLevel::NONE, FLAG_DISABLED};
     }
 }
 
 AfPlaybackCommon::AfPlaybackCommon(IAfTrackBase& self, IAfThreadBase& thread,
                                    const audio_attributes_t& attr,
                                    const AttributionSourceState& attributionSource,
-                                   bool isOffloadOrMmap,
-                                   bool shouldPlaybackHarden)
-    : mSelf(self),
-      mEnforcementLevel(getOpControlEnforcementLevel(attr.usage, *thread.afThreadCallback())) {
-    ALOGI("creating track with enforcement level %d", mEnforcementLevel);
-    using AppOpsManager::OP_CONTROL_AUDIO_PARTIAL;
+                                   bool isOffloadOrMmap, bool shouldPlaybackHarden)
+    : mSelf(self) {
+
+    std::tie(mEnforcementLevel, mExemptionReason) =
+            getHardeningDecision(attr.usage, *thread.afThreadCallback(),
+                                 VALUE_OR_FATAL(aidl2legacy_int32_t_uid_t(attributionSource.uid)));
+
+    ALOGI("%s: creating track with enforcement level %d reason %s shouldHarden %d",
+            __func__,
+            mEnforcementLevel,
+            toString(mExemptionReason).c_str(),
+            shouldPlaybackHarden);
+
     using AppOpsManager::OP_CONTROL_AUDIO;
+    using AppOpsManager::OP_CONTROL_AUDIO_PARTIAL;
     using media::permission::Ops;
     using media::permission::skipOpsForUid;
     using media::permission::ValidatedAttributionSourceState;
 
-    // Don't bother for trusted uids
+    // Don't bother for trusted uids or tracks used for internal redirection
     if (!skipOpsForUid(attributionSource.uid) && shouldPlaybackHarden) {
-        if (isOffloadOrMmap) {
-            mExecutor.emplace();
-        }
+        // For Offload or MMap tracks, we issue asyncBroadcast to wake the Thread
+        // if there are no HW volume changes to update volume for the
+        // permission callback.
+        // We impose kBroadcastDelay to ensure that both partial and
+        // full permission callbacks can be received before the
+        // Thread wakeup.
+        constexpr auto kBroadcastDelay = std::chrono::milliseconds(40);
         auto thread_wp = wp<IAfThreadBase>::fromExisting(&thread);
         mOpControlPartialSession.emplace(
                 ValidatedAttributionSourceState::createFromTrustedSource(attributionSource),
                 Ops{.attributedOp = OP_CONTROL_AUDIO_PARTIAL},
-                [this, isOffloadOrMmap, thread_wp](bool isPermitted) {
+                [this, isOffloadOrMmap, thread_wp, kBroadcastDelay](bool isPermitted) {
                     mHasOpControlPartial.store(isPermitted, std::memory_order_release);
                     if (isOffloadOrMmap) {
-                        mExecutor->enqueue(mediautils::Runnable{[thread_wp]() {
-                            auto thread = thread_wp.promote();
-                            if (thread != nullptr) {
-                                audio_utils::lock_guard l {thread->mutex()};
-                                thread->broadcast_l();
-                            }
-                        }});
+                        if (const auto thread = thread_wp.promote()) {
+                            thread->asyncBroadcast(kBroadcastDelay);
+                        }
                     }
                 }
         );
@@ -3753,16 +3826,12 @@ AfPlaybackCommon::AfPlaybackCommon(IAfTrackBase& self, IAfThreadBase& thread,
         mOpControlFullSession.emplace(
                 ValidatedAttributionSourceState::createFromTrustedSource(attributionSource),
                 Ops{.attributedOp = OP_CONTROL_AUDIO},
-                [this, isOffloadOrMmap, thread_wp](bool isPermitted) {
+                [this, isOffloadOrMmap, thread_wp, kBroadcastDelay](bool isPermitted) {
                     mHasOpControlFull.store(isPermitted, std::memory_order_release);
                     if (isOffloadOrMmap) {
-                        mExecutor->enqueue(mediautils::Runnable{[thread_wp]() {
-                            auto thread = thread_wp.promote();
-                            if (thread != nullptr) {
-                                audio_utils::lock_guard l {thread->mutex()};
-                                thread->broadcast_l();
-                            }
-                        }});
+                        if (const auto thread = thread_wp.promote()) {
+                            thread->asyncBroadcast(kBroadcastDelay);
+                        }
                     }
                 }
         );
@@ -3772,20 +3841,21 @@ AfPlaybackCommon::AfPlaybackCommon(IAfTrackBase& self, IAfThreadBase& thread,
 void AfPlaybackCommon::maybeLogPlaybackHardening(media::IAudioManagerNative& am) const {
     using media::IAudioManagerNative::HardeningType::PARTIAL;
     using media::IAudioManagerNative::HardeningType::FULL;
+
     // The op state deviates from if the track is actually muted if the playback was exempted for
     // some compat reason.
     // The state could have technically TOCTOU, but this is for metrics and that is very unlikely
     if (!hasOpControlPartial()) {
         if (!mPlaybackHardeningLogged.exchange(true, std::memory_order_acq_rel)) {
             am.playbackHardeningEvent(mSelf.uid(), PARTIAL,
-                                      /* bypassed= */
-                                      !isPlaybackRestrictedControl());
+                    /* bypassed= */
+                    !isPlaybackRestrictedControl(), mExemptionReason, mSelf.attributes().usage);
         }
     } else if (!hasOpControlFull()) {
         if (!mPlaybackHardeningLogged.exchange(true, std::memory_order_acq_rel)) {
             am.playbackHardeningEvent(mSelf.uid(), FULL,
-                                      /* bypassed= */
-                                      !isPlaybackRestrictedControl());
+                     /* bypassed= */
+                     !isPlaybackRestrictedControl(), mExemptionReason, mSelf.attributes().usage);
         }
     }
 }
@@ -3808,6 +3878,17 @@ void AfPlaybackCommon::processMuteEvent(media::IAudioManagerNative& am, mute_sta
     } else {
         ALOGW("%s(%d): cannot process mute state for port ID %d, status error %s", __func__,
               trackId, portId, result.toString8().c_str());
+    }
+}
+
+void AfPlaybackCommon::resetMuteEvent(media::IAudioManagerNative& am) {
+    const auto portId = mSelf.portId();
+    const auto result = portId != AUDIO_PORT_HANDLE_NONE
+                                ? am.portMuteEvent(portId, static_cast<int>(mMuteState.load()))
+                                : Status::fromExceptionCode(Status::EX_ILLEGAL_STATE);
+    if (!result.isOk()) {
+        ALOGW("%s(%d): cannot update mute state for port ID %d, status error %s", __func__,
+              mSelf.id(), portId, result.toString8().c_str());
     }
 }
 

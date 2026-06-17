@@ -16,19 +16,22 @@
 
 #define LOG_TAG "AudioStreamLegacy"
 //#define LOG_NDEBUG 0
+
+#include "AudioStreamLegacy.h"
+
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
+#include <android_media_audio.h>
+#include <audio_utils/primitives.h>
+#include <core/AudioStream.h>
+#include <media/AudioTimestamp.h>
+#include <media/AudioTrack.h>
+#include <utility/AudioGlobal.h>
 #include <utils/Log.h>
+#include <utils/String16.h>
+// go/keep-sorted end
 
 #include <stdint.h>
-
-#include <aaudio/AAudio.h>
-#include <audio_utils/primitives.h>
-#include <media/AudioTrack.h>
-#include <media/AudioTimestamp.h>
-#include <utils/String16.h>
-
-#include "core/AudioGlobal.h"
-#include "core/AudioStream.h"
-#include "legacy/AudioStreamLegacy.h"
 
 using namespace android;
 using namespace aaudio;
@@ -280,7 +283,12 @@ void AudioStreamLegacy::onAudioDeviceUpdate(audio_io_handle_t /* audioIo */,
     ALOGD("%s() devices %s => %s",
             __func__, android::toString(oldDeviceIds).c_str(),
             android::toString(deviceIds).c_str());
-    if (!oldDeviceIds.empty()
+    if (android::areDeviceIdsEqual(oldDeviceIds, deviceIds)) {
+        ALOGD("%s, ignore device update as it is the same as the old one", __func__);
+        return;
+    }
+    if (!android_media_audio_partial_flush_for_pcm_offload()
+            && !oldDeviceIds.empty()
             && !android::areDeviceIdsEqual(oldDeviceIds, deviceIds)
             && !isDisconnected()
             ) {
@@ -303,4 +311,8 @@ void AudioStreamLegacy::onAudioDeviceUpdate(audio_io_handle_t /* audioIo */,
         }
     }
     setDeviceIds(deviceIds);
+    if (!isDisconnected() && getState() != AAUDIO_STREAM_STATE_CLOSING &&
+        getState() != AAUDIO_STREAM_STATE_CLOSED) {
+        maybeSignalRoutingChangedCallback();
+    }
 }

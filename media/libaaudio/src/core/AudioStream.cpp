@@ -16,26 +16,35 @@
 
 #define LOG_TAG "AAudioStream"
 //#define LOG_NDEBUG 0
-#include <utils/Log.h>
 
-#include <atomic>
-#include <functional>
-#include <stdint.h>
+#include "AudioStream.h"
 
-#include <linux/futex.h>
-#include <media/MediaMetricsItem.h>
-#include <sys/syscall.h>
-
+// go/keep-sorted start
 #include <aaudio/AAudio.h>
 #include <android-base/strings.h>
+#include <android/media/audio/common/FlushFromFrameSupport.h>
+#include <audio_utils/threads.h>
 #include <com_android_media_audioserver.h>
+#include <core/AudioStreamBuilder.h>
+#include <media/AudioSystem.h>
+#include <media/MediaMetricsItem.h>
+#include <system/thread_defs.h>
+#include <utility/AudioClock.h>
+#include <utility/AudioGlobal.h>
+#include <utils/Log.h>
+// go/keep-sorted end
 
-#include "AudioStreamBuilder.h"
-#include "AudioStream.h"
-#include "AudioClock.h"
-#include "AudioGlobal.h"
+// go/keep-sorted start
+#include <atomic>
+#include <functional>
+#include <linux/futex.h>
+#include <stdint.h>
+#include <sys/syscall.h>
+// go/keep-sorted end
 
 namespace aaudio {
+
+using android::media::audio::common::FlushFromFrameSupport;
 
 // Sequential number assigned to streams solely for debugging purposes.
 static aaudio_stream_id_t AAudio_getNextStreamId() {
@@ -69,64 +78,70 @@ AudioStream::~AudioStream() {
                         AudioGlobal_convertStreamStateToText(getState()), isDisconnected());
 }
 
-aaudio_result_t AudioStream::open(const AudioStreamBuilder& builder)
+aaudio_result_t AudioStream::open(const AAudioStreamOpenRequest& openRequest)
 {
     // Call here as well because the AAudioService will call this without calling build().
-    aaudio_result_t result = builder.validate();
+    aaudio_result_t result = openRequest.validate();
     if (result != AAUDIO_OK) {
         return result;
     }
 
     // Copy parameters from the Builder because the Builder may be deleted after this call.
     // TODO AudioStream should be a subclass of AudioStreamParameters
-    mSamplesPerFrame = builder.getSamplesPerFrame();
-    mChannelMask = builder.getChannelMask();
-    mSampleRate = builder.getSampleRate();
-    mDeviceIds = builder.getDeviceIds();
-    mFormat = builder.getFormat();
-    mSharingMode = builder.getSharingMode();
-    mSharingModeMatchRequired = builder.isSharingModeMatchRequired();
-    mPerformanceMode = builder.getPerformanceMode();
+    mSamplesPerFrame = openRequest.getSamplesPerFrame();
+    mChannelMask = openRequest.getChannelMask();
+    mSampleRate = openRequest.getSampleRate();
+    mDeviceIds = openRequest.getDeviceIds();
+    mFormat = openRequest.getFormat();
+    mSharingMode = openRequest.getSharingMode();
+    mSharingModeMatchRequired = openRequest.isSharingModeMatchRequired();
+    mPerformanceMode = openRequest.getPerformanceMode();
 
-    mUsage = builder.getUsage();
+    mUsage = openRequest.getUsage();
     if (mUsage == AAUDIO_UNSPECIFIED) {
         mUsage = AAUDIO_USAGE_MEDIA;
     }
-    mContentType = builder.getContentType();
+    mContentType = openRequest.getContentType();
     if (mContentType == AAUDIO_UNSPECIFIED) {
         mContentType = AAUDIO_CONTENT_TYPE_MUSIC;
     }
-    mTags = builder.getTags();
-    mSpatializationBehavior = builder.getSpatializationBehavior();
+    mTags = openRequest.getTags();
+    mSpatializationBehavior = openRequest.getSpatializationBehavior();
     // for consistency with other properties, note UNSPECIFIED is the same as AUTO
     if (mSpatializationBehavior == AAUDIO_UNSPECIFIED) {
         mSpatializationBehavior = AAUDIO_SPATIALIZATION_BEHAVIOR_AUTO;
     }
-    mIsContentSpatialized = builder.isContentSpatialized();
-    mInputPreset = builder.getInputPreset();
+    mIsContentSpatialized = openRequest.isContentSpatialized();
+    mInputPreset = openRequest.getInputPreset();
     if (mInputPreset == AAUDIO_UNSPECIFIED) {
         mInputPreset = AAUDIO_INPUT_PRESET_VOICE_RECOGNITION;
     }
-    mAllowedCapturePolicy = builder.getAllowedCapturePolicy();
+    mAllowedCapturePolicy = openRequest.getAllowedCapturePolicy();
     if (mAllowedCapturePolicy == AAUDIO_UNSPECIFIED) {
         mAllowedCapturePolicy = AAUDIO_ALLOW_CAPTURE_BY_ALL;
     }
-    mIsPrivacySensitive = builder.isPrivacySensitive();
+    mIsPrivacySensitive = openRequest.isPrivacySensitive();
 
     // callbacks
-    mFramesPerDataCallback = builder.getFramesPerDataCallback();
-    mDataCallbackProc = builder.getDataCallbackProc();
-    mPartialDataCallbackProc = builder.getPartialDataCallbackProc();
+    mFramesPerDataCallback = openRequest.getFramesPerDataCallback();
+    mDataCallbackProc = openRequest.getDataCallbackProc();
+    mPartialDataCallbackProc = openRequest.getPartialDataCallbackProc();
     if (mPartialDataCallbackProc != nullptr) {
         mDataCallbackWrapper = &AudioStream::partialDataCallbackInternal;
     } else if (mDataCallbackProc != nullptr) {
         mDataCallbackWrapper = &AudioStream::dataCallbackInternal;
     }
-    mErrorCallbackProc = builder.getErrorCallbackProc();
-    mDataCallbackUserData = builder.getDataCallbackUserData();
-    mErrorCallbackUserData = builder.getErrorCallbackUserData();
-    setPresentationEndCallbackUserData(builder.getPresentationEndCallbackUserData());
-    setPresentationEndCallbackProc(builder.getPresentationEndCallbackProc());
+    mErrorCallbackProc = openRequest.getErrorCallbackProc();
+    mDataCallbackUserData = openRequest.getDataCallbackUserData();
+    mErrorCallbackUserData = openRequest.getErrorCallbackUserData();
+    setPresentationEndCallbackUserData(openRequest.getPresentationEndCallbackUserData());
+    setPresentationEndCallbackProc(openRequest.getPresentationEndCallbackProc());
+    mRoutingChangedCallbackProc = openRequest.getRoutingChangedCallbackProc();
+    if (mRoutingChangedCallbackProc != nullptr) {
+        mRoutingChangedCallbackUserData = openRequest.getRoutingChangedCallbackUserData();
+        mEventExecutor.emplace("AudioStreamExecutor",
+                android::audio_utils::nice_to_unified_priority(ANDROID_PRIORITY_URGENT_AUDIO));
+    }
 
     return AAUDIO_OK;
 }
@@ -217,6 +232,7 @@ aaudio_result_t AudioStream::systemStart() {
         mPlayerBase->baseUpdateDeviceIds(getDeviceIds());
         // We only call this for logging in "dumpsys audio". So ignore return code.
         (void) mPlayerBase->startWithStatus(getDeviceIds());
+        maybeSignalRoutingChangedCallback();
     }
     return result;
 }
@@ -387,6 +403,9 @@ aaudio_result_t AudioStream::safeReleaseCloseInternal() {
 void AudioStream::close_l() {
     // Releasing the stream will set the state to CLOSING.
     assert(getState() == AAUDIO_STREAM_STATE_CLOSING);
+    if (mEventExecutor.has_value()) {
+        mEventExecutor->shutdown(true /*dropTasks*/);
+    }
     // setState() prevents a transition from CLOSING to any state other than CLOSED.
     // State is checked by destructor.
     setState(AAUDIO_STREAM_STATE_CLOSED);
@@ -625,6 +644,33 @@ void AudioStream::maybeCallErrorCallback(aaudio_result_t result) {
     }
 }
 
+void AudioStream::maybeSignalRoutingChangedCallback() {
+    if (getRoutingChangedCallback() == nullptr) {
+        return;
+    }
+    assert(mEventExecutor.has_value());
+    android::wp<AudioStream> weakThis = android::wp<AudioStream>::fromExisting(this);
+    mEventExecutor->enqueue(android::mediautils::Runnable{[weakThis]() {
+        auto strongThis = weakThis.promote();
+        if (strongThis == nullptr) {
+            return;
+        }
+        auto routingChangedCallback = strongThis->getRoutingChangedCallback();
+        if (routingChangedCallback == nullptr) {
+            return;
+        }
+        auto deviceIds = strongThis->getDeviceIds();
+        ALOGW_IF(deviceIds.empty(),
+                 "maybeSignalRoutingChangedCallback: skip routing callback because the routed "
+                 "device ids are empty.");
+        std::invoke(routingChangedCallback,
+                    (AAudioStream *)strongThis.get(),
+                    strongThis->getRoutingChangedCallbackUserData(),
+                    deviceIds.data(),
+                    deviceIds.size());
+    }});
+}
+
 // Is this running on the same thread as a callback?
 // Note: This cannot be implemented using a thread_local because that would
 // require using a thread_local variable that is shared between streams.
@@ -675,9 +721,6 @@ std::string AudioStream::getTagsAsString() const {
 
 aaudio_result_t AudioStream::flushFromFrame(AAudio_FlushFromAccuracy accuracy, int64_t* position) {
     ALOGD("%s(%d, %jd)", __func__, accuracy, *position);
-    if (!com_android_media_audioserver_mmap_pcm_offload_support()) {
-        return AAUDIO_ERROR_UNIMPLEMENTED;
-    }
     if (getDirection() != AAUDIO_DIRECTION_OUTPUT ||
         getPerformanceMode() != AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED ||
         (accuracy != AAUDIO_FLUSH_FROM_ACCURACY_UNDEFINED &&
@@ -698,9 +741,6 @@ aaudio_result_t AudioStream::flushFromFrame(AAudio_FlushFromAccuracy accuracy, i
 aaudio_result_t AudioStream::setPlaybackParameters(const AAudioPlaybackParameters* parameters) {
     ALOGD("%s, fallbackMode=%d, stretchMode=%d, pitch=%f, speed=%f", __func__,
           parameters->fallbackMode, parameters->stretchMode, parameters->pitch, parameters->speed);
-    if (!com_android_media_audioserver_mmap_pcm_offload_support()) {
-        return AAUDIO_ERROR_UNIMPLEMENTED;
-    }
     if (getDirection() != AAUDIO_DIRECTION_OUTPUT) {
         return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
     }
@@ -709,9 +749,6 @@ aaudio_result_t AudioStream::setPlaybackParameters(const AAudioPlaybackParameter
 }
 
 aaudio_result_t AudioStream::getPlaybackParameters(AAudioPlaybackParameters* parameters) {
-    if (!com_android_media_audioserver_mmap_pcm_offload_support()) {
-        return AAUDIO_ERROR_UNIMPLEMENTED;
-    }
     if (getDirection() != AAUDIO_DIRECTION_OUTPUT) {
         return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
     }
@@ -766,14 +803,78 @@ android::status_t AudioStream::MyPlayerBase::playerSetVolume() {
         audioStream = mParent.promote();
     }
     if (audioStream) {
+        float volume;
+        {
+            std::lock_guard lg(mSettingsMutex);
+            volume = mVolumeMultiplierL;
+        }
         // No pan and only left volume is taken into account from IPLayer interface
-        audioStream->setDuckAndMuteVolume(mVolumeMultiplierL  /* mPanMultiplierL */);
+        audioStream->setDuckAndMuteVolume(volume /* mPanMultiplierL */);
     }
     return android::NO_ERROR;
 }
 
 void AudioStream::MyPlayerBase::destroy() {
     unregisterWithAudioManager();
+}
+
+namespace {
+
+bool isPcmOffloadRequest(const AAudioStreamOpenRequest& request) {
+    return request.getDirection() == AAUDIO_DIRECTION_OUTPUT &&
+            request.getPerformanceMode() == AAUDIO_PERFORMANCE_MODE_POWER_SAVING_OFFLOADED &&
+            audio_is_linear_pcm(request.getFormat());
+}
+
+} // namespace
+
+// static
+AAudio_FlushFromFrameSupport AudioStream::getFlushFromFrameSupport(
+        const AAudioStreamOpenRequest& request) {
+    if (request.validate() != AAUDIO_OK || !isPcmOffloadRequest(request)) {
+        return AAUDIO_FLUSH_FROM_FRAME_UNSUPPORTED;
+    }
+
+    const audio_config_base_t config = {
+            .sample_rate = static_cast<uint32_t>(request.getSampleRate()),
+            .channel_mask = AAudio_getChannelMaskForOpen(request.getChannelMask(),
+                                                         request.getSamplesPerFrame(),
+                                                         false /*isInput*/),
+            .format = request.getFormat()
+    };
+    audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
+    attr.usage = AAudioConvert_usageToInternal(request.getUsage());
+    attr.content_type = AAudioConvert_contentTypeToInternal(request.getContentType());
+    FlushFromFrameSupport support = FlushFromFrameSupport::UNSUPPORTED;
+    if (AudioGlobal_getMMapPolicy() != AAUDIO_POLICY_NEVER &&
+        AudioGlobal_getPlatformMMapPolicy() != AAUDIO_POLICY_NEVER) {
+        // It is possible to go via mmap path, query if the flush from support on mmap path.
+        if (auto status = android::AudioSystem::getFlushFromFrameSupport(config, attr,
+                static_cast<audio_output_flags_t>(AUDIO_OUTPUT_FLAG_MMAP_NOIRQ |
+                                                  AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD), &support);
+            status == android::NO_ERROR && support == FlushFromFrameSupport::SUPPORTED) {
+            return AAUDIO_FLUSH_FROM_FRAME_SUPPORTED;
+        } else {
+            ALOGW("%s, failed to query flush from frame support on mmap path, error=%d",
+                  __func__, status);
+        }
+    } else {
+        ALOGD("%s, cannot use mmap path as global policy=%d, platform policy=%d",
+              __func__, AudioGlobal_getMMapPolicy(), AudioGlobal_getPlatformMMapPolicy());
+    }
+    // The stream cannot be opened in mmap path, it will only be opened in classical path.
+    // Check if flushFromFrame is supported or not on classical path.
+    support = FlushFromFrameSupport::UNSUPPORTED;
+    if (auto status = android::AudioSystem::getFlushFromFrameSupport(config, attr,
+            static_cast<audio_output_flags_t>(AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD |
+                                              AUDIO_OUTPUT_FLAG_NON_BLOCKING), &support);
+        status == android::NO_ERROR && support == FlushFromFrameSupport::SUPPORTED) {
+        return AAUDIO_FLUSH_FROM_FRAME_SUPPORTED;
+    } else {
+        ALOGW("%s, failed to query flush from frame support on classical path, error=%d",
+              __func__, status);
+    }
+    return AAUDIO_FLUSH_FROM_FRAME_UNSUPPORTED;
 }
 
 }  // namespace aaudio

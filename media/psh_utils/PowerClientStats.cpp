@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
-#include <psh_utils/AudioPowerManager.h>
 #include <psh_utils/PowerClientStats.h>
+
+// go/keep-sorted start
+#include <audio_utils/Time.h>
 #include <mediautils/ServiceUtilities.h>
+#include <psh_utils/AudioPowerManager.h>
+// go/keep-sorted end
 
 namespace android::media::psh_utils {
 
@@ -34,7 +38,11 @@ PowerClientStats::PowerClientStats(uid_t uid, const std::string& additional)
 void PowerClientStats::start(int64_t actualNs) {
     std::lock_guard l(mMutex);
     ++mTokenCount;
-    if (mStartNs == 0) mStartNs = actualNs;
+    if (mStartNs == 0) {
+        mStartNs = actualNs;
+        mLastTimes.push_back({mStartNs, mStartNs});  // add entry for current time.
+        if (mLastTimes.size() > kMaxHistory) mLastTimes.pop_front();
+    }
     if (mStartStats) return;
     mStartStats = PowerStatsCollector::getCollector().getStats(mStatTimeToleranceNs);
     ++mStartCount;
@@ -45,6 +53,7 @@ void PowerClientStats::stop(int64_t actualNs) {
     if (--mTokenCount > 0) return;
     if (mStartNs != 0) {
         mCumulativeNs += actualNs - mStartNs;
+        mLastTimes.back().second = actualNs;  // fill the actual completion time.
         mStartNs = 0;
     }
     if (!mStartStats) return;
@@ -59,6 +68,32 @@ void PowerClientStats::stop(int64_t actualNs) {
     mStartStats.reset();
 }
 
+bool PowerClientStats::setFrozen(pid_t pid, bool frozen) {
+    std::lock_guard l(mMutex);
+    const bool oldFrozen = mFrozenPids.count(pid) > 0;
+    if (frozen) {
+        mFrozenPids.emplace(pid);
+    } else {
+        mFrozenPids.erase(pid);
+    }
+
+    if (!oldFrozen && frozen && mTokenCount > 0) {
+        // log specifically the entry to the frozen state.
+        ++mFrozenWhileActive;
+        mLastFrozenWhileActiveRealTimeNs = systemTime(SYSTEM_TIME_REALTIME);
+    }
+
+    // frozenAndActive is true if either the old state or the new state is frozen
+    // and there is activity (mTokenCount is > 0).
+    const bool frozenAndActive = (oldFrozen || frozen) && mTokenCount > 0;
+    return frozenAndActive;
+}
+
+bool PowerClientStats::isFrozen(pid_t pid) const {
+    std::lock_guard l(mMutex);
+    return mFrozenPids.count(pid) > 0;
+}
+
 void PowerClientStats::addPid(pid_t pid) {
     std::lock_guard l(mMutex);
     mPids.emplace(pid);
@@ -67,17 +102,22 @@ void PowerClientStats::addPid(pid_t pid) {
 size_t PowerClientStats::removePid(pid_t pid) {
     std::lock_guard l(mMutex);
     mPids.erase(pid);
+    mFrozenPids.erase(pid);
     return mPids.size();
 }
 
-std::string PowerClientStats::toString(bool stats, const std::string& prefix) const {
+std::string PowerClientStats::toString(
+        bool stats, const std::string& prefix, LogType logType) const {
     std::lock_guard l(mMutex);
 
     // Adjust delta time and stats if currently running.
     auto cumulativeStats = mCumulativeStats;
     auto cumulativeNs = mCumulativeNs;
     auto maxStats = mMaxStats;
-    if (mStartNs) cumulativeNs += systemTime(SYSTEM_TIME_BOOTTIME) - mStartNs;
+    if (mStartNs) {
+        auto currentTime = systemTime(SYSTEM_TIME_BOOTTIME);
+        cumulativeNs += currentTime - mStartNs;
+    }
     if (mStartStats) {
         const auto stopStats = PowerStatsCollector::getCollector().getStats(mStatTimeToleranceNs);
         if (stopStats && stopStats != mStartStats) {
@@ -91,17 +131,43 @@ std::string PowerClientStats::toString(bool stats, const std::string& prefix) co
         }
     }
 
+    // find state of the client
+    const char* state;
+    const bool anyFrozen = !mFrozenPids.empty();
+    if (mTokenCount > 0) {
+        state = anyFrozen ? "active-frozen" : "active";
+    } else {
+        state = anyFrozen ? "frozen" : "idle";
+    }
+
     std::string result(prefix);
-    result.append("uid: ")
-            .append(std::to_string(mUid))
+    result.append("(").append(state)
+            .append(") uid: ").append(std::to_string(mUid))
             .append(" ").append(mediautils::UidInfo::getInfo(mUid)->package)
             .append("  sessions: ").append(std::to_string(mStartCount))
             .append("  actual_seconds: ").append(std::to_string(cumulativeNs * 1e-9));
     result.append(" {");
     for (auto pid : mPids) {
         result.append(" ").append(std::to_string(pid));
+        if (mFrozenPids.count(pid) > 0) {
+            result.append("(f)");
+        }
     }
     result.append(" }");
+    if (mFrozenWhileActive > 0) {
+        result.append(" { frozen-while-active: ").append(std::to_string(mFrozenWhileActive))
+                .append("  last: ")
+                .append(audio_utils::formatSystemTime(mLastFrozenWhileActiveRealTimeNs))
+                .append(" } ");
+    }
+    if (logType != LogType::kLogForTrack) {
+        // If we don't set the last time, the entry for a currently running app will look like
+        // ...  { 17:01:54.954, ~} }  where the last ~ indicates no difference from the stop time
+        // to the start time.
+        //
+        // it is possible to copy mLastTimes and adjust, but not entirely clear it is worthwhile.
+        result.append(audio_utils::bootTimePairsToString(mLastTimes));
+    }
     if (!mAdditional.empty()) {
         result.append("\n").append(prefix).append(mAdditional);
     }

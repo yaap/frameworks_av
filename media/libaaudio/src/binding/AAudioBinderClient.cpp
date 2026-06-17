@@ -17,18 +17,18 @@
 
 #define LOG_TAG "AAudioBinderClient"
 //#define LOG_NDEBUG 0
-#include <utils/Log.h>
 
+#include "AAudioBinderClient.h"
+
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
+#include <utils/Log.h>
 #include <utils/Mutex.h>
 #include <utils/RefBase.h>
 #include <utils/Singleton.h>
-#include <aaudio/AAudio.h>
-
-#include "AudioEndpointParcelable.h"
-
-#include "binding/AAudioBinderClient.h"
+// go/keep-sorted end
 
 #define AAUDIO_SERVICE_NAME  "media.aaudio"
 
@@ -134,11 +134,12 @@ AAudioHandleInfo AAudioBinderClient::openStream(const AAudioStreamRequest &reque
     return {};
 }
 
-aaudio_result_t AAudioBinderClient::closeStream(const AAudioHandleInfo& streamHandleInfo) {
+aaudio_result_t AAudioBinderClient::closeStream(const AAudioHandleInfo& streamHandleInfo,
+                                                bool force) {
     std::shared_ptr<AAudioServiceInterface> service = getAAudioService();
     if (service.get() == nullptr) return AAUDIO_ERROR_NO_SERVICE;
 
-    return service->closeStream(streamHandleInfo);
+    return service->closeStream(streamHandleInfo, force);
 }
 
 /* Get an immutable description of the in-memory queues
@@ -217,12 +218,12 @@ aaudio_result_t AAudioBinderClient::updateTimestamp(const AAudioHandleInfo& stre
 
 aaudio_result_t AAudioBinderClient::drainStream(const AAudioHandleInfo& streamHandleInfo,
                                                 int64_t wakeUpNanos,
-                                                bool allowSoftWakeUp,
+                                                DrainType drainType,
                                                 TimerQueue::handle_t* handle) {
     std::shared_ptr<AAudioServiceInterface> service = getAAudioService();
     if (service.get() == nullptr) return AAUDIO_ERROR_NO_SERVICE;
 
-    return service->drainStream(streamHandleInfo, wakeUpNanos, allowSoftWakeUp, handle);
+    return service->drainStream(streamHandleInfo, wakeUpNanos, drainType, handle);
 }
 
 aaudio_result_t AAudioBinderClient::activateStream(

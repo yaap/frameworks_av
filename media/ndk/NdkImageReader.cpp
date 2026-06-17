@@ -72,6 +72,7 @@ AImageReader::isSupportedFormatAndUsage(int32_t format, uint64_t usage) {
         case AIMAGE_FORMAT_RAW_PRIVATE:
         case AIMAGE_FORMAT_RAW10:
         case AIMAGE_FORMAT_RAW12:
+        case AIMAGE_FORMAT_RAW14:
         case AIMAGE_FORMAT_DEPTH16:
         case AIMAGE_FORMAT_DEPTH_POINT_CLOUD:
         case AIMAGE_FORMAT_Y8:
@@ -105,6 +106,7 @@ AImageReader::getNumPlanesForFormat(int32_t format) {
         case AIMAGE_FORMAT_RAW_PRIVATE:
         case AIMAGE_FORMAT_RAW10:
         case AIMAGE_FORMAT_RAW12:
+        case AIMAGE_FORMAT_RAW14:
         case AIMAGE_FORMAT_DEPTH16:
         case AIMAGE_FORMAT_DEPTH_POINT_CLOUD:
         case AIMAGE_FORMAT_Y8:
@@ -149,8 +151,7 @@ AImageReader::FrameListener::setImageListener(AImageReader_ImageListener* listen
     return AMEDIA_OK;
 }
 
-void
-AImageReader::BufferRemovedListener::onBufferFreed(const wp<GraphicBuffer>& graphicBuffer) {
+void AImageReader::BufferRemovedListener::onBufferFreed(const sp<GraphicBuffer>& gBuffer) {
     sp<AImageReader> reader = mReader.promote();
     if (reader == nullptr) {
         ALOGW("A frame is available after AImageReader closed!");
@@ -161,7 +162,6 @@ AImageReader::BufferRemovedListener::onBufferFreed(const wp<GraphicBuffer>& grap
         return; // No callback registered
     }
 
-    sp<GraphicBuffer> gBuffer = graphicBuffer.promote();
     if (gBuffer == nullptr) {
         ALOGW("A buffer being freed has gone away!");
         return; // buffer is already destroyed
@@ -447,14 +447,6 @@ AImageReader::acquireImageLocked(/*out*/AImage** image, /*out*/int* acquireFence
     // Check if the producer buffer configurations match what AImageReader configured. Add some
     // extra checks for non-opaque formats.
     if (!isFormatOpaque(readerFmt)) {
-        // Check if the left-top corner of the crop rect is origin, we currently assume this point
-        // is zero, will revisit this once this assumption turns out problematic.
-        Point lt = buffer->mCrop.leftTop();
-        if (lt.x != 0 || lt.y != 0) {
-            ALOGE("Crop left top corner [%d, %d] not at origin", lt.x, lt.y);
-            return AMEDIA_ERROR_UNKNOWN;
-        }
-
         // Check if the producer buffer configurations match what ImageReader configured.
         ALOGV_IF(readerWidth != bufferWidth || readerHeight != bufferHeight,
                 "%s: Buffer size: %dx%d, doesn't match AImageReader configured size: %dx%d",
@@ -471,13 +463,20 @@ AImageReader::acquireImageLocked(/*out*/AImage** image, /*out*/int* acquireFence
                 "%s: reader format(0x%x) and buffer format(0x%x) are not same" ,
                 __FUNCTION__, readerFmt, bufferFmt);
     }
+    AImageCropRect cropRect(0, 0, bufferWidth, bufferHeight);
+    if (!buffer->mCrop.isEmpty()) {
+        cropRect.left = buffer->mCrop.left;
+        cropRect.top = buffer->mCrop.top;
+        cropRect.right = buffer->mCrop.right;
+        cropRect.bottom = buffer->mCrop.bottom;
+    }
 
     if (mHalFormat == HAL_PIXEL_FORMAT_BLOB) {
         *image = new AImage(this, bufferFmt, mUsage, buffer, buffer->mTimestamp,
-                readerWidth, readerHeight, mNumPlanes, bufferDataspace);
+                readerWidth, readerHeight, mNumPlanes, bufferDataspace, cropRect);
     } else {
         *image = new AImage(this, bufferFmt, mUsage, buffer, buffer->mTimestamp,
-                bufferWidth, bufferHeight, mNumPlanes, bufferDataspace);
+                bufferWidth, bufferHeight, mNumPlanes, bufferDataspace, cropRect);
     }
     mAcquiredImages.push_back(*image);
 

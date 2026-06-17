@@ -20,6 +20,7 @@
 #include <atomic>
 #include <memory>
 #include <set>
+#include <vector>
 
 #include "VirtualCameraRenderThread.h"
 #include "VirtualCameraSessionContext.h"
@@ -27,7 +28,6 @@
 #include "aidl/android/hardware/camera/device/BnCameraDeviceSession.h"
 #include "aidl/android/hardware/camera/device/CameraMetadata.h"
 #include "aidl/android/hardware/camera/device/ICameraDeviceCallback.h"
-#include "utils/Mutex.h"
 
 namespace android {
 
@@ -113,10 +113,19 @@ class VirtualCameraSession
 
   std::set<int> getStreamIds() const EXCLUDES(mLock);
 
+  // Fatal session error, notifies framework and stops the streams
+  void onSessionError();
+
+  void notifyDeviceError();
+
  private:
   ndk::ScopedAStatus processCaptureRequest(
       const ::aidl::android::hardware::camera::device::CaptureRequest& request)
       EXCLUDES(mLock);
+
+  bool isInFatalError() const {
+    return mSessionContext.isInFatalError();
+  }
 
   std::weak_ptr<VirtualCameraDevice> mCameraDevice;
 
@@ -144,7 +153,31 @@ class VirtualCameraSession
 
   std::unique_ptr<VirtualCameraRenderThread> mRenderThread GUARDED_BY(mLock);
 
+  // Map of input stream ID to render thread.
+  std::map<int, std::unique_ptr<VirtualCameraRenderThread>> mRenderThreads
+      GUARDED_BY(mLock);
+
   int mCurrentInputStreamId GUARDED_BY(mLock);
+
+  ndk::ScopedAStatus configureMultiStream(
+      const std::shared_ptr<VirtualCameraDevice> virtualCamera,
+      const ::aidl::android::hardware::camera::device::StreamConfiguration&
+          requestedConfiguration,
+      std::vector<::aidl::android::hardware::camera::device::HalStream>*
+          halStreams);
+
+  std::vector<int> mOpenStreams GUARDED_BY(mLock);
+
+  // Frame number of the last frame that was flushed.
+  // Requests with frame number less than or equal to this value are dropped.
+  std::atomic<int> mMaxFrameToFlush{-1};
+
+  void createRenderThread(
+      VirtualCameraDevice& virtualCamera,
+      aidl::android::companion::virtualcamera::SupportedStreamConfiguration&
+          inputConfig) REQUIRES(mLock);
+
+  void closeUnusedRenderThreads() EXCLUDES(mLock);
 };
 
 }  // namespace virtualcamera

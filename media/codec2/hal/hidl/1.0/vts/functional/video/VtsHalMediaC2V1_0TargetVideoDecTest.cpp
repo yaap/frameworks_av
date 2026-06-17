@@ -42,7 +42,6 @@
 #include "media_c2_video_hidl_test_common.h"
 
 constexpr size_t kSmoothnessFactor = 4;
-constexpr size_t kRenderingDepth = 3;
 enum surfaceMode_t { NO_SURFACE, NULL_SURFACE, SURFACE };
 
 using DecodeTestParameters = std::tuple<std::string, std::string, uint32_t, bool, surfaceMode_t>;
@@ -161,8 +160,7 @@ class Codec2VideoDecHidlTestBase : public ::testing::Test {
 
         C2SecureModeTuning secureModeTuning{};
         mComponent->query({&secureModeTuning}, {}, C2_MAY_BLOCK, nullptr);
-        if (secureModeTuning.value == C2Config::SM_READ_PROTECTED ||
-            secureModeTuning.value == C2Config::SM_READ_PROTECTED_WITH_ENCRYPTED) {
+        if (secureModeTuning.value != C2Config::SM_UNPROTECTED) {
             mDisableTest = true;
         }
 
@@ -216,6 +214,10 @@ class Codec2VideoDecHidlTestBase : public ::testing::Test {
                                              .front()
                                              .map()
                                              .get();
+        if (output.error() != C2_OK) {
+            FAIL() << "graphic view map err = " << output.error();
+        }
+
         uint8_t* yPlane = const_cast<uint8_t*>(output.data()[C2PlanarLayout::PLANE_Y]);
         uint8_t* uPlane = const_cast<uint8_t*>(output.data()[C2PlanarLayout::PLANE_U]);
         uint8_t* vPlane = const_cast<uint8_t*>(output.data()[C2PlanarLayout::PLANE_V]);
@@ -259,11 +261,34 @@ class Codec2VideoDecHidlTestBase : public ::testing::Test {
         return;
     }
     bool configPixelFormat(uint32_t format);
+    bool configOutputBufferUsage(uint32_t usage);
 
     // callback function to process onWorkDone received by Listener
     void handleWorkDone(std::list<std::unique_ptr<C2Work>>& workItems) {
         for (std::unique_ptr<C2Work>& work : workItems) {
             if (!work->worklets.empty()) {
+                // handle configuration changes in work done
+                if (work->worklets.front()->output.configUpdate.size() != 0) {
+                    std::vector<std::unique_ptr<C2Param>> updates =
+                            std::move(work->worklets.front()->output.configUpdate);
+                    for (size_t i = 0; i < updates.size(); ++i) {
+                        C2Param* param = updates[i].get();
+                        if (param->index() == C2PortActualDelayTuning::output::PARAM_TYPE) {
+                            C2PortActualDelayTuning::output outputDelay;
+
+                            if (outputDelay.updateFrom(*param)) {
+                                int newMaxDequeueCount = outputDelay.value + kSmoothnessFactor;
+                                ALOGD("handleWorkDone: output delay %u newMaxDequeueCount %d",
+                                      outputDelay.value, newMaxDequeueCount);
+                                if (mSurface && newMaxDequeueCount != mMaxDequeueCount) {
+                                    mMaxDequeueCount = newMaxDequeueCount;
+                                    mSurface->setMaxDequeuedBufferCount(mMaxDequeueCount);
+                                    mComponent->setOutputSurfaceMaxDequeueCount(mMaxDequeueCount);
+                                }
+                            }
+                        }
+                    }
+                }
                 // For decoder components current timestamp always exceeds
                 // previous timestamp if output is in display order
                 typedef std::unique_lock<std::mutex> ULock;
@@ -349,6 +374,10 @@ class Codec2VideoDecHidlTestBase : public ::testing::Test {
     std::shared_ptr<android::Codec2Client::Listener> mListener;
     std::shared_ptr<android::Codec2Client::Component> mComponent;
 
+    int mMaxDequeueCount;
+    android::sp<android::Surface> mSurface;
+    android::sp<android::GLConsumer> mGlConsumer;
+
     std::string mInputFile;
     std::string mInfoFile;
     std::string mChksumFile;
@@ -423,16 +452,25 @@ bool Codec2VideoDecHidlTestBase::getFileNames(size_t streamIndex) {
 }
 
 void setOutputSurface(const std::shared_ptr<android::Codec2Client::Component>& component,
-                      surfaceMode_t surfMode) {
+                      surfaceMode_t surfMode, android::sp<android::Surface>& surface,
+                      android::sp<android::GLConsumer>& glConsumer, int& maxDequeueCount) {
     using namespace android;
     sp<IGraphicBufferProducer> producer = nullptr;
-    sp<GLConsumer> texture = nullptr;
-    sp<ANativeWindow> surface = nullptr;
     static std::atomic_uint32_t surfaceGeneration{0};
     uint32_t generation =
             (getpid() << 10) |
             ((surfaceGeneration.fetch_add(1, std::memory_order_relaxed) + 1) & ((1 << 10) - 1));
-    int32_t maxDequeueBuffers = kSmoothnessFactor + kRenderingDepth;
+    c2_status_t err;
+    uint32_t outputDelay = 0; // Default value
+    std::vector<std::unique_ptr<C2Param>> queried;
+    err = component->query({}, {C2PortActualDelayTuning::output::PARAM_TYPE}, C2_MAY_BLOCK,
+                           &queried);
+    if (err == C2_OK && queried.size() == 1) {
+        C2PortActualDelayTuning::output* delayParam =
+                C2PortActualDelayTuning::output::From(queried[0].get());
+        outputDelay = delayParam->value;
+    }
+    int32_t maxDequeueBuffers = outputDelay + kSmoothnessFactor;
     C2BlockPool::local_id_t poolId = C2BlockPool::BASIC_GRAPHIC;
     std::shared_ptr<Codec2Client::Configurable> configurable;
     bool aidl = ::android::IsCodec2AidlHalSelected();
@@ -444,23 +482,33 @@ void setOutputSurface(const std::shared_ptr<android::Codec2Client::Component>& c
     }
 
     if (surfMode == SURFACE) {
-        sp<Surface> s;
-        std::tie(texture, s) =
+        std::tie(glConsumer, surface) =
                 GLConsumer::create(0 /* tex */, GLConsumer::TEXTURE_EXTERNAL,
                                    true /* useFenceSync */, false /* isControlledByApp */);
-        surface = s;
         ASSERT_NE(surface, nullptr) << "failed to create Surface object";
 
-        producer = s->getIGraphicBufferProducer();
+        surface->connect(NATIVE_WINDOW_API_MEDIA, nullptr);
+        producer = surface->getIGraphicBufferProducer();
         producer->setGenerationNumber(generation);
     }
 
-    c2_status_t err = component->setOutputSurface(poolId, producer, generation,
-                                                  maxDequeueBuffers);
+    // Configure output block pool ID as parameter C2PortBlockPoolsTuning::output to
+    // component.
+    std::unique_ptr<C2PortBlockPoolsTuning::output> poolIdsTuning =
+            C2PortBlockPoolsTuning::output::AllocUnique({poolId});
+
+    std::vector<std::unique_ptr<C2SettingResult>> failures;
+    err = component->config({poolIdsTuning.get()}, C2_MAY_BLOCK, &failures);
+    ALOGD("Configured output block pool ids %llu => %d",
+          (unsigned long long)poolIdsTuning->m.values[0], err);
+    ASSERT_EQ(err, C2_OK) << "config poolId failed";
+
+    err = component->setOutputSurface(poolId, producer, generation, maxDequeueBuffers);
     std::string surfStr = surfMode == NO_SURFACE ? "NO_SURFACE" :
             (surfMode == NULL_SURFACE ? "NULL_SURFACE" : "WITH_SURFACE");
 
     ASSERT_EQ(err, C2_OK) << "setOutputSurface failed, surfMode: " << surfStr;
+    maxDequeueCount = maxDequeueBuffers;
 }
 
 void decodeNFrames(const std::shared_ptr<android::Codec2Client::Component>& component,
@@ -590,6 +638,21 @@ bool Codec2VideoDecHidlTestBase::configPixelFormat(uint32_t format) {
     return false;
 }
 
+// Config output buffer usage
+bool Codec2VideoDecHidlTestBase::configOutputBufferUsage(uint32_t usage) {
+    std::vector<std::unique_ptr<C2SettingResult>> failures;
+    C2StreamUsageTuning::output bufferUsage(0u, usage);
+
+    std::vector<C2Param*> configParam{&bufferUsage};
+    c2_status_t status = mComponent->config(configParam, C2_DONT_BLOCK, &failures);
+    if (status == C2_OK && failures.size() == 0u) {
+        return true;
+    }
+    // do not print er message for now as most components may not yet support this setting
+    ALOGV("config output buffer usage failed");
+    return false;
+}
+
 class Codec2VideoDecDecodeTest : public Codec2VideoDecHidlTestBase,
                                  public ::testing::WithParamInterface<DecodeTestParameters> {
     void getParams() {
@@ -614,12 +677,22 @@ TEST_P(Codec2VideoDecDecodeTest, DecodeTest) {
 
     // Disable md5 checks as tunneled codecs doesn't populate output buffers in C2Work
     mMd5Enable = !mIsTunneledCodec;
+    // Disable md5 checks if reference checksum is not present
     if (!mChksumFile.compare(sResourceDir)) mMd5Enable = false;
+    // Disable md5 checks if decoder is configured in surface mode
+    if (surfMode != surfaceMode_t::NO_SURFACE) mMd5Enable = false;
 
     uint32_t format = HAL_PIXEL_FORMAT_YCBCR_420_888;
     if (!configPixelFormat(format)) {
         std::cout << "[   WARN   ] Test Skipped PixelFormat not configured\n";
         return;
+    }
+
+    // Nudge components to provide output buffers with CPU_READ access for checksum validation.
+    // Result of this request is intentionally ignored as components may not be subscribed to index
+    // 'kParamIndexUsage' and by default could be providing buffers with CPU_READ access.
+    if (mMd5Enable) {
+        (void)configOutputBufferUsage(C2MemoryUsage::CPU_READ);
     }
 
     mFlushedIndices.clear();
@@ -654,7 +727,8 @@ TEST_P(Codec2VideoDecDecodeTest, DecodeTest) {
     }
 
     if (surfMode != NO_SURFACE) {
-        ASSERT_NO_FATAL_FAILURE(setOutputSurface(mComponent, surfMode));
+        ASSERT_NO_FATAL_FAILURE(
+                setOutputSurface(mComponent, surfMode, mSurface, mGlConsumer, mMaxDequeueCount));
     }
 
     ASSERT_NO_FATAL_FAILURE(decodeNFrames(mComponent, mQueueLock, mQueueCondition, mWorkQueue,

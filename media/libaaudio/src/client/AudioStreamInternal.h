@@ -17,17 +17,23 @@
 #ifndef ANDROID_AAUDIO_AUDIO_STREAM_INTERNAL_H
 #define ANDROID_AAUDIO_AUDIO_STREAM_INTERNAL_H
 
-#include <stdint.h>
+// go/keep-sorted start
 #include <aaudio/AAudio.h>
 #include <aaudio/BnAAudioClientCallback.h>
+#include <core/AudioStream.h>
+#include <media/AudioSystem.h>
+#include <utility/AudioClock.h>
+// go/keep-sorted end
 
-#include "binding/AudioEndpointParcelable.h"
+#include <stdint.h>
+
+// go/keep-sorted start
+#include "AAudioFlowGraph.h"
+#include "AudioEndpoint.h"
+#include "IsochronousClockModel.h"
 #include "binding/AAudioServiceInterface.h"
-#include "client/AAudioFlowGraph.h"
-#include "client/AudioEndpoint.h"
-#include "client/IsochronousClockModel.h"
-#include "core/AudioStream.h"
-#include "utility/AudioClock.h"
+#include "binding/AudioEndpointParcelable.h"
+// go/keep-sorted end
 
 using android::sp;
 
@@ -53,7 +59,7 @@ public:
 
     virtual aaudio_result_t processCommands() override;
 
-    aaudio_result_t open(const AudioStreamBuilder &builder) override;
+    aaudio_result_t open(const AAudioStreamOpenRequest& openRequest) override;
 
     aaudio_result_t setBufferSize(int32_t requestedFrames) override;
 
@@ -83,11 +89,16 @@ public:
     // Calculate timeout based on framesPerBurst
     int64_t calculateReasonableTimeout();
 
-    aaudio_result_t startClient(const android::AudioClient& client,
-                                const audio_attributes_t *attr,
-                                audio_port_handle_t *clientHandle);
+    aaudio_result_t createClient(const android::AudioClient& client,
+                                 const audio_attributes_t& attr,
+                                 audio_port_handle_t* clientHandle,
+                                 audio_io_handle_t* ioHandle);
+
+    aaudio_result_t startClient(audio_port_handle_t clientHandle);
 
     aaudio_result_t stopClient(audio_port_handle_t clientHandle);
+
+    aaudio_result_t releaseClient(audio_port_handle_t clientHandle);
 
     aaudio_handle_t getServiceHandle() const {
         return mServiceStreamHandleInfo.getHandle();
@@ -97,11 +108,32 @@ public:
         return mServiceStreamHandleInfo.getServiceLifetimeId();
     }
 
+    audio_port_handle_t getPortId() const {
+        return mPortId;
+    }
+
+    audio_io_handle_t getIoHandle() const {
+        return mIoHandle;
+    }
+
     // AAudioClientCallback interfaces
     android::binder::Status onWakeUp(const android::media::TimerQueueHandle& handle) override;
 
 protected:
     aaudio_result_t requestStart_l() REQUIRES(mStreamMutex) override;
+
+    enum StartType : int32_t {
+        DEFAULT = 0,
+        // The stream is draining. Client has requested stop before but the stream is pending
+        // draining to fully stop.
+        RESUME_WHILE_DRAINING = 1,
+        // This is only used by offload playback. It happens when the client has written a big
+        // amount of data and pause is called before all data is played. In this case, we will
+        // want to keep on playing unprocessed data when resuming.
+        RESUME_WITH_UNPROCESSED_DATA_TO_COPY = 2,
+    };
+    aaudio_result_t requestStart_l(StartType startType = DEFAULT) REQUIRES(mStreamMutex);
+
     aaudio_result_t requestStop_l() REQUIRES(mStreamMutex) override;
 
     aaudio_result_t release_l() REQUIRES(mStreamMutex) override;
@@ -126,9 +158,12 @@ protected:
 
     aaudio_result_t stopCallback_l() REQUIRES(mStreamMutex);
 
-    virtual void prepareBuffersForStart() {}
+    virtual void prepareBuffersForStart_l(
+            StartType startType [[maybe_unused]] = DEFAULT ) REQUIRES(mStreamMutex) {}
 
-    virtual void prepareBuffersForStop() {}
+    virtual aaudio_result_t prepareBuffersForStop_l() REQUIRES(mStreamMutex) {
+        return AAUDIO_OK;
+    }
 
     virtual void advanceClientToMatchServerPosition(int32_t serverMargin) = 0;
 
@@ -162,9 +197,11 @@ protected:
 
     aaudio_result_t startCallback_l() REQUIRES(mStreamMutex);
 
+    virtual int32_t getMinOffloadCallbackProcessingPeriodMs() const { return 0; }
+
     virtual bool mayNeedToDrain() const { return false; }
 
-    virtual void onWakeUp_l(android::audio_utils::TimerQueue::handle_t handle)
+    virtual void onWakeUp_l(android::audio_utils::TimerQueue::handle_t handle [[maybe_unused]])
             REQUIRES(mStreamMutex) {}
 
     IsochronousClockModel    mClockModel;      // timing model for chasing the HAL
@@ -197,6 +234,9 @@ protected:
     int64_t                  mLastFramesRead = 0;
 
     AAudioFlowGraph          mFlowGraph;
+
+    std::unique_ptr<uint8_t[]> mUnprocessedBuffer;
+    android::fifo_frames_t     mUnprocessedFrames = 0;
 
 private:
     /*
@@ -231,6 +271,21 @@ private:
     int32_t                  mDeviceBufferSizeInFrames = 0;
     int32_t                  mBufferCapacityInFrames = 0;
     int32_t                  mDeviceBufferCapacityInFrames = 0;
+
+    audio_port_handle_t      mPortId = AUDIO_PORT_HANDLE_NONE;
+    audio_io_handle_t        mIoHandle = AUDIO_IO_HANDLE_NONE;
+
+    class AAudioDeviceCallback : public android::AudioSystem::AudioDeviceCallback {
+    public:
+        explicit AAudioDeviceCallback(android::wp<AudioStreamInternal>&& stream)
+                : mStream(std::move(stream)) {}
+
+        void onAudioDeviceUpdate(audio_io_handle_t audioIo,
+                                 const android::DeviceIdVector& deviceIds) final;
+    private:
+        const android::wp<AudioStreamInternal> mStream;
+    };
+    sp<AAudioDeviceCallback> mDeviceCallback;
 
 };
 

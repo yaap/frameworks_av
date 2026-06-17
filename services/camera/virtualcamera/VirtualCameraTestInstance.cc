@@ -98,19 +98,18 @@ void TestPatternRenderer::renderThreadLoop(
   const std::chrono::nanoseconds frameDuration(
       static_cast<uint64_t>(1e9 / mFps));
 
-  std::chrono::nanoseconds lastFrameTs(0);
   while (mRunning) {
-    // Wait for appropriate amount of time to meet configured FPS.
-    std::chrono::nanoseconds ts = getCurrentTimestamp();
-    std::chrono::nanoseconds currentDuration = ts - lastFrameTs;
-    if (currentDuration < frameDuration) {
-      std::this_thread::sleep_for(frameDuration - currentDuration);
-    }
+    std::chrono::nanoseconds startTs = getCurrentTimestamp();
 
     // Render the test pattern and update timestamp.
-    testPatternProgram.draw(ts);
+    testPatternProgram.draw(startTs);
     eglDisplayContext.swapBuffers();
-    lastFrameTs = getCurrentTimestamp();
+
+    std::chrono::nanoseconds endTs = getCurrentTimestamp();
+    std::chrono::nanoseconds elapsed = endTs - startTs;
+    if (elapsed < frameDuration) {
+      std::this_thread::sleep_for(frameDuration - elapsed);
+    }
   }
 
   ALOGV("Terminating test client render loop");
@@ -135,9 +134,9 @@ ScopedAStatus VirtualCameraTestInstance::onOpenCamera() {
 
 ScopedAStatus VirtualCameraTestInstance::onStreamConfigured(
     const int32_t streamId, const Surface& surface, const int32_t width,
-    const int32_t height, const Format pixelFormat) {
-  ALOGV("%s: streamId %d, %dx%d pixFmt=%s", __func__, streamId, width, height,
-        toString(pixelFormat).c_str());
+    const int32_t height, const Format imageFormat) {
+  ALOGV("%s: streamId %d, %dx%d imgFmt=%s", __func__, streamId, width, height,
+        toString(imageFormat).c_str());
 
   auto renderer = std::make_shared<TestPatternRenderer>(
       nativeWindowFromSurface(surface), mFps);
@@ -158,7 +157,7 @@ ScopedAStatus VirtualCameraTestInstance::onStreamConfigured(
 ScopedAStatus VirtualCameraTestInstance::onProcessCaptureRequest(
     const int32_t /*streamId*/, const int32_t /*frameId*/,
     const std::optional<VirtualCameraMetadata>& /*in_captureRequestSettings*/) {
-  return ndk::ScopedAStatus();
+  return ScopedAStatus::ok();
 }
 
 ScopedAStatus VirtualCameraTestInstance::onStreamClosed(const int32_t streamId) {

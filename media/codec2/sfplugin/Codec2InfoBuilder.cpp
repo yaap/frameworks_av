@@ -161,10 +161,11 @@ bool addSupportedProfileLevels(
     // dynamic metadata as that needs to be frame accurate.)
     supportsHdr |= (mediaType == MIMETYPE_VIDEO_VP9);
 
-    // HDR support implies 10-bit support. AV1 codecs are also required to
+    // HDR support implies 10-bit support. AV1 and VVC codecs are also required to
     // support 10-bit per CDD.
     // TODO: directly check this from the component interface
-    supports10Bit = (supportsHdr || supportsHdr10Plus) || (mediaType == MIMETYPE_VIDEO_AV1);
+    supports10Bit = (supportsHdr || supportsHdr10Plus) || (mediaType == MIMETYPE_VIDEO_AV1)
+                    || (mediaType == MIMETYPE_VIDEO_VVC);
 
     // If the device doesn't support HDR display, then no codec on the device
     // can advertise support for HDR profiles.
@@ -647,6 +648,13 @@ status_t Codec2InfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
                 attrs |= MediaCodecInfo::kFlagIsEncoder;
             }
             if (trait.owner == "software") {
+                // software codec process does not have access to vendor drivers except
+                // for mapping gralloc buffers.
+                attrs |= MediaCodecInfo::kFlagIsSoftwareOnly;
+            } else if (trait.owner == "__ApexCodecs__") {
+                // APEX codecs run in-the app process that may have access to more vendor
+                // drivers. But all APEX codecs run in a memory-safe environment, so we
+                // can still declare them as software only
                 attrs |= MediaCodecInfo::kFlagIsSoftwareOnly;
             } else {
                 attrs |= MediaCodecInfo::kFlagIsVendor;
@@ -658,6 +666,8 @@ status_t Codec2InfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
                 }
             }
             codecInfo->setAttributes(attrs);
+            ALOGV("setting attributes %04X", attrs);
+
             if (!codec.rank.empty()) {
                 uint32_t xmlRank;
                 char dummy;
@@ -773,20 +783,17 @@ status_t Codec2InfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
                 addSupportedColorFormats(
                         intf, caps.get(), trait, mediaType, it->second);
 
-                if (com::android::media::codec::flags::provider_->large_audio_frame()
-                        && android::media::codec::provider_->large_audio_frame_finish()) {
-                    // Adding feature-multiple-frames when C2LargeFrame param is present
-                    if (trait.domain == C2Component::DOMAIN_AUDIO) {
-                        std::vector<std::shared_ptr<C2ParamDescriptor>> params;
-                        c2_status_t err = intf->querySupportedParams(&params);
-                        if (err == C2_OK) {
-                            for (const auto &paramDesc : params) {
-                                if (C2LargeFrame::output::PARAM_TYPE == paramDesc->index()) {
-                                    std::string featureMultipleFrames =
-                                            std::string(KEY_FEATURE_) + FEATURE_MultipleFrames;
-                                    caps->addDetail(featureMultipleFrames.c_str(), 0);
-                                    break;
-                                }
+                // Adding feature-multiple-frames when C2LargeFrame param is present
+                if (trait.domain == C2Component::DOMAIN_AUDIO) {
+                    std::vector<std::shared_ptr<C2ParamDescriptor>> params;
+                    c2_status_t err = intf->querySupportedParams(&params);
+                    if (err == C2_OK) {
+                        for (const auto &paramDesc : params) {
+                            if (C2LargeFrame::output::PARAM_TYPE == paramDesc->index()) {
+                                std::string featureMultipleFrames =
+                                        std::string(KEY_FEATURE_) + FEATURE_MultipleFrames;
+                                caps->addDetail(featureMultipleFrames.c_str(), 0);
+                                break;
                             }
                         }
                     }

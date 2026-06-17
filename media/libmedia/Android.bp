@@ -108,6 +108,7 @@ cc_library_shared {
         "android.hidl.token@1.0-utils",
         "libbinder",
         "libcutils",
+        "libgui",
         "libhidlbase",
         "liblog",
         "libstagefright_foundation",
@@ -314,6 +315,7 @@ cc_library_shared {
 
     shared_libs: [
         "android.hardware.media.omx@1.0",
+        "libaconfig_storage_read_api_cc",
         "libbinder",
         "liblog",
         "libmedia_codeclist_capabilities",
@@ -349,6 +351,7 @@ cc_library {
 
     defaults: [
         "latest_android_media_audio_common_types_cpp_shared",
+        "libaudioclient_client",
     ],
 
     srcs: [
@@ -409,10 +412,8 @@ cc_library {
         "libbinder",
         "libbinder_ndk",
         //"libsonivox",
-        "framework-permission-aidl-cpp",
         "libaconfig_storage_read_api_cc",
         "libandroidicu",
-        "libaudioclient",
         "libaudiofoundation",
         "libcamera_client",
         "libcutils",
@@ -442,6 +443,7 @@ cc_library {
         "framework-permission-aidl-cpp",
         "resourcemanager_aidl_interface-ndk",
         "libguiflags",
+        "android.media.codec-aconfig-cc",
     ],
 
     export_static_lib_headers: [

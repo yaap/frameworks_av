@@ -64,14 +64,20 @@ public:
             EXCLUDES(mLockStreams);
 
     virtual aaudio_result_t startStream(android::sp<AAudioServiceStreamBase> stream,
-                                        audio_port_handle_t *clientHandle) = 0;
+                                        audio_port_handle_t clientHandle) = 0;
 
     virtual aaudio_result_t stopStream(android::sp<AAudioServiceStreamBase> stream,
                                        audio_port_handle_t clientHandle) = 0;
 
-    virtual aaudio_result_t startClient(const android::AudioClient& /*client*/,
-                                        const audio_attributes_t* /*attr*/,
-                                        audio_port_handle_t* /*clientHandle*/) {
+    virtual aaudio_result_t createClient(const android::AudioClient& /*client*/,
+                                         const audio_attributes_t& /*attr*/,
+                                         audio_port_handle_t* /*portHandlePtr*/,
+                                         audio_io_handle_t* /*ioHandlePtr*/) {
+        ALOGD("AAudioServiceEndpoint::createClient(...) AAUDIO_ERROR_UNAVAILABLE");
+        return AAUDIO_ERROR_UNAVAILABLE;
+    }
+
+    virtual aaudio_result_t startClient(audio_port_handle_t /*clientHandle*/) {
         ALOGD("AAudioServiceEndpoint::startClient(...) AAUDIO_ERROR_UNAVAILABLE");
         return AAUDIO_ERROR_UNAVAILABLE;
     }
@@ -80,6 +86,16 @@ public:
         ALOGD("AAudioServiceEndpoint::stopClient(...) AAUDIO_ERROR_UNAVAILABLE");
         return AAUDIO_ERROR_UNAVAILABLE;
     }
+
+    virtual aaudio_result_t releaseClient(audio_port_handle_t /*clientHandle*/) {
+        ALOGD("AAudioServiceEndpoint::releaseClient(...) AAUDIO_ERROR_UNAVAILABLE");
+        return AAUDIO_ERROR_UNAVAILABLE;
+    }
+
+    // This is used for deferring close. Currently, it is only used by offload playback.
+    // Offload playback is only in exclusive mode. But consider that it may extend to shared
+    // in the future, adding a client handle here as an input parameters.
+    virtual void releaseClientWhenWakeUp(audio_port_handle_t /*clientHandle*/) { }
 
     virtual aaudio_result_t standby() {
         ALOGD("AAudioServiceEndpoint::standby() AAUDIO_ERROR_UNAVAILABLE");

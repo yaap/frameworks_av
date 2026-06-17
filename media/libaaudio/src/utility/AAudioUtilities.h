@@ -17,30 +17,43 @@
 #ifndef UTILITY_AAUDIO_UTILITIES_H
 #define UTILITY_AAUDIO_UTILITIES_H
 
+// go/keep-sorted start
+#include <aaudio/AAudio.h>
+#include <aaudio/AAudioTesting.h>
+#include <android/media/audio/common/AudioMMapPolicyInfo.h>
+#include <android/media/audio/common/FlushFromFrameAccuracy.h>
+#include <media/AudioResamplerPublic.h>
+#include <system/audio.h>
+#include <utils/Errors.h>
+// go/keep-sorted end
+
+// go/keep-sorted start
 #include <algorithm>
 #include <functional>
-#include <vector>
+#include <map>
 #include <stdint.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-#include <android/media/audio/common/AudioMMapPolicyInfo.h>
-#include <media/AudioResamplerPublic.h>
-#include <utils/Errors.h>
-#include <system/audio.h>
-
-#include "aaudio/AAudio.h"
-#include "aaudio/AAudioTesting.h"
+#include <vector>
+// go/keep-sorted end
 
 /**
  * Convert an AAudio result into the closest matching Android status.
+ * The conversion will first find the value from customizedMap and then fallback to standard
+ * conversion.
  */
-android::status_t AAudioConvert_aaudioToAndroidStatus(aaudio_result_t result);
+android::status_t AAudioConvert_aaudioToAndroidStatus(
+        aaudio_result_t result,
+        const std::map<aaudio_result_t, android::status_t>& customizedMap = {});
 
 /**
  * Convert an Android status into the closest matching AAudio result.
+ * The conversion will first find the value from customizedMap and then fallback to standard
+ * conversion.
  */
-aaudio_result_t AAudioConvert_androidToAAudioResult(android::status_t status);
+aaudio_result_t AAudioConvert_androidToAAudioResult(
+        android::status_t status,
+        const std::map<android::status_t, aaudio_result_t>& customizedMap = {});
 
 /**
  * Convert an aaudio_session_id_t to a value that is safe to pass to AudioFlinger.
@@ -374,7 +387,8 @@ audio_devices_t AAudioConvert_aaudioToAndroidDeviceType(
 aaudio_policy_t AAudioConvert_androidToAAudioMMapPolicy(
         android::media::audio::common::AudioMMapPolicy policy);
 
-bool AAudio_isCompressedFormat(audio_format_t format);
+AAudio_FlushFromAccuracy AAudioConvert_androidToAAudioFlushFromAccuracy(
+        android::media::audio::common::FlushFromFrameAccuracy accuracy);
 
 aaudio_result_t AAudioConvert_aaudioToAndroidPlaybackParameters(
         const AAudioPlaybackParameters& parameters, android::AudioPlaybackRate* rate);
@@ -389,5 +403,25 @@ static inline bool isAAudioPlaybackParametersEqual(
             p1.stretchMode == p2.stretchMode &&
             p1.fallbackMode == p2.fallbackMode;
 }
+
+/**
+ * Constants to describe if the capture is privacy sensitive.
+ */
+enum {
+    /**
+     * Let the framework decide the privacy sensitivity. By default, communication and
+     * camcorder captures are considered privacy sensitive
+     */
+    PRIVACY_SENSITIVE_DEFAULT = -1,
+    /**
+     * The capture is not privacy sensitive.
+     */
+    PRIVACY_SENSITIVE_DISABLED = 0,
+    /**
+     * The capture is privacy sensitive.
+     */
+    PRIVACY_SENSITIVE_ENABLED = 1,
+};
+typedef int32_t privacy_sensitive_t;
 
 #endif //UTILITY_AAUDIO_UTILITIES_H
