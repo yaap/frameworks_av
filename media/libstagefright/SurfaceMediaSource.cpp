@@ -310,8 +310,7 @@ status_t SurfaceMediaSource::read(
                     if (item.mTimestamp < mStartTimeNs) {
                         // This frame predates start of record, discard
                         mConsumer->releaseBuffer(
-                                item.mSlot, item.mFrameNumber, EGL_NO_DISPLAY,
-                                EGL_NO_SYNC_KHR, Fence::NO_FENCE);
+                                item.mSlot, item.mFrameNumber, Fence::NO_FENCE);
                         continue;
                     }
                     mStartTimeNs = item.mTimestamp - mStartTimeNs;
@@ -417,9 +416,7 @@ void SurfaceMediaSource::signalBufferReturned(MediaBufferBase *buffer) {
             ALOGV("Slot %d returned, matches handle = %p", id,
                     mSlots[id].mGraphicBuffer->handle);
 
-            mConsumer->releaseBuffer(id, mSlots[id].mFrameNumber,
-                                        EGL_NO_DISPLAY, EGL_NO_SYNC_KHR,
-                    Fence::NO_FENCE);
+            mConsumer->releaseBuffer(id, mSlots[id].mFrameNumber, Fence::NO_FENCE);
 
             buffer->setObserver(0);
             buffer->release();
