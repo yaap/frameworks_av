@@ -96,6 +96,7 @@ DEFINE_C2_ENUM_VALUE_CUSTOM_HELPER(C2Config::profile_t, ({
         { "hevc-main", C2Config::PROFILE_HEVC_MAIN },
         { "hevc-main-10", C2Config::PROFILE_HEVC_MAIN_10 },
         { "hevc-main-still", C2Config::PROFILE_HEVC_MAIN_STILL },
+        { "hevc-main-10-still", C2Config::PROFILE_HEVC_MAIN_10_STILL },
         { "hevc-mono", C2Config::PROFILE_HEVC_MONO },
         { "hevc-mono-12", C2Config::PROFILE_HEVC_MONO_12 },
         { "hevc-mono-16", C2Config::PROFILE_HEVC_MONO_16 },

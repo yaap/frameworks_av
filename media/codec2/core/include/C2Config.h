@@ -553,6 +553,7 @@ enum C2Config::profile_t : uint32_t {
     PROFILE_HEVC_MAIN = _C2_PL_HEVC_BASE,       ///< HEVC (H.265) Main
     PROFILE_HEVC_MAIN_10,                       ///< HEVC (H.265) Main 10
     PROFILE_HEVC_MAIN_STILL,                    ///< HEVC (H.265) Main Still Picture
+    PROFILE_HEVC_MAIN_10_STILL,                 ///< HEVC (H.265) Main 10 Still Picture
     PROFILE_HEVC_MONO = _C2_PL_HEVC_BASE + 0x100,  ///< HEVC (H.265) Monochrome
     PROFILE_HEVC_MONO_12,                       ///< HEVC (H.265) Monochrome 12
     PROFILE_HEVC_MONO_16,                       ///< HEVC (H.265) Monochrome 16

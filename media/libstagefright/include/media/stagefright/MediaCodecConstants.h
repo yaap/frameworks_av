@@ -431,6 +431,7 @@ inline static const char *asString_AV1Level(int32_t i, const char *def = "??") {
 inline constexpr int32_t HEVCProfileMain        = 0x01;
 inline constexpr int32_t HEVCProfileMain10      = 0x02;
 inline constexpr int32_t HEVCProfileMainStill   = 0x04;
+inline constexpr int32_t HEVCProfileMain10Still = 0x20;
 inline constexpr int32_t HEVCProfileMain400     = 0x08;
 inline constexpr int32_t HEVCProfileMain444     = 0x10;
 inline constexpr int32_t HEVCProfileMain10HDR10 = 0x1000;
@@ -441,6 +442,7 @@ inline static const char *asString_HEVCProfile(int32_t i, const char *def = "??"
         case HEVCProfileMain:               return "Main";
         case HEVCProfileMain10:             return "Main10";
         case HEVCProfileMainStill:          return "MainStill";
+        case HEVCProfileMain10Still:        return "Main10Still";
         case HEVCProfileMain400:            return "Main400";
         case HEVCProfileMain444:            return "Main444";
         case HEVCProfileMain10HDR10:        return "Main10HDR10";
