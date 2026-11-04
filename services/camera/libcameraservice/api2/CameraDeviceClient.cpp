@@ -2258,7 +2258,8 @@ binder::Status CameraDeviceClient::finalizeOutputConfigurations(int32_t streamId
                 outSurface, flagtools::convertParcelableSurfaceTypeToSurface(surface),
                 mCameraIdStr, mDevice->info(), mDevice->infoPhysical(physicalId),
                 sensorPixelModesUsed, dynamicRangeProfile, streamUseCase, timestampBase,
-                mirrorMode, colorSpace, /*respectSurfaceSize*/ false, multiResMode);
+                mirrorMode, colorSpace, /*respectSurfaceSize*/ false, multiResMode,
+                mPrivilegedClient);
 
         if (!res.isOk()) return res;
 
